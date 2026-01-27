@@ -113,6 +113,27 @@ dexarb/
 ## Notes
 
 - Rust is installed at `~/.cargo/bin/` (source `~/.cargo/env` to use)
-- VPS has 25GB free disk, 2GB RAM (memory constrained)
+- VPS has 24GB free disk, 2GB RAM (memory constrained)
 - Reference repos cloned with `--depth 1` to save space
 - Private key was corrected (was missing leading `d3`)
+- Using Quickswap instead of Uniswap (V3 has different interface)
+- Poll interval set to 1000ms to avoid Alchemy free tier rate limits
+
+## Session 2 Summary (Day 2)
+
+**Objective**: Implement pool syncing per Day 2 checklist
+
+**Completed**:
+1. Created `src/rust-bot/src/pool/` module with 4 files
+2. Implemented `PoolStateManager` with thread-safe DashMap
+3. Implemented `PoolSyncer` with Uniswap V2 factory/pair ABIs
+4. Fixed factory address (Quickswap instead of Uniswap V3)
+5. Tested live on Polygon mainnet - 4 pools syncing
+6. Release build successful
+7. Committed and pushed to GitHub
+
+**Next Session** (Day 3):
+- Implement opportunity detection in `src/arbitrage/detector.rs`
+- Compare prices across Quickswap and Sushiswap
+- Calculate profitability including gas costs
+- See `docs/phase1_execution_checklist.md` Day 3 section
