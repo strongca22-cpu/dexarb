@@ -3,9 +3,10 @@
 **/*.rs.bk
 *.pdb
 
-# Environment
+# Environment & Secrets
 .env
 .env.local
+.secrets
 
 # IDE
 .idea/
