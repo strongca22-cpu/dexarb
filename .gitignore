@@ -1,0 +1,24 @@
+# Reference repositories (cloned for study, not committed)
+repos/
+
+# Rust build artifacts
+src/rust-bot/target/
+
+# Environment files
+.env
+.env.local
+
+# Logs
+*.log
+logs/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
