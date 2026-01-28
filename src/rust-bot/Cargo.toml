@@ -26,6 +26,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 # Configuration
 dotenv = "0.15"
+toml = "0.8"
+
+# Signal handling (for SIGHUP reload)
+signal-hook = "0.3"
+signal-hook-tokio = { version = "0.3", features = ["futures-v0_3"] }
 
 # Data structures
 dashmap = "5.5"
@@ -54,3 +59,7 @@ path = "src/main.rs"
 [[bin]]
 name = "paper-trading"
 path = "src/bin/paper_trading.rs"
+
+[[bin]]
+name = "data-collector"
+path = "src/bin/data_collector.rs"

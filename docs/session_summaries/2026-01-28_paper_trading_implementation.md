@@ -1,18 +1,18 @@
 # Session Summary: Multi-Config Paper Trading Implementation
 
 **Date:** 2026-01-28
-**Duration:** ~1 session
-**Status:** Build successful, ready for testing
+**Duration:** ~2 sessions
+**Status:** ✅ Running in production (data collection + paper trading)
 
 ---
 
 ## Objective
 
-Implement multi-configuration paper trading system to test 12 strategies simultaneously on live data before deploying capital.
+Implement multi-configuration paper trading system to test strategies simultaneously on live data before deploying capital.
 
 ---
 
-## What Was Done
+## Session 1: Initial Implementation
 
 ### 1. Reviewed External Resources
 
@@ -22,132 +22,157 @@ Implement multi-configuration paper trading system to test 12 strategies simulta
 - `mev-template-rs` - DeGatchi's MEV bot template
 - `flashloan-rs` - Flashloan SDK
 
-**Key insight:** amms-rs uses `Arc<RwLock<StateSpace>>` pattern - exactly what we needed.
+**Key insight:** amms-rs uses `Arc<RwLock<StateSpace>>` pattern.
 
 ### 2. Implemented Artemis Pattern
 
-Created `src/paper_trading/` module with:
+Created `src/paper_trading/` module with Collector/Strategy/Executor traits.
 
-| File | Lines | Purpose |
-|------|-------|---------|
-| `engine.rs` | ~120 | Collector/Strategy/Executor traits + Engine orchestrator |
-| `config.rs` | ~200 | 12 preset configurations (conservative → aggressive) |
-| `strategy.rs` | ~220 | PaperTradingStrategy + StrategyFactory |
-| `executor.rs` | ~180 | SimulatedExecutor with slippage/gas/competition modeling |
-| `metrics.rs` | ~280 | TraderMetrics + MetricsAggregator + reporting |
-| `collector.rs` | ~170 | PoolStateCollector wrapping existing syncer |
-| `mod.rs` | ~215 | Module exports + `run_paper_trading()` |
+---
 
-**Also created:**
-- `src/bin/paper_trading.rs` - Binary entry point
-- `src/lib.rs` - Library exports
+## Session 2: Split Architecture with Hot Reload
 
-### 3. Architecture
+### Problem Identified
+
+User wanted ability to modify paper trading parameters on the fly without restarting data collection.
+
+### Solution: File-Based Architecture
+
+Split into two independent processes:
 
 ```
-PoolStateCollector (single data source)
-         │
-         ▼ PoolUpdateEvent (broadcast)
-    ┌────┴────────────┬────────────┐
-    │                 │            │
-Strategy 1      Strategy 2  ... Strategy 12
-(Conservative)  (Moderate)      (Low Gas)
-    │                 │            │
-    └────────┬────────┴────────────┘
-             ▼ SimulatedTradeAction
-       MultiExecutor
-             │
-             ▼
-       TraderMetrics (per config)
-             │
-             ▼
-       Report every 5 min
+┌─────────────────────────────────────────────────────────────┐
+│              DATA COLLECTOR (always running)                │
+│  - Syncs pools every 1s from Polygon RPC                    │
+│  - Writes to shared JSON state file                         │
+└─────────────────────────┬───────────────────────────────────┘
+                          │
+                          ▼ /data/pool_state.json
+┌─────────────────────────────────────────────────────────────┐
+│              PAPER TRADING (hot-reloadable)                 │
+│  - Reads from shared state file                             │
+│  - Reads config from TOML                                   │
+│  - SIGHUP handler for config reload                         │
+└─────────────────────────────────────────────────────────────┘
 ```
 
-### 4. 12 Preset Configurations
+### New Files Created
 
-1. **Conservative** - $10 min profit, 0.3% slippage, 70% competition
-2. **Moderate** - $5 min profit, 0.5% slippage, 50% competition
-3. **Aggressive** - $3 min profit, 1.0% slippage, 30% competition
-4. **Large Trades** - $5000 max size
-5. **Small Trades** - $100 max size
-6. **WETH Only** - Single pair focus
-7. **WMATIC Only** - Single pair focus
-8. **Multi-Pair** - 3+ pairs
-9. **Fast Polling** - 50ms (20 Hz)
-10. **Slow Polling** - 200ms (5 Hz)
-11. **High Gas** - Up to 200 gwei
-12. **Low Gas** - Up to 50 gwei
+| File | Purpose |
+|------|---------|
+| `src/bin/data_collector.rs` | Data collector binary |
+| `src/bin/paper_trading.rs` | Paper trading binary (v2) |
+| `src/data_collector/mod.rs` | Data collector module |
+| `src/data_collector/shared_state.rs` | JSON shared state |
+| `src/paper_trading/toml_config.rs` | TOML config reader |
+| `config/paper_trading.toml` | Strategy configurations |
 
-### 5. Dependencies Added
+### Dependencies Added
 
 ```toml
-tokio-stream = { version = "0.1", features = ["sync"] }
-async-trait = "0.1"
-futures = "0.3"
-chrono = { version = "0.4", features = ["serde"] }
+toml = "0.8"
+signal-hook = "0.3"
+signal-hook-tokio = { version = "0.3", features = ["futures-v0_3"] }
 ```
 
 ---
 
-## Files Changed/Created
+## Current Architecture
 
-### New Files
-- `src/paper_trading/*.rs` (7 files)
-- `src/bin/paper_trading.rs`
-- `src/lib.rs`
+### Binaries
 
-### Modified Files
-- `Cargo.toml` - Added deps + paper-trading binary
-- `src/config.rs` - Re-export BotConfig
+1. **`data-collector`** - Continuous pool state syncing
+2. **`paper-trading`** - Strategy execution with hot reload
+3. **`dexarb-bot`** - Original monolithic bot (unchanged)
 
----
-
-## Build Status
-
-```
-cargo check ✅ (warnings only, no errors)
-```
-
-Warnings are expected (unused methods in existing code).
-
----
-
-## To Run
+### Running Services
 
 ```bash
-source ~/.cargo/env
-cd /home/botuser/bots/dexarb/src/rust-bot
-cargo run --bin paper-trading
+# View tmux session
+tmux attach -t dexarb
+# Window 0: collector - data collection
+# Window 1: paper - paper trading
+
+# Hot reload config
+nano /home/botuser/bots/dexarb/config/paper_trading.toml
+kill -HUP $(pgrep paper-trading)
 ```
 
-Requires `.env` file with:
-- RPC_URL
-- CHAIN_ID
-- PRIVATE_KEY
-- TRADING_PAIRS
-- etc.
+### Key Files
+
+| Path | Purpose |
+|------|---------|
+| `config/paper_trading.toml` | Edit strategies here |
+| `data/pool_state.json` | Shared state (auto-generated) |
+| `logs/data_collector_*.log` | Collector logs |
+| `logs/paper_trading_*.log` | Paper trading logs |
 
 ---
 
-## Next Steps
+## Current Status
 
-1. **Test live** - Run against Polygon RPC for 24-48 hours
-2. **Review metrics** - Identify best-performing config
-3. **Tune parameters** - Adjust based on real data
-4. **Deploy winner** - Use winning config for live trading
+- **Data Collector:** ✅ Running, syncing 4 pools every 1s
+- **Paper Trading:** ✅ Running, 8 strategies enabled
+- **Opportunities Found:** 0 (spreads too tight ~0.03%, need >0.3%)
+
+### Why No Opportunities?
+
+Current Polygon spreads (~0.03%) are below profit thresholds after accounting for:
+- $0.50 estimated gas cost
+- 15% slippage estimate
+
+To test detection, edit `config/paper_trading.toml`:
+```toml
+min_profit_usd = -1.0  # Allow negative profit for testing
+```
+
+---
+
+## To Resume
+
+1. **Check services:**
+   ```bash
+   tmux ls
+   ps aux | grep -E "(data-collector|paper-trading)"
+   ```
+
+2. **View logs:**
+   ```bash
+   tail -f /home/botuser/bots/dexarb/logs/paper_trading_*.log
+   ```
+
+3. **Modify strategies:**
+   ```bash
+   nano /home/botuser/bots/dexarb/config/paper_trading.toml
+   kill -HUP $(pgrep paper-trading)
+   ```
+
+4. **Restart if needed:**
+   ```bash
+   tmux kill-session -t dexarb
+   # Then restart per instructions in this doc
+   ```
 
 ---
 
 ## Git Status
 
 ```
-Untracked:
-  docs/multi_config_paper_trading.md  (original design doc)
-  docs/session_summaries/             (this summary)
-  src/paper_trading/                  (new module)
-  src/bin/                            (new binary)
-  src/lib.rs                          (new)
+Uncommitted:
+  config/paper_trading.toml          (new - TOML config)
+  data/pool_state.json               (generated - shared state)
+  src/bin/data_collector.rs          (new)
+  src/data_collector/                (new module)
+  src/paper_trading/toml_config.rs   (new)
+  Cargo.toml                         (modified - new deps/bins)
+  src/bin/paper_trading.rs           (modified - v2 architecture)
 ```
 
-Ready to commit when desired.
+---
+
+## Next Steps
+
+1. **Monitor** for 24-48 hours
+2. **Tune thresholds** based on actual spread distribution
+3. **Add more pairs** if spreads improve on other tokens
+4. **Deploy winning config** for live trading

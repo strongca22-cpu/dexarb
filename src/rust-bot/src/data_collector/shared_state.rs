@@ -1,0 +1,189 @@
+//! Shared Pool State
+//!
+//! Provides JSON-based shared state for pool data between
+//! the data collector and paper trading processes.
+//!
+//! Author: AI-Generated
+//! Created: 2026-01-28
+
+use crate::types::{DexType, PoolState, TradingPair};
+use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
+use ethers::types::{Address, U256};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::path::Path;
+
+/// Serializable pool state for JSON storage
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SerializablePoolState {
+    pub dex: String,
+    pub pair_symbol: String,
+    pub address: String,
+    pub token0: String,
+    pub token1: String,
+    pub reserve0: String,
+    pub reserve1: String,
+    pub last_updated: u64,
+    pub price: f64,
+}
+
+impl From<&PoolState> for SerializablePoolState {
+    fn from(pool: &PoolState) -> Self {
+        Self {
+            dex: pool.dex.to_string(),
+            pair_symbol: pool.pair.symbol.clone(),
+            address: format!("{:?}", pool.address),
+            token0: format!("{:?}", pool.pair.token0),
+            token1: format!("{:?}", pool.pair.token1),
+            reserve0: pool.reserve0.to_string(),
+            reserve1: pool.reserve1.to_string(),
+            last_updated: pool.last_updated,
+            price: pool.price(),
+        }
+    }
+}
+
+impl SerializablePoolState {
+    /// Convert back to PoolState
+    pub fn to_pool_state(&self) -> Result<PoolState> {
+        let dex = match self.dex.as_str() {
+            "Uniswap" => DexType::Uniswap,
+            "Sushiswap" => DexType::Sushiswap,
+            _ => DexType::Uniswap,
+        };
+
+        let pair = TradingPair {
+            token0: self.token0.parse().unwrap_or(Address::zero()),
+            token1: self.token1.parse().unwrap_or(Address::zero()),
+            symbol: self.pair_symbol.clone(),
+        };
+
+        Ok(PoolState {
+            dex,
+            pair,
+            address: self.address.parse().unwrap_or(Address::zero()),
+            reserve0: U256::from_dec_str(&self.reserve0).unwrap_or(U256::zero()),
+            reserve1: U256::from_dec_str(&self.reserve1).unwrap_or(U256::zero()),
+            last_updated: self.last_updated,
+        })
+    }
+}
+
+/// Shared state file format
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SharedPoolState {
+    /// Last update timestamp
+    pub last_updated: DateTime<Utc>,
+    /// Current block number
+    pub block_number: u64,
+    /// Chain ID
+    pub chain_id: u64,
+    /// All pool states, keyed by "dex:pair"
+    pub pools: HashMap<String, SerializablePoolState>,
+    /// Sync statistics
+    pub stats: SyncStats,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SyncStats {
+    pub total_syncs: u64,
+    pub successful_syncs: u64,
+    pub failed_syncs: u64,
+    pub start_time: Option<DateTime<Utc>>,
+}
+
+impl SharedPoolState {
+    pub fn new(chain_id: u64) -> Self {
+        Self {
+            last_updated: Utc::now(),
+            block_number: 0,
+            chain_id,
+            pools: HashMap::new(),
+            stats: SyncStats {
+                start_time: Some(Utc::now()),
+                ..Default::default()
+            },
+        }
+    }
+
+    /// Update a pool in the shared state
+    pub fn update_pool(&mut self, pool: &PoolState) {
+        let key = format!("{}:{}", pool.dex, pool.pair.symbol);
+        self.pools.insert(key, SerializablePoolState::from(pool));
+        self.last_updated = Utc::now();
+    }
+
+    /// Get all pools for a specific pair
+    pub fn get_pools_for_pair(&self, pair_symbol: &str) -> Vec<PoolState> {
+        self.pools
+            .values()
+            .filter(|p| p.pair_symbol == pair_symbol)
+            .filter_map(|p| p.to_pool_state().ok())
+            .collect()
+    }
+
+    /// Write to JSON file
+    pub fn write_to_file<P: AsRef<Path>>(&self, path: P) -> Result<()> {
+        let json = serde_json::to_string_pretty(self)
+            .context("Failed to serialize shared state")?;
+
+        // Write to temp file first, then rename (atomic)
+        let temp_path = path.as_ref().with_extension("tmp");
+        std::fs::write(&temp_path, &json)
+            .context("Failed to write temp file")?;
+        std::fs::rename(&temp_path, path.as_ref())
+            .context("Failed to rename temp file")?;
+
+        Ok(())
+    }
+
+    /// Read from JSON file
+    pub fn read_from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
+        let json = std::fs::read_to_string(path.as_ref())
+            .context("Failed to read shared state file")?;
+        let state: Self = serde_json::from_str(&json)
+            .context("Failed to parse shared state JSON")?;
+        Ok(state)
+    }
+
+    /// Check if state is stale (older than threshold)
+    pub fn is_stale(&self, max_age_secs: i64) -> bool {
+        let age = Utc::now().signed_duration_since(self.last_updated);
+        age.num_seconds() > max_age_secs
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_shared_state_roundtrip() {
+        let mut state = SharedPoolState::new(137);
+        state.block_number = 12345;
+
+        let pair = TradingPair {
+            token0: Address::zero(),
+            token1: Address::zero(),
+            symbol: "WETH/USDC".to_string(),
+        };
+
+        let pool = PoolState {
+            dex: DexType::Uniswap,
+            pair,
+            address: Address::zero(),
+            reserve0: U256::from(1000000),
+            reserve1: U256::from(2000000),
+            last_updated: 12345,
+        };
+
+        state.update_pool(&pool);
+
+        let json = serde_json::to_string(&state).unwrap();
+        let restored: SharedPoolState = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(restored.block_number, 12345);
+        assert_eq!(restored.pools.len(), 1);
+    }
+}

@@ -8,6 +8,7 @@
 
 pub mod arbitrage;
 pub mod config;
+pub mod data_collector;
 pub mod paper_trading;
 pub mod pool;
 pub mod types;

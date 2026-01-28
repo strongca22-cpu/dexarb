@@ -26,6 +26,7 @@ pub mod engine;
 pub mod executor;
 pub mod metrics;
 pub mod strategy;
+pub mod toml_config;
 
 // Re-exports for convenience
 pub use collector::{PoolStateCollector, SimpleBlockCollector};
@@ -34,6 +35,7 @@ pub use engine::{Collector, Engine, Executor, Strategy};
 pub use executor::{MultiExecutor, SimulatedExecutor, SimulatedTradeAction};
 pub use metrics::{MetricsAggregator, SimulatedTradeResult, TraderMetrics};
 pub use strategy::{PaperTradingStrategy, PoolUpdateEvent, StrategyFactory};
+pub use toml_config::{TomlConfig, GeneralConfig, StrategyConfig};
 
 use crate::pool::PoolStateManager;
 use crate::types::BotConfig;
