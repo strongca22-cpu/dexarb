@@ -50,6 +50,7 @@ serenity = { version = "0.12", optional = true, default-features = false, featur
 
 [dev-dependencies]
 tokio-test = "0.4"
+rust_decimal_macros = "1.33"
 
 [features]
 default = []
@@ -66,3 +67,7 @@ path = "src/bin/paper_trading.rs"
 [[bin]]
 name = "data-collector"
 path = "src/bin/data_collector.rs"
+
+[[bin]]
+name = "tax-export"
+path = "src/bin/tax_export.rs"

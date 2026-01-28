@@ -214,6 +214,10 @@ pub struct ArbitrageOpportunity {
     pub estimated_profit: f64, // in USD
     pub trade_size: U256,      // in wei
     pub timestamp: u64,
+    /// Pool address where we buy (optional for tax logging)
+    pub buy_pool_address: Option<Address>,
+    /// Pool address where we sell (optional for tax logging)
+    pub sell_pool_address: Option<Address>,
 }
 
 impl ArbitrageOpportunity {
@@ -240,7 +244,26 @@ impl ArbitrageOpportunity {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_secs(),
+            buy_pool_address: None,
+            sell_pool_address: None,
         }
+    }
+
+    /// Create with pool addresses (for tax logging)
+    pub fn with_pool_addresses(
+        pair: TradingPair,
+        buy_dex: DexType,
+        sell_dex: DexType,
+        buy_price: f64,
+        sell_price: f64,
+        trade_size: U256,
+        buy_pool: Address,
+        sell_pool: Address,
+    ) -> Self {
+        let mut opp = Self::new(pair, buy_dex, sell_dex, buy_price, sell_price, trade_size);
+        opp.buy_pool_address = Some(buy_pool);
+        opp.sell_pool_address = Some(sell_pool);
+        opp
     }
 
     pub fn is_profitable(&self, min_profit_usd: f64) -> bool {
@@ -253,12 +276,18 @@ impl ArbitrageOpportunity {
 pub struct TradeResult {
     pub opportunity: String,
     pub tx_hash: Option<String>,
+    pub block_number: Option<u64>,
     pub success: bool,
     pub profit_usd: f64,
     pub gas_cost_usd: f64,
+    pub gas_used_native: f64,
     pub net_profit_usd: f64,
     pub execution_time_ms: u64,
     pub error: Option<String>,
+    /// Amount sent in raw token units
+    pub amount_in: Option<String>,
+    /// Amount received in raw token units
+    pub amount_out: Option<String>,
 }
 
 /// Trading pair configuration (from env)

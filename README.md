@@ -71,6 +71,89 @@ cargo run --release
 
 See [docs/dex-arbitrage-complete-strategy.md](docs/dex-arbitrage-complete-strategy.md) for full plan.
 
+## Adding New DEXes or Trading Pairs
+
+**CRITICAL: TVL Assessment Required**
+
+Before adding any new DEX or trading pair to the monitoring list, you MUST perform a TVL (Total Value Locked) assessment. Dead or illiquid pools generate false arbitrage opportunities that waste computation and produce misleading reports.
+
+### TVL Assessment Checklist
+
+1. **Check on-chain reserves** for each pool address
+2. **Calculate TVL in USD** using current token prices
+3. **Minimum threshold: $10,000 TVL** for inclusion
+4. **Document findings** in verification reports
+
+### How to Check TVL
+
+```python
+# Use pool reserves from pool_state.json
+# TVL = (reserve0 * price0) + (reserve1 * price1)
+# Adjust for token decimals: USDC=6, WETH/WMATIC=18, WBTC=8
+```
+
+### Currently Excluded Pools (< $1000 TVL)
+
+| Pool | DEX | TVL | Reason |
+|------|-----|-----|--------|
+| UNI/USDC | Uniswap | $0.12 | Dead pool |
+| UNI/USDC | Sushiswap | $550 | Low liquidity |
+| LINK/USDC | Uniswap | $10.42 | Dead pool |
+| LINK/USDC | Sushiswap | $86 | Low liquidity |
+| LINK/USDC | Apeswap | $0.01 | Dead pool |
+| WBTC/USDC | Apeswap | $0.09 | Dead pool |
+| WBTC/USDC | Sushiswap | $501 | Low liquidity |
+| WMATIC/USDC | Apeswap | $462 | Low liquidity |
+| UNI/USDC | Apeswap | - | No pool exists |
+
+### Exclusion List Location
+
+Dead pools are excluded in `src/rust-bot/src/bin/paper_trading.rs`:
+
+```rust
+const EXCLUDED_POOLS: &[(&str, &str)] = &[
+    ("Apeswap", "LINK/USDC"),
+    ("Sushiswap", "LINK/USDC"),
+    // ... etc
+];
+```
+
+**Lesson Learned (2026-01-28)**: Without TVL checks, dead V2 pools with $0.12 TVL were being compared to V3 pools, generating $38+ "opportunities" that were completely unfillable.
+
+---
+
+## Tax Logging (IRS Compliance)
+
+Comprehensive tax logging module for US federal tax compliance. See [docs/logging/tax_logging_implementation_plan.md](docs/logging/tax_logging_implementation_plan.md).
+
+### Features
+
+- **TaxRecord**: 34+ fields for IRS Form 8949 compliance
+- **CSV/JSON logging**: Dual format for redundancy
+- **RP2 export**: Compatible with [RP2 tax software](https://github.com/eprbell/rp2)
+- **Price Oracle**: Automatic USD prices from pool state
+
+### Quick Usage
+
+```bash
+# Export tax year to RP2 format
+cargo run --bin tax-export -- --year 2026 --output rp2_2026.csv
+
+# View tax summary
+cargo run --bin tax-export -- --summary --year 2026
+```
+
+### Files
+
+```
+data/tax/
+├── trades_2026.csv    # Primary tax log
+├── trades_2026.jsonl  # JSON backup
+└── rp2_export_2026.csv # RP2 format for tax software
+```
+
+---
+
 ## Repository
 
 - **Remote**: `git@github.com:strongca22-cpu/dexarb.git`

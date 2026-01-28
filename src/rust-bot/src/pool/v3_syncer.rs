@@ -222,6 +222,67 @@ impl<P: Middleware + 'static> V3PoolSyncer<P> {
         Ok(decimals)
     }
 
+    /// Sync a subset of V3 pools (staggered sync to avoid rate limiting)
+    ///
+    /// Instead of syncing all pairs at once (causing RPC bursts), this method
+    /// syncs only pairs[start_idx..end_idx]. Call repeatedly with different
+    /// ranges to eventually sync all pools.
+    ///
+    /// With 7 pairs and syncing 2 at a time, full refresh takes 4 calls.
+    pub async fn sync_v3_pools_subset(
+        &mut self,
+        start_idx: usize,
+        end_idx: usize,
+    ) -> Result<Vec<V3PoolState>> {
+        let factory_address = match self.config.uniswap_v3_factory {
+            Some(addr) => addr,
+            None => {
+                return Ok(vec![]);
+            }
+        };
+
+        let mut pools = Vec::new();
+        let pairs: Vec<_> = self.config.pairs.clone();
+
+        // Only sync pairs in the specified range
+        for pair_config in pairs.iter().skip(start_idx).take(end_idx - start_idx) {
+            let token0: Address = pair_config
+                .token0
+                .parse()
+                .context("Invalid token0 address")?;
+            let token1: Address = pair_config
+                .token1
+                .parse()
+                .context("Invalid token1 address")?;
+
+            let pair = TradingPair::new(token0, token1, pair_config.symbol.clone());
+
+            // Try each fee tier
+            for (fee_tier, dex_type) in V3_FEE_TIERS {
+                match self.sync_v3_pool(factory_address, &pair, fee_tier, dex_type).await {
+                    Ok(Some(pool)) => {
+                        debug!(
+                            "Synced V3 pool: {} @ {}% fee | price={:.6}",
+                            pair.symbol,
+                            fee_tier as f64 / 10000.0,
+                            pool.price(),
+                        );
+                        pools.push(pool);
+                    }
+                    Ok(None) => {
+                        // Pool doesn't exist for this fee tier
+                    }
+                    Err(e) => {
+                        warn!("Failed to sync V3 pool {} @ {}%: {}", pair.symbol, fee_tier as f64 / 10000.0, e);
+                    }
+                }
+            }
+        }
+
+        debug!("V3 subset sync complete: {} pools (pairs {}-{})", pools.len(), start_idx, end_idx);
+        Ok(pools)
+    }
+
     /// Sync a single V3 pool by address (for event-driven updates)
     pub async fn sync_pool_by_address(
         &mut self,

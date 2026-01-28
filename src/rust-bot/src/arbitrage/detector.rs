@@ -128,6 +128,8 @@ impl OpportunityDetector {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_secs(),
+            buy_pool_address: Some(buy_pool.address),
+            sell_pool_address: Some(sell_pool.address),
         })
     }
 

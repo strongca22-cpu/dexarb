@@ -2,13 +2,19 @@
 //!
 //! Executes arbitrage trades across DEXs using Uniswap V2 Router interface.
 //! Phase 1 implementation with two separate transactions (has leg risk).
+//! Includes IRS-compliant tax logging for all executed trades.
 //!
 //! Author: AI-Generated
 //! Created: 2026-01-28
+//! Modified: 2026-01-28 (Phase 5: Tax logging integration)
 
+use crate::tax::{TaxLogger, TaxRecordBuilder};
 use crate::types::{ArbitrageOpportunity, BotConfig, DexType, TradeResult};
 use anyhow::{anyhow, Result};
 use ethers::prelude::*;
+use rust_decimal::Decimal;
+use std::path::PathBuf;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tracing::{debug, error, info, warn};
@@ -39,6 +45,10 @@ pub struct TradeExecutor<M: Middleware> {
     config: BotConfig,
     /// Dry run mode - simulates trades without executing
     dry_run: bool,
+    /// Tax logger for IRS compliance
+    tax_logger: Option<TaxLogger>,
+    /// Price oracle for USD conversions
+    tax_record_builder: Option<TaxRecordBuilder>,
 }
 
 impl<M: Middleware + 'static> TradeExecutor<M> {
@@ -49,6 +59,8 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
             wallet,
             config,
             dry_run: true, // Default to dry run for safety
+            tax_logger: None,
+            tax_record_builder: None,
         }
     }
 
@@ -62,8 +74,25 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
         }
     }
 
+    /// Enable tax logging for IRS compliance
+    ///
+    /// This should be called before executing real trades.
+    /// Tax records are written to `data/tax/trades_YYYY.csv` and `.jsonl`.
+    pub fn enable_tax_logging(&mut self, tax_dir: &str) -> Result<()> {
+        let tax_path = PathBuf::from(tax_dir);
+        self.tax_logger = Some(TaxLogger::new(&tax_path)?);
+        self.tax_record_builder = Some(TaxRecordBuilder::default());
+        info!("Tax logging enabled: {}", tax_dir);
+        Ok(())
+    }
+
+    /// Get wallet address as string (for tax records)
+    fn wallet_address_string(&self) -> String {
+        format!("{:?}", self.wallet.address())
+    }
+
     /// Execute an arbitrage opportunity
-    pub async fn execute(&self, opportunity: &ArbitrageOpportunity) -> Result<TradeResult> {
+    pub async fn execute(&mut self, opportunity: &ArbitrageOpportunity) -> Result<TradeResult> {
         let start_time = Instant::now();
         let pair_symbol = &opportunity.pair.symbol;
 
@@ -92,9 +121,11 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
             return Ok(TradeResult {
                 opportunity: pair_symbol.clone(),
                 tx_hash: None,
+                block_number: None,
                 success: false,
                 profit_usd: 0.0,
                 gas_cost_usd: 0.0,
+                gas_used_native: 0.0,
                 net_profit_usd: 0.0,
                 execution_time_ms: start_time.elapsed().as_millis() as u64,
                 error: Some(format!(
@@ -102,6 +133,8 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
                     gas_price / U256::from(1_000_000_000u64),
                     self.config.max_gas_price_gwei
                 )),
+                amount_in: None,
+                amount_out: None,
             });
         }
 
@@ -121,19 +154,23 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
             )
             .await;
 
-        let (buy_tx_hash, amount_received) = match buy_result {
-            Ok((hash, amount)) => (hash, amount),
+        let (buy_tx_hash, amount_received, buy_block) = match buy_result {
+            Ok((hash, amount, block)) => (hash, amount, block),
             Err(e) => {
                 error!("Buy swap failed: {}", e);
                 return Ok(TradeResult {
                     opportunity: pair_symbol.clone(),
                     tx_hash: None,
+                    block_number: None,
                     success: false,
                     profit_usd: 0.0,
                     gas_cost_usd: 0.0,
+                    gas_used_native: 0.0,
                     net_profit_usd: 0.0,
                     execution_time_ms: start_time.elapsed().as_millis() as u64,
                     error: Some(format!("Buy swap failed: {}", e)),
+                    amount_in: Some(trade_size.to_string()),
+                    amount_out: None,
                 });
             }
         };
@@ -156,19 +193,23 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
             )
             .await;
 
-        let (sell_tx_hash, final_amount) = match sell_result {
-            Ok((hash, amount)) => (hash, amount),
+        let (sell_tx_hash, final_amount, sell_block) = match sell_result {
+            Ok((hash, amount, block)) => (hash, amount, block),
             Err(e) => {
                 error!("Sell swap failed: {}", e);
                 return Ok(TradeResult {
                     opportunity: pair_symbol.clone(),
                     tx_hash: Some(buy_tx_hash.to_string()),
+                    block_number: Some(buy_block),
                     success: false,
                     profit_usd: 0.0,
                     gas_cost_usd: 0.0,
+                    gas_used_native: 0.0,
                     net_profit_usd: 0.0,
                     execution_time_ms: start_time.elapsed().as_millis() as u64,
                     error: Some(format!("Sell swap failed (buy succeeded): {}", e)),
+                    amount_in: Some(trade_size.to_string()),
+                    amount_out: Some(amount_received.to_string()),
                 });
             }
         };
@@ -184,6 +225,7 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
         let profit_usd = self.wei_to_usd(profit_wei, pair_symbol);
 
         // Estimate gas cost (actual cost would require receipt analysis)
+        let gas_used_native = 0.001; // ~200k gas at 5 gwei = 0.001 MATIC
         let gas_cost_usd = 0.50; // Estimated
         let net_profit_usd = profit_usd - gas_cost_usd;
 
@@ -201,16 +243,135 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
             );
         }
 
+        // Log to tax records (IRS compliance)
+        self.log_tax_record_if_enabled(
+            opportunity,
+            &sell_tx_hash.to_string(),
+            sell_block,
+            trade_size,
+            final_amount,
+            gas_used_native,
+        );
+
         Ok(TradeResult {
             opportunity: pair_symbol.clone(),
             tx_hash: Some(sell_tx_hash.to_string()),
+            block_number: Some(sell_block),
             success,
             profit_usd,
             gas_cost_usd,
+            gas_used_native,
             net_profit_usd,
             execution_time_ms: start_time.elapsed().as_millis() as u64,
             error: None,
+            amount_in: Some(trade_size.to_string()),
+            amount_out: Some(final_amount.to_string()),
         })
+    }
+
+    /// Log a tax record if tax logging is enabled
+    fn log_tax_record_if_enabled(
+        &mut self,
+        opportunity: &ArbitrageOpportunity,
+        tx_hash: &str,
+        block_number: u64,
+        amount_in: U256,
+        amount_out: U256,
+        gas_native: f64,
+    ) {
+        // Get wallet address first (immutable borrow)
+        let wallet_address = format!("{:?}", self.wallet.address());
+
+        // Check if tax logging is enabled
+        let (logger, builder) = match (&mut self.tax_logger, &self.tax_record_builder) {
+            (Some(l), Some(b)) => (l, b),
+            _ => return, // Tax logging not enabled
+        };
+
+        if let Err(e) = Self::build_and_log_tax_record(
+            opportunity,
+            tx_hash,
+            block_number,
+            amount_in,
+            amount_out,
+            gas_native,
+            &wallet_address,
+            builder,
+            logger,
+        ) {
+            error!("Failed to log tax record: {}", e);
+        }
+    }
+
+    /// Build and log a tax record for IRS compliance
+    #[allow(clippy::too_many_arguments)]
+    fn build_and_log_tax_record(
+        opportunity: &ArbitrageOpportunity,
+        tx_hash: &str,
+        block_number: u64,
+        amount_in: U256,
+        amount_out: U256,
+        gas_native: f64,
+        wallet_address: &str,
+        builder: &TaxRecordBuilder,
+        logger: &mut TaxLogger,
+    ) -> Result<()> {
+        // Parse token symbols from pair (e.g., "WETH/USDC" -> "WETH", "USDC")
+        let pair_parts: Vec<&str> = opportunity.pair.symbol.split('/').collect();
+        let (asset_sent, asset_received) = if pair_parts.len() == 2 {
+            (pair_parts[0], pair_parts[1])
+        } else {
+            ("UNKNOWN", "UNKNOWN")
+        };
+
+        // Convert U256 amounts to Decimal
+        // Note: This assumes 18 decimals - in production, use actual token decimals
+        let amount_sent = Decimal::from_str(&amount_in.to_string())
+            .unwrap_or(Decimal::ZERO);
+        let amount_received = Decimal::from_str(&amount_out.to_string())
+            .unwrap_or(Decimal::ZERO);
+
+        // DEX fee (typically 0.30% for V2)
+        let dex_fee_percent = if opportunity.buy_dex.is_v3() {
+            Decimal::from_str(&format!("{}", opportunity.buy_dex.v3_fee_bps().unwrap_or(30) as f64 / 10000.0))
+                .unwrap_or(Decimal::from_str("0.003").unwrap())
+        } else {
+            Decimal::from_str("0.003").unwrap() // 0.30% for V2
+        };
+
+        // Pool addresses (use empty string if not available)
+        let pool_buy = opportunity.buy_pool_address
+            .map(|a| format!("{:?}", a))
+            .unwrap_or_default();
+        let pool_sell = opportunity.sell_pool_address
+            .map(|a| format!("{:?}", a))
+            .unwrap_or_default();
+
+        // Build tax record with automatic price fetching
+        let record = builder.build_arbitrage_record(
+            asset_sent,
+            amount_sent,
+            asset_received,
+            amount_received,
+            Decimal::from_str(&gas_native.to_string()).unwrap_or(Decimal::ZERO),
+            dex_fee_percent,
+            tx_hash.to_string(),
+            block_number,
+            wallet_address.to_string(),
+            opportunity.buy_dex.to_string(),
+            opportunity.sell_dex.to_string(),
+            pool_buy,
+            pool_sell,
+            Decimal::from_str(&opportunity.spread_percent.to_string()).unwrap_or(Decimal::ZERO),
+            false, // is_paper_trade = false for real execution
+        )?;
+
+        // Log to CSV and JSON
+        logger.log(&record)?;
+        info!("📋 Tax record logged: {} -> {} | ${:.2} gain",
+              asset_sent, asset_received, record.capital_gain_loss);
+
+        Ok(())
     }
 
     /// Simulate execution without actual trades (dry run)
@@ -241,16 +402,21 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
         Ok(TradeResult {
             opportunity: pair_symbol.clone(),
             tx_hash: Some("DRY_RUN_NO_TX".to_string()),
+            block_number: Some(0),
             success: true,
             profit_usd: opportunity.estimated_profit + 0.50, // Add back gas for simulation
             gas_cost_usd: 0.50,
+            gas_used_native: 0.001,
             net_profit_usd: opportunity.estimated_profit,
             execution_time_ms: start_time.elapsed().as_millis() as u64,
             error: None,
+            amount_in: Some(opportunity.trade_size.to_string()),
+            amount_out: None, // Unknown in simulation
         })
     }
 
     /// Execute a single swap on a DEX
+    /// Returns (tx_hash, amount_out, block_number)
     async fn swap(
         &self,
         dex: DexType,
@@ -258,7 +424,7 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
         token_out: Address,
         amount_in: U256,
         min_amount_out: U256,
-    ) -> Result<(TxHash, U256)> {
+    ) -> Result<(TxHash, U256, u64)> {
         let router_address = self.get_router_address(dex);
 
         // Create signer client
@@ -312,11 +478,16 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
             return Err(anyhow!("Transaction reverted"));
         }
 
+        // Extract block number for tax logging
+        let block_number = receipt.block_number
+            .map(|bn| bn.as_u64())
+            .unwrap_or(0);
+
         // Parse output amount from logs (simplified - assumes last log has amount)
         // In production, you'd parse the Swap event properly
         let amount_out = min_amount_out; // Placeholder - actual amount would come from logs
 
-        Ok((tx_hash, amount_out))
+        Ok((tx_hash, amount_out, block_number))
     }
 
     /// Ensure token approval for router

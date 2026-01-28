@@ -8,16 +8,12 @@
 //! Modified: 2026-01-27 - Added opportunity detection (Day 3)
 //! Modified: 2026-01-28 - Added trade execution (Day 4)
 
-mod arbitrage;
-mod config;
-mod pool;
-mod types;
-
 use anyhow::Result;
-use arbitrage::{OpportunityDetector, TradeExecutor};
-use config::load_config;
+use dexarb_bot::arbitrage::{OpportunityDetector, TradeExecutor};
+use dexarb_bot::config::load_config;
+use dexarb_bot::pool::{PoolStateManager, PoolSyncer};
+use dexarb_bot::types;
 use ethers::prelude::*;
-use pool::{PoolStateManager, PoolSyncer};
 use std::sync::Arc;
 use tracing::{error, info, warn, Level};
 use tracing_subscriber;
@@ -67,7 +63,7 @@ async fn main() -> Result<()> {
     info!("Wallet loaded: {:?}", wallet.address());
 
     // Create executor in DRY RUN mode by default for safety
-    let executor = TradeExecutor::new(Arc::clone(&provider), wallet, config.clone());
+    let mut executor = TradeExecutor::new(Arc::clone(&provider), wallet, config.clone());
     info!("Trade executor initialized (DRY RUN mode)");
 
     // Initial pool sync

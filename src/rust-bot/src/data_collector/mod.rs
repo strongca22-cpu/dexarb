@@ -7,9 +7,15 @@
 //! - V2: Uniswap/Sushiswap/Quickswap/ApeSwap (constant product)
 //! - V3: Uniswap V3 with multiple fee tiers (concentrated liquidity)
 //!
+//! V3 Sync Strategy (Staggered to avoid rate limiting):
+//! - V3 pools are synced in batches of 2 pairs per iteration
+//! - With 7 pairs, full V3 refresh takes ~4 iterations
+//! - This spreads RPC load evenly instead of bursting 105 calls at once
+//!
 //! Author: AI-Generated
 //! Created: 2026-01-28
 //! Modified: 2026-01-28 (added V3 pool support)
+//! Modified: 2026-01-28 (staggered V3 sync to avoid rate limiting)
 
 pub mod shared_state;
 
@@ -79,25 +85,29 @@ where
         }
     }
 
-    // Initial V3 sync (if enabled)
+    // V3 sync: Skip initial bulk sync to avoid rate limiting
+    // V3 pools will be populated gradually via staggered sync in main loop
+    // Full V3 coverage achieved in ~4 iterations (20 seconds at 5000ms)
     let mut v3_pools = Vec::new();
     if v3_enabled {
-        info!("Performing initial V3 sync...");
-        match v3_syncer.sync_all_v3_pools().await {
-            Ok(pools) => {
-                v3_pools = pools;
-                info!("Initial V3 sync complete: {} pools", v3_pools.len());
-            }
-            Err(e) => {
-                warn!("Initial V3 sync failed: {} (continuing with V2 only)", e);
-            }
-        }
+        info!("V3 sync: Skipping initial bulk sync (will populate via staggered sync)");
+        info!("V3 sync: Full V3 coverage expected in ~{} iterations",
+              (config.pairs.len() + 1) / 2); // pairs_per_v3_sync = 2
     }
 
     // Main loop
     let mut interval = tokio::time::interval(poll_interval);
     let mut v3_sync_counter = 0u64;
-    let v3_sync_frequency = 10; // Sync V3 every 10 iterations (less frequent due to higher cost)
+
+    // Staggered V3 sync configuration:
+    // - Sync V3 every iteration (but only a subset of pairs)
+    // - Sync 1 pair per iteration (3 pools = 1 pair × 3 fee tiers)
+    // - With 7 pairs, full refresh takes ~7 iterations (70 seconds at 10000ms)
+    // - This keeps RPC calls very low to avoid Alchemy free tier limits
+    // - At 10s poll: ~6 calls/sec V2 + ~1.5 calls/sec V3 = ~7.5 calls/sec
+    let pairs_per_v3_sync = 1;
+    let total_pairs = config.pairs.len();
+    let mut v3_pair_offset = 0usize;
 
     loop {
         interval.tick().await;
@@ -117,16 +127,30 @@ where
             }
         }
 
-        // Sync V3 pools (less frequently)
-        if v3_enabled && v3_sync_counter % v3_sync_frequency == 0 {
-            match v3_syncer.sync_all_v3_pools().await {
-                Ok(pools) => {
-                    v3_pools = pools;
+        // Sync V3 pools (staggered - only 2 pairs per iteration)
+        if v3_enabled {
+            // Calculate which pairs to sync this iteration
+            let start_idx = v3_pair_offset;
+            let end_idx = std::cmp::min(start_idx + pairs_per_v3_sync, total_pairs);
+
+            // Sync the subset of pairs
+            match v3_syncer.sync_v3_pools_subset(start_idx, end_idx).await {
+                Ok(new_pools) => {
+                    // Merge new pools into existing v3_pools
+                    // Remove old pools for these pairs, add new ones
+                    for pool in new_pools {
+                        // Remove any existing pool with same address
+                        v3_pools.retain(|p: &crate::types::V3PoolState| p.address != pool.address);
+                        v3_pools.push(pool);
+                    }
                 }
                 Err(e) => {
-                    warn!("V3 sync error: {}", e);
+                    warn!("V3 sync error (pairs {}-{}): {}", start_idx, end_idx, e);
                 }
             }
+
+            // Advance to next batch of pairs
+            v3_pair_offset = if end_idx >= total_pairs { 0 } else { end_idx };
         }
 
         // Get current block

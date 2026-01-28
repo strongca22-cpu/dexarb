@@ -11,9 +11,14 @@ pub mod config;
 pub mod data_collector;
 pub mod paper_trading;
 pub mod pool;
+pub mod tax;
 pub mod types;
 
 // Re-export commonly used types
 pub use config::load_config;
 pub use pool::PoolStateManager;
+pub use tax::{
+    export_to_rp2, generate_rp2_config, validate_rp2_export, PriceOracle, TaxCsvLogger,
+    TaxJsonLogger, TaxLogger, TaxRecord, TaxRecordBuilder, TaxSummary,
+};
 pub use types::{ArbitrageOpportunity, BotConfig, DexType, PoolState};

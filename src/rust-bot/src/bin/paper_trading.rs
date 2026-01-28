@@ -256,16 +256,22 @@ async fn run_paper_trading(config_path: &PathBuf) -> Result<bool> {
 const V2_FEE_PERCENT: f64 = 0.30;
 
 /// Dead/illiquid pools to exclude from arbitrage detection
-/// These pools have <$100 TVL and generate false positives
+/// These pools have <$1000 TVL and generate false positives
 /// Format: (DEX name, pair symbol) - verified on-chain 2026-01-28
+/// TVL verified at 18:30 UTC on 2026-01-28
 const EXCLUDED_POOLS: &[(&str, &str)] = &[
-    // Apeswap dead pools (verified <$1 TVL)
+    // Apeswap dead pools
     ("Apeswap", "LINK/USDC"),   // $0.01 TVL
     ("Apeswap", "UNI/USDC"),    // Low liquidity
-    ("Apeswap", "WMATIC/USDC"), // Shows 0 reserves
+    ("Apeswap", "WMATIC/USDC"), // $462 TVL
+    ("Apeswap", "WBTC/USDC"),   // $0.09 TVL - effectively dead
     // Sushiswap low-liquidity pools
-    ("Sushiswap", "LINK/USDC"), // ~$43 TVL - too low for $100+ trades
-    // Add more as discovered
+    ("Sushiswap", "LINK/USDC"), // $86 TVL
+    ("Sushiswap", "UNI/USDC"),  // $550 TVL
+    ("Sushiswap", "WBTC/USDC"), // $501 TVL
+    // Uniswap dead pools
+    ("Uniswap", "UNI/USDC"),    // $0.12 TVL - causes $38 false positives
+    ("Uniswap", "LINK/USDC"),   // $10.42 TVL - causes $20 false positives
 ];
 
 /// Check if a pool should be excluded from arbitrage detection

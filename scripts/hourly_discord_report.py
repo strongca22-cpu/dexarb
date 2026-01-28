@@ -139,12 +139,37 @@ def calculate_stats(opportunities):
     most_opps_strategy = max(strategy_counts, key=strategy_counts.get) if strategy_counts else "N/A"
     most_profit_strategy = max(strategy_profits, key=strategy_profits.get) if strategy_profits else "N/A"
 
-    # Top 3 opportunities by profit
-    top_3 = sorted(opportunities, key=lambda x: x['profit'], reverse=True)[:3]
+    # Deduplicate opportunities by (pair, route) and aggregate
+    # Group by unique (pair, route) combination
+    unique_opps = defaultdict(lambda: {'count': 0, 'total_profit': 0.0, 'example': None})
+    for o in opportunities:
+        key = (o['pair'], o['route'])
+        unique_opps[key]['count'] += 1
+        unique_opps[key]['total_profit'] += o['profit']
+        if unique_opps[key]['example'] is None:
+            unique_opps[key]['example'] = o  # Keep first example for display
+
+    # Build list of unique opportunities with aggregated stats
+    aggregated = []
+    for (pair, route), data in unique_opps.items():
+        example = data['example']
+        aggregated.append({
+            'pair': pair,
+            'route': route,
+            'single_profit': example['profit'],
+            'count': data['count'],
+            'total_profit': data['total_profit'],
+            'midmarket': example['midmarket'],
+            'is_v3': example['is_v3']
+        })
+
+    # Sort by total_profit (accounts for duplicates) - highest total potential first
+    top_3 = sorted(aggregated, key=lambda x: x['total_profit'], reverse=True)[:3]
 
     return {
         'total_opps': total_opps,
         'unique_pairs': list(unique_pairs),
+        'unique_routes': len(unique_opps),  # New: count of unique (pair, route) combos
         'v2_opps': v2_opps,
         'v3_opps': v3_opps,
         'total_profit': total_profit,
@@ -205,10 +230,15 @@ def send_discord_report(stats, period_start, period_end):
     avg_opps_per_strategy = stats['total_opps'] / num_strategies if num_strategies > 0 else 0
     avg_profit_per_strategy = stats['total_profit'] / num_strategies if num_strategies > 0 else 0
 
-    # Format top opportunities
+    # Format top opportunities (now deduplicated with counts)
     top_3_text = ""
     for i, opp in enumerate(stats['top_3'][:3], 1):
-        top_3_text += f"**#{i}** {opp['pair']} | ${opp['profit']:.2f} | {opp['midmarket']:.2f}% spread\n"
+        if opp['count'] > 1:
+            # Show: pair | $single × count = $total | spread
+            top_3_text += f"**#{i}** {opp['pair']} | ${opp['single_profit']:.2f} × {opp['count']} = **${opp['total_profit']:.2f}** | {opp['midmarket']:.2f}%\n"
+        else:
+            # Single occurrence - simpler display
+            top_3_text += f"**#{i}** {opp['pair']} | ${opp['single_profit']:.2f} | {opp['midmarket']:.2f}% spread\n"
         top_3_text += f"    └ {opp['route']}\n"
 
     # Strategy leaderboard
@@ -247,8 +277,8 @@ def send_discord_report(stats, period_start, period_end):
                     "inline": True
                 },
                 {
-                    "name": "Unique Pairs",
-                    "value": f"**{len(stats['unique_pairs'])}** ({', '.join(stats['unique_pairs'][:5])})",
+                    "name": "Unique Pairs/Routes",
+                    "value": f"**{len(stats['unique_pairs'])}** pairs, **{stats['unique_routes']}** routes\n({', '.join(stats['unique_pairs'][:5])})",
                     "inline": True
                 },
                 {

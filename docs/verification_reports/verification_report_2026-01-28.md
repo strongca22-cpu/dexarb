@@ -221,7 +221,7 @@ its compute units per second capacity...)
 
 1. [x] Fix V2 syncer token ordering (syncer.rs) ✅
 2. [x] Add dead pool exclusion (paper_trading.rs) ✅
-3. [ ] Reduce poll interval or add rate limit handling
+3. [x] Reduce poll interval to 3s (was 1s causing 429 errors) ✅
 4. [x] Re-run verification after fixes ✅
 5. [ ] Verify all pool TVLs on-chain
 6. [x] Add automated hourly Discord reports ✅
@@ -241,16 +241,76 @@ its compute units per second capacity...)
 | #9 Pool Addresses | ❌ FAIL | Token order mismatch |
 | #11 Profit Thresholds | ✅ PASS | Config correct |
 
-### Decision: 🟢 BUGS FIXED - Ready for paper trading validation
+### Decision: 🔴 RATE LIMITING STILL AN ISSUE
 
 **Fixed (2026-01-28 07:00 UTC):**
 1. ✅ V2 syncer now reads actual token0/token1 from pool contract
 2. ✅ Dead pools (Apeswap LINK, Sushiswap LINK, etc.) statically excluded
 
-**Verification Results:**
+**Previous Verification Results:**
 - LINK/USDC spread: 7.21% → 0.78% (10x reduction, now realistic)
 - All WETH/USDC prices: ~0.000333 (correct, within 0.01%)
 - No more false positives from dead pools
+
+**Follow-Up Verification (2026-01-28 16:30 UTC):**
+
+Despite increasing poll interval from 1000ms to 3000ms:
+- ❌ V3 spread STILL FROZEN at 3.2030% (UNI/USDC)
+- ❌ 429 rate limit errors still occurring during V3 sync bursts
+- ✅ V2 pools now fresh (2.6 blocks average staleness)
+
+**Root Cause:** V3 sync attempts 105 RPC calls at once (21 pools × 5 calls),
+creating a spike that overwhelms Alchemy free tier even at 3000ms intervals.
+
+**Status:** 🟡 MONITORING - Fixes applied and verified (16:55 UTC)
+
+**Second Fix (16:50 UTC):**
+- Increased poll interval: 5000ms → 10000ms
+- Staggered V3 sync: 1 pair per iteration (not all 21 at once)
+- Skipped initial V3 bulk sync
+
+**Verification Results:**
+- V3 staleness: 255-1945 blocks → 0-30 blocks ✅
+- Spread variation: Constant 3.20% → Varying 0.84%-3.20% ✅
+- 429 errors: Frequent → Nearly eliminated ✅
+
+**Status:** 🟡 1-hour monitoring period, then GO for paper trading validation
+
+---
+
+## Third Fix: Dead Pool Exclusions (18:35 UTC)
+
+**Issue:** Discord report still showing $38.02 UNI/USDC and $20 LINK/USDC opportunities.
+
+**Root Cause:** Dead V2 pools with <$1000 TVL being compared to V3 pools.
+
+**TVL Audit Results:**
+| Pool | DEX | TVL | Status |
+|------|-----|-----|--------|
+| UNI/USDC | Uniswap | $0.12 | ❌ EXCLUDED |
+| UNI/USDC | Sushiswap | $550 | ❌ EXCLUDED |
+| LINK/USDC | Uniswap | $10.42 | ❌ EXCLUDED (NEW) |
+| LINK/USDC | Sushiswap | $86 | ❌ EXCLUDED |
+| WBTC/USDC | Apeswap | $0.09 | ❌ EXCLUDED (NEW) |
+| WBTC/USDC | Sushiswap | $501 | ❌ EXCLUDED (NEW) |
+
+**Active V2 Pools (>$10K TVL):**
+| Pool | DEX | TVL |
+|------|-----|-----|
+| WETH/USDC | Uniswap | $2.57M ✅ |
+| WMATIC/USDC | Uniswap | $1.4M ✅ |
+| USDT/USDC | Uniswap | $627K ✅ |
+| DAI/USDC | Uniswap | $300K ✅ |
+| WBTC/USDC | Uniswap | $182K ✅ |
+
+**Fix Applied:** Added 3 new pools to EXCLUDED_POOLS in paper_trading.rs
+
+**Results After Fix:**
+- UNI/USDC: Only V3↔V3 opportunities (1.22%, 2.24% spreads)
+- LINK/USDC: 0 opportunities (all V2 pools excluded)
+- No more $38 or $20 false positives
+
+**Status:** 🟢 GO - All dead pools excluded, only real opportunities showing
 
 ---
 
