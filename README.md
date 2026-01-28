@@ -25,7 +25,7 @@ dexarb/
 └── README.md
 ```
 
-## Status: Phase 1 Day 2 Complete
+## Status: Phase 1 Day 3 Complete
 
 - [x] Repository initialized
 - [x] Documentation added
@@ -37,7 +37,10 @@ dexarb/
   - PoolStateManager with DashMap
   - PoolSyncer with Uniswap V2 ABIs
   - Quickswap + Sushiswap pools syncing
-- [ ] Opportunity detection (Day 3)
+- [x] **Opportunity detection** (Day 3)
+  - OpportunityDetector with spread calculation
+  - Profit estimation with gas costs
+  - All calculations in Rust (microsecond latency)
 - [ ] Trade execution (Day 4)
 - [ ] Testnet testing (Day 5)
 - [ ] Mainnet deployment (Day 6-7)

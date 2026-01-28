@@ -5,17 +5,20 @@
 //!
 //! Author: AI-Generated
 //! Created: 2026-01-27
+//! Modified: 2026-01-27 - Added opportunity detection (Day 3)
 
+mod arbitrage;
 mod config;
 mod pool;
 mod types;
 
 use anyhow::Result;
+use arbitrage::OpportunityDetector;
 use config::load_config;
 use ethers::prelude::*;
 use pool::{PoolStateManager, PoolSyncer};
 use std::sync::Arc;
-use tracing::{error, info, Level};
+use tracing::{error, info, warn, Level};
 use tracing_subscriber;
 
 #[tokio::main]
@@ -49,6 +52,10 @@ async fn main() -> Result<()> {
 
     // Initialize pool syncer
     let syncer = PoolSyncer::new(Arc::clone(&provider), config.clone(), state_manager.clone());
+
+    // Initialize opportunity detector
+    let detector = OpportunityDetector::new(config.clone(), state_manager.clone());
+    info!("Opportunity detector initialized");
 
     // Initial pool sync
     info!("Performing initial pool sync...");
@@ -84,26 +91,61 @@ async fn main() -> Result<()> {
     }
 
     info!("Bot initialized successfully");
-    info!("Next steps: Implement opportunity detection (Day 3)");
+    info!("Starting opportunity detection loop...");
 
-    // Main monitoring loop (placeholder for now)
+    // Statistics tracking
+    let mut total_opportunities: u64 = 0;
+    let mut total_scans: u64 = 0;
+
+    // Main monitoring loop
     let poll_interval = std::time::Duration::from_millis(config.poll_interval_ms);
     let mut iteration = 0u64;
 
     loop {
         iteration += 1;
+        total_scans += 1;
 
-        // Re-sync pools periodically
+        // Re-sync pools
         if let Err(e) = syncer.initial_sync().await {
             error!("Failed to sync pools: {}", e);
+            tokio::time::sleep(poll_interval).await;
+            continue;
         }
 
-        // Log status every 100 iterations
+        // Scan for opportunities
+        let opportunities = detector.scan_opportunities();
+
+        if !opportunities.is_empty() {
+            total_opportunities += opportunities.len() as u64;
+
+            for opp in &opportunities {
+                info!(
+                    "📊 {} | Spread: {:.2}% | Est. Profit: ${:.2} | Size: {}",
+                    opp.pair.symbol,
+                    opp.spread_percent,
+                    opp.estimated_profit,
+                    opp.trade_size
+                );
+            }
+
+            // TODO Day 4: Execute best opportunity
+            if let Some(best) = opportunities.first() {
+                warn!(
+                    "⏸️  BEST: {} - Buy {:?} Sell {:?} - ${:.2} (execution not yet implemented)",
+                    best.pair.symbol,
+                    best.buy_dex,
+                    best.sell_dex,
+                    best.estimated_profit
+                );
+            }
+        }
+
+        // Log status periodically
         if iteration % 100 == 0 {
             let (count, min_block, max_block) = state_manager.stats();
             info!(
-                "Iteration {}: {} pools synced (blocks {} - {})",
-                iteration, count, min_block, max_block
+                "📈 Iteration {} | {} pools | blocks {}-{} | {} opps found / {} scans",
+                iteration, count, min_block, max_block, total_opportunities, total_scans
             );
         }
 
