@@ -1,8 +1,11 @@
-// Configuration management
-// Load settings from .env file
+//! Configuration management
+//! Load settings from .env file
 
-use crate::types::{BotConfig, TradingPairConfig};
+use crate::types::TradingPairConfig;
 use anyhow::{Context, Result};
+
+// Re-export BotConfig for external access
+pub use crate::types::BotConfig;
 use ethers::types::Address;
 use std::str::FromStr;
 

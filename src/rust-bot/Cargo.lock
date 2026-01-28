@@ -372,6 +372,7 @@ dependencies = [
  "iana-time-zone",
  "js-sys",
  "num-traits",
+ "serde",
  "wasm-bindgen",
  "windows-link",
 ]
@@ -642,10 +643,12 @@ name = "dexarb-bot"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "chrono",
  "dashmap",
  "dotenv",
  "ethers",
+ "futures",
  "once_cell",
  "rust_decimal",
  "serde",
@@ -653,6 +656,7 @@ dependencies = [
  "serenity",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-stream",
  "tokio-test",
  "tracing",
  "tracing-subscriber",
@@ -3527,6 +3531,7 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]
