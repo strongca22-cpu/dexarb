@@ -650,6 +650,7 @@ dependencies = [
  "ethers",
  "futures",
  "once_cell",
+ "reqwest",
  "rust_decimal",
  "serde",
  "serde_json",

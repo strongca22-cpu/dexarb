@@ -42,7 +42,10 @@ rust_decimal = "1.33"
 # Time
 chrono = { version = "0.4", features = ["serde"] }
 
-# Optional: Discord notifications
+# HTTP client for Discord webhooks (using rustls to avoid OpenSSL dependency)
+reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls"] }
+
+# Optional: Discord bot (full framework)
 serenity = { version = "0.12", optional = true, default-features = false, features = ["client", "gateway", "model"] }
 
 [dev-dependencies]

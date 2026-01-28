@@ -22,6 +22,7 @@
 
 pub mod collector;
 pub mod config;
+pub mod discord_alerts;
 pub mod engine;
 pub mod executor;
 pub mod metrics;
@@ -31,6 +32,7 @@ pub mod toml_config;
 // Re-exports for convenience
 pub use collector::{PoolStateCollector, SimpleBlockCollector};
 pub use config::PaperTradingConfig;
+pub use discord_alerts::{AggregatedOpportunity, DiscordAlerter, StrategyMatch, DailySummary, StrategyStats};
 pub use engine::{Collector, Engine, Executor, Strategy};
 pub use executor::{MultiExecutor, SimulatedExecutor, SimulatedTradeAction};
 pub use metrics::{MetricsAggregator, SimulatedTradeResult, TraderMetrics};

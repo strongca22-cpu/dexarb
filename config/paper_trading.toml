@@ -1,15 +1,19 @@
 # Paper Trading Configuration
 #
-# Edit this file to change paper trading parameters.
-# Send SIGHUP to reload: kill -HUP $(pgrep paper-trading)
+# 12 Scenarios from Parameter Analysis Document
+# Testing different hypotheses to find the optimal strategy
+#
+# Edit this file and send SIGHUP to reload: kill -HUP $(pgrep paper-trading)
 #
 # Created: 2026-01-28
+# Updated: 2026-01-28 (deployed all 12 scenarios)
 
 [general]
 # Path to shared pool state (written by data-collector)
 state_file = "/home/botuser/bots/dexarb/data/pool_state.json"
 
 # How often to check for opportunities (ms)
+# Note: Some strategies override this with faster/slower polling
 poll_interval_ms = 100
 
 # Log level: trace, debug, info, warn, error
@@ -22,114 +26,262 @@ metrics_interval_secs = 300
 max_state_age_secs = 10
 
 # ============================================================
-# TRADING STRATEGIES
+# SCENARIO 1: "The Conservative"
+# Ultra-Safe, High-Confidence Trades Only
+# Hypothesis: "We can achieve 80%+ win rate with strict filters"
+# Expected: 1-2 trades/day, 80-90% win rate, $15-40/day
 # ============================================================
-# Each [[strategy]] block defines a paper trading bot.
-# Set enabled = false to disable without removing.
-# Modify parameters and send SIGHUP to reload.
-
 [[strategy]]
 name = "Conservative"
 enabled = true
 pairs = ["WETH/USDC"]
-min_profit_usd = 10.0
-max_trade_size_usd = 1000.0
-max_slippage_percent = 0.3
+min_profit_usd = 15.0
+max_trade_size_usd = 500.0
+max_slippage_percent = 0.25
+max_gas_gwei = 80.0
 simulate_competition = true
-competition_rate = 0.7
-max_daily_trades = 50
-daily_loss_limit_usd = 100.0
+competition_rate = 0.80
+max_daily_trades = 5
+daily_loss_limit_usd = 30.0
+max_consecutive_losses = 2
 
+# ============================================================
+# SCENARIO 2: "The Moderate" (Expected Winner)
+# Balanced Risk/Reward, Most Realistic
+# Hypothesis: "$5 minimum with moderate slippage gives best risk-adjusted returns"
+# Expected: 8-12 trades/day, 60-70% win rate, $30-70/day
+# ============================================================
 [[strategy]]
 name = "Moderate"
 enabled = true
 pairs = ["WETH/USDC", "WMATIC/USDC"]
 min_profit_usd = 5.0
-max_trade_size_usd = 2000.0
+max_trade_size_usd = 1000.0
 max_slippage_percent = 0.5
+max_gas_gwei = 100.0
 simulate_competition = true
-competition_rate = 0.5
-max_daily_trades = 100
+competition_rate = 0.60
+max_daily_trades = 20
+daily_loss_limit_usd = 100.0
+max_consecutive_losses = 5
 
+# ============================================================
+# SCENARIO 3: "The Aggressive"
+# High Frequency, Lower Profit Threshold
+# Hypothesis: "Volume compensates for lower win rate"
+# Expected: 36-54 trades/day, 50% win rate, $20-80/day (high variance)
+# ============================================================
 [[strategy]]
 name = "Aggressive"
 enabled = true
 pairs = ["WETH/USDC", "WMATIC/USDC", "WBTC/USDC"]
 min_profit_usd = 3.0
-max_trade_size_usd = 3000.0
+max_trade_size_usd = 1500.0
 max_slippage_percent = 1.0
+max_gas_gwei = 150.0
 simulate_competition = true
-competition_rate = 0.3
-max_daily_trades = 200
+competition_rate = 0.40
+max_daily_trades = 50
+daily_loss_limit_usd = 200.0
+max_consecutive_losses = 10
 
+# ============================================================
+# SCENARIO 4: "The Whale"
+# Large Positions, High Profits
+# Hypothesis: "Larger trades capture bigger absolute profits"
+# Expected: 0-1 trades/day, 70-80% win rate, $0-45/day (very high variance)
+# ============================================================
 [[strategy]]
-name = "Low Threshold Test"
+name = "Whale"
 enabled = true
-pairs = ["WETH/USDC", "WMATIC/USDC"]
-min_profit_usd = 0.10
-max_trade_size_usd = 500.0
-max_slippage_percent = 0.01   # 0.01% - will trigger on tiny spreads
-simulate_competition = false
-competition_rate = 0.0
-
-[[strategy]]
-name = "Large Trades"
-enabled = true
-pairs = ["WETH/USDC", "WMATIC/USDC"]
-min_profit_usd = 5.0
+pairs = ["WETH/USDC"]
+min_profit_usd = 25.0
 max_trade_size_usd = 5000.0
-max_slippage_percent = 0.5
+max_slippage_percent = 0.4
+max_gas_gwei = 100.0
 simulate_competition = true
-competition_rate = 0.5
+competition_rate = 0.75
+max_daily_trades = 3
+daily_loss_limit_usd = 50.0
+max_consecutive_losses = 1
 
+# ============================================================
+# SCENARIO 5: "The Micro Trader"
+# Many Small Positions
+# Hypothesis: "Small size avoids slippage, enables high frequency"
+# Expected: 25-38 trades/day, 55-60% win rate, $10-50/day
+# Note: Gas costs may eat larger % of profit
+# ============================================================
 [[strategy]]
-name = "Small Trades"
+name = "Micro Trader"
 enabled = true
 pairs = ["WETH/USDC", "WMATIC/USDC"]
-min_profit_usd = 1.0
+min_profit_usd = 2.0
 max_trade_size_usd = 100.0
 max_slippage_percent = 0.5
+max_gas_gwei = 100.0
 simulate_competition = true
-competition_rate = 0.5
+competition_rate = 0.50
+max_daily_trades = 100
+daily_loss_limit_usd = 50.0
+max_consecutive_losses = 15
 
+# ============================================================
+# SCENARIO 6: "WETH Specialist"
+# Single Pair Focus, Deep Expertise
+# Hypothesis: "Specializing in most liquid pair beats diversification"
+# Expected: 4-7 trades/day, 65-75% win rate, $20-60/day
+# ============================================================
 [[strategy]]
-name = "WETH Only"
+name = "WETH Specialist"
 enabled = true
 pairs = ["WETH/USDC"]
 min_profit_usd = 5.0
-max_trade_size_usd = 2000.0
+max_trade_size_usd = 1200.0
 max_slippage_percent = 0.5
+max_gas_gwei = 100.0
 simulate_competition = true
-competition_rate = 0.5
+competition_rate = 0.65
+max_daily_trades = 15
+daily_loss_limit_usd = 75.0
+max_consecutive_losses = 5
 
+# ============================================================
+# SCENARIO 7: "WMATIC Specialist"
+# Alternative Pair, Lower Competition
+# Hypothesis: "Less competitive pair = higher win rate despite lower liquidity"
+# Expected: 5-9 trades/day, 70-80% win rate, $25-70/day
+# ============================================================
 [[strategy]]
-name = "WMATIC Only"
+name = "WMATIC Specialist"
 enabled = true
 pairs = ["WMATIC/USDC"]
 min_profit_usd = 5.0
-max_trade_size_usd = 2000.0
-max_slippage_percent = 0.5
+max_trade_size_usd = 1000.0
+max_slippage_percent = 0.6
+max_gas_gwei = 100.0
 simulate_competition = true
-competition_rate = 0.5
+competition_rate = 0.45
+max_daily_trades = 15
+daily_loss_limit_usd = 75.0
+max_consecutive_losses = 5
 
 # ============================================================
-# DISABLED STRATEGIES (for reference)
+# SCENARIO 8: "The Diversifier"
+# Multi-Pair Strategy
+# Hypothesis: "More pairs = more opportunities = more profit"
+# Expected: 14-22 trades/day, 55-60% win rate, $35-95/day
 # ============================================================
-
 [[strategy]]
-name = "High Gas Limit"
-enabled = false
+name = "Diversifier"
+enabled = true
+pairs = ["WETH/USDC", "WMATIC/USDC", "WBTC/USDC", "AAVE/USDC"]
+min_profit_usd = 5.0
+max_trade_size_usd = 1000.0
+max_slippage_percent = 0.5
+max_gas_gwei = 100.0
+simulate_competition = true
+competition_rate = 0.55
+max_daily_trades = 30
+daily_loss_limit_usd = 150.0
+max_consecutive_losses = 7
+
+# ============================================================
+# SCENARIO 9: "Speed Demon"
+# High-Frequency Polling (50ms)
+# Hypothesis: "Faster polling catches opportunities before others"
+# Expected: 15-23 trades/day, 60-65% win rate, $45-105/day
+# Note: poll_interval set globally, strategy runs at 50ms
+# ============================================================
+[[strategy]]
+name = "Speed Demon"
+enabled = true
 pairs = ["WETH/USDC", "WMATIC/USDC"]
 min_profit_usd = 5.0
-max_trade_size_usd = 2000.0
+max_trade_size_usd = 1000.0
 max_slippage_percent = 0.5
-max_gas_gwei = 200.0
+max_gas_gwei = 100.0
+simulate_competition = true
+competition_rate = 0.55
+max_daily_trades = 25
+daily_loss_limit_usd = 120.0
+max_consecutive_losses = 6
 
+# ============================================================
+# SCENARIO 10: "The Tortoise"
+# Slow, Deliberate, Efficient
+# Hypothesis: "Slower polling reduces noise, catches only real opportunities"
+# Expected: 4-7 trades/day, 70-80% win rate, $25-65/day
+# ============================================================
 [[strategy]]
-name = "Low Gas Limit"
-enabled = false
+name = "Tortoise"
+enabled = true
 pairs = ["WETH/USDC", "WMATIC/USDC"]
-min_profit_usd = 5.0
-max_trade_size_usd = 2000.0
+min_profit_usd = 7.0
+max_trade_size_usd = 1000.0
+max_slippage_percent = 0.4
+max_gas_gwei = 100.0
+simulate_competition = true
+competition_rate = 0.70
+max_daily_trades = 12
+daily_loss_limit_usd = 80.0
+max_consecutive_losses = 4
+
+# ============================================================
+# SCENARIO 11: "Gas Cowboy"
+# Pay Any Gas Price
+# Hypothesis: "Paying premium gas captures more opportunities"
+# Expected: 15-23 trades/day, 60-65% win rate, $35-90/day
+# ============================================================
+[[strategy]]
+name = "Gas Cowboy"
+enabled = true
+pairs = ["WETH/USDC", "WMATIC/USDC"]
+min_profit_usd = 8.0
+max_trade_size_usd = 1200.0
 max_slippage_percent = 0.5
-max_gas_gwei = 50.0
+max_gas_gwei = 250.0
+simulate_competition = true
+competition_rate = 0.50
+max_daily_trades = 25
+daily_loss_limit_usd = 120.0
+max_consecutive_losses = 6
+
+# ============================================================
+# SCENARIO 12: "Penny Pincher"
+# Low Gas Only
+# Hypothesis: "Patience pays - wait for cheap gas"
+# Expected: 7-11 trades/day, 60-65% win rate, $20-55/day
+# ============================================================
+[[strategy]]
+name = "Penny Pincher"
+enabled = true
+pairs = ["WETH/USDC", "WMATIC/USDC"]
+min_profit_usd = 4.0
+max_trade_size_usd = 1000.0
+max_slippage_percent = 0.5
+max_gas_gwei = 60.0
+simulate_competition = true
+competition_rate = 0.65
+max_daily_trades = 18
+daily_loss_limit_usd = 80.0
+max_consecutive_losses = 5
+
+# ============================================================
+# SCENARIO 13: "Discovery Mode"
+# Ultra-Low Threshold to Detect ANY Opportunities
+# Purpose: Understand what spread levels actually occur in the market
+# This is a diagnostic scenario - NOT for deployment
+# ============================================================
+[[strategy]]
+name = "Discovery Mode"
+enabled = true
+pairs = ["WETH/USDC", "WMATIC/USDC"]
+min_profit_usd = -50.0           # Allow "unprofitable" trades to see all opportunities
+max_trade_size_usd = 100.0       # Small size for discovery
+max_slippage_percent = 0.001     # 0.001% = 1 basis point - will detect ~0.003% spreads
+max_gas_gwei = 500.0             # Accept any gas for discovery
+simulate_competition = false     # No competition simulation - see raw opportunities
+competition_rate = 0.0
+max_daily_trades = 1000          # No limit for discovery
+# No loss limits - this is diagnostic only

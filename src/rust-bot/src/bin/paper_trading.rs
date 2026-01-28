@@ -6,18 +6,24 @@
 //! Supports hot-reloading via SIGHUP signal:
 //!   kill -HUP $(pgrep paper-trading)
 //!
+//! Discord Alerts:
+//!   Set DISCORD_WEBHOOK environment variable to enable alerts
+//!   Alerts are sent when opportunities are detected, aggregating across all strategies
+//!
 //! Usage:
 //!   cargo run --bin paper-trading
 //!   cargo run --bin paper-trading -- --config /path/to/config.toml
 //!
 //! Author: AI-Generated
 //! Created: 2026-01-28
+//! Modified: 2026-01-28 (added Discord alerts with opportunity aggregation)
 
 use anyhow::{Context, Result};
+use chrono::Utc;
 use dexarb_bot::data_collector::SharedPoolState;
 use dexarb_bot::paper_trading::{
-    MetricsAggregator, PaperTradingConfig, SimulatedTradeAction,
-    SimulatedExecutor, TraderMetrics, TomlConfig,
+    AggregatedOpportunity, DiscordAlerter, MetricsAggregator, PaperTradingConfig,
+    SimulatedTradeAction, SimulatedExecutor, StrategyMatch, TraderMetrics, TomlConfig,
 };
 use futures::StreamExt;
 use signal_hook::consts::SIGHUP;
@@ -50,6 +56,7 @@ async fn main() -> Result<()> {
     info!("===========================================");
     info!("   DEX Arbitrage Paper Trading (v2)");
     info!("   File-Based Architecture with Hot Reload");
+    info!("   Discord Alerts Enabled");
     info!("===========================================");
 
     // Get config path from args or use default
@@ -122,6 +129,14 @@ async fn run_paper_trading(config_path: &PathBuf) -> Result<bool> {
         executors.insert(strategy.name.clone(), executor);
     }
 
+    // Initialize Discord alerter
+    let discord = DiscordAlerter::new();
+    if discord.is_enabled() {
+        info!("Discord alerts: ENABLED");
+    } else {
+        info!("Discord alerts: DISABLED (set DISCORD_WEBHOOK to enable)");
+    }
+
     let poll_interval = Duration::from_millis(config.general.poll_interval_ms);
     let metrics_interval = Duration::from_secs(config.general.metrics_interval_secs);
     let max_state_age = config.general.max_state_age_secs;
@@ -165,15 +180,36 @@ async fn run_paper_trading(config_path: &PathBuf) -> Result<bool> {
             continue;
         }
 
-        // Process each strategy
-        for strategy_config in &strategies {
-            let actions = scan_for_opportunities(&shared_state, strategy_config, iteration);
+        // Scan ALL strategies and collect opportunities
+        let mut all_opportunities: Vec<RawOpportunity> = Vec::new();
 
-            // Execute actions
-            if let Some(executor) = executors.get(&strategy_config.name) {
-                for action in actions {
-                    // simulate_trade returns SimulatedTradeResult (not Result)
-                    // The result is logged and metrics are updated internally
+        for strategy_config in &strategies {
+            let opps = scan_for_opportunities_detailed(&shared_state, strategy_config, iteration);
+            all_opportunities.extend(opps);
+        }
+
+        // If there are opportunities, aggregate and alert
+        if !all_opportunities.is_empty() {
+            // Aggregate by unique market event (pair + direction)
+            let aggregated = aggregate_opportunities(&all_opportunities, shared_state.block_number);
+
+            // Send Discord alert for each unique opportunity
+            for opp in &aggregated {
+                discord.send_opportunity_alert(opp).await;
+            }
+
+            // Execute trades for each strategy that caught the opportunity
+            for raw_opp in &all_opportunities {
+                if let Some(executor) = executors.get(&raw_opp.strategy_name) {
+                    let action = SimulatedTradeAction {
+                        pair: raw_opp.pair.clone(),
+                        config_name: raw_opp.strategy_name.clone(),
+                        estimated_profit: raw_opp.estimated_profit,
+                        trade_size: raw_opp.trade_size,
+                        buy_dex: raw_opp.buy_dex.clone(),
+                        sell_dex: raw_opp.sell_dex.clone(),
+                        lost_to_competition: raw_opp.lost_to_competition,
+                    };
                     let _result = executor.simulate_trade(&action).await;
                 }
             }
@@ -197,13 +233,35 @@ async fn run_paper_trading(config_path: &PathBuf) -> Result<bool> {
     }
 }
 
-/// Scan for arbitrage opportunities based on strategy config
-fn scan_for_opportunities(
+/// DEX fee constants (Uniswap V2 / Sushiswap = 0.3% per swap)
+const DEX_FEE_PERCENT: f64 = 0.30;
+const ROUND_TRIP_FEE_PERCENT: f64 = DEX_FEE_PERCENT * 2.0;  // 0.6% for buy + sell
+
+/// Raw opportunity from a single strategy scan
+#[derive(Debug, Clone)]
+struct RawOpportunity {
+    pair: String,
+    strategy_name: String,
+    midmarket_spread: f64,
+    executable_spread: f64,
+    buy_dex: String,
+    sell_dex: String,
+    buy_price: f64,
+    sell_price: f64,
+    estimated_profit: f64,
+    trade_size: f64,
+    lost_to_competition: bool,
+}
+
+/// Scan for arbitrage opportunities based on strategy config (detailed version)
+///
+/// Returns raw opportunities with all pricing details for aggregation
+fn scan_for_opportunities_detailed(
     shared_state: &SharedPoolState,
     config: &PaperTradingConfig,
     _iteration: u64,
-) -> Vec<SimulatedTradeAction> {
-    let mut actions = Vec::new();
+) -> Vec<RawOpportunity> {
+    let mut opportunities = Vec::new();
 
     for pair_symbol in &config.pairs {
         // Get pools for this pair
@@ -226,25 +284,33 @@ fn scan_for_opportunities(
                     continue;
                 }
 
-                // Check spread in both directions
-                let (spread, buy_dex, sell_dex, _buy_price, _sell_price) = if price_b > price_a {
+                // Calculate MIDMARKET spread (before fees)
+                let (midmarket_spread, buy_dex, sell_dex, buy_price, sell_price) = if price_b > price_a {
                     let spread = (price_b - price_a) / price_a;
-                    (spread, pool_a.dex, pool_b.dex, price_a, price_b)
+                    (spread, pool_a.dex.to_string(), pool_b.dex.to_string(), price_a, price_b)
                 } else {
                     let spread = (price_a - price_b) / price_b;
-                    (spread, pool_b.dex, pool_a.dex, price_b, price_a)
+                    (spread, pool_b.dex.to_string(), pool_a.dex.to_string(), price_b, price_a)
                 };
 
-                // Check if spread exceeds threshold
-                let min_spread = config.max_slippage_percent / 100.0;
-                if spread <= min_spread {
+                // Calculate EXECUTABLE spread (after DEX fees)
+                let executable_spread = midmarket_spread - (ROUND_TRIP_FEE_PERCENT / 100.0);
+
+                // Skip if executable spread is negative (fees exceed price difference)
+                if executable_spread <= 0.0 {
                     continue;
                 }
 
-                // Estimate profit
-                let gross = spread * config.max_trade_size_usd;
-                let estimated_gas = 0.50;
-                let estimated_slippage = gross * 0.15;
+                // Check if executable spread exceeds threshold
+                let min_spread = config.max_slippage_percent / 100.0;
+                if executable_spread <= min_spread {
+                    continue;
+                }
+
+                // Estimate profit using EXECUTABLE spread
+                let gross = executable_spread * config.max_trade_size_usd;
+                let estimated_gas = 0.50;  // ~$0.50 on Polygon
+                let estimated_slippage = gross * 0.10;  // 10% price impact estimate
                 let estimated_profit = (gross - estimated_gas - estimated_slippage).max(0.0);
 
                 if estimated_profit < config.min_profit_usd {
@@ -253,7 +319,6 @@ fn scan_for_opportunities(
 
                 // Simulate competition loss
                 let lost_to_competition = if config.simulate_competition {
-                    use chrono::Utc;
                     let seed = Utc::now().timestamp_nanos_opt().unwrap_or(0) as f64;
                     let roll = (seed % 1000.0) / 1000.0;
                     roll < config.competition_rate
@@ -262,30 +327,78 @@ fn scan_for_opportunities(
                 };
 
                 info!(
-                    "[{}] {} Opportunity: {} | Spread: {:.4}% | Est. Profit: ${:.2} | {} -> {}",
+                    "[{}] {} Opportunity: {} | Midmarket: {:.4}% | Executable: {:.4}% | Est. Profit: ${:.2} | {} -> {}",
                     config.name,
                     if lost_to_competition { "LOST" } else { "FOUND" },
                     pair_symbol,
-                    spread * 100.0,
+                    midmarket_spread * 100.0,
+                    executable_spread * 100.0,
                     estimated_profit,
                     buy_dex,
                     sell_dex
                 );
 
-                actions.push(SimulatedTradeAction {
+                opportunities.push(RawOpportunity {
                     pair: pair_symbol.clone(),
-                    config_name: config.name.clone(),
+                    strategy_name: config.name.clone(),
+                    midmarket_spread,
+                    executable_spread,
+                    buy_dex,
+                    sell_dex,
+                    buy_price,
+                    sell_price,
                     estimated_profit,
                     trade_size: config.max_trade_size_usd,
-                    buy_dex: buy_dex.to_string(),
-                    sell_dex: sell_dex.to_string(),
                     lost_to_competition,
                 });
             }
         }
     }
 
-    actions
+    opportunities
+}
+
+/// Aggregate raw opportunities by unique market event (pair + direction)
+fn aggregate_opportunities(
+    raw_opportunities: &[RawOpportunity],
+    block_number: u64,
+) -> Vec<AggregatedOpportunity> {
+    // Group by pair + direction key
+    let mut groups: HashMap<String, Vec<&RawOpportunity>> = HashMap::new();
+
+    for opp in raw_opportunities {
+        let key = format!("{}:{}:{}", opp.pair, opp.buy_dex, opp.sell_dex);
+        groups.entry(key).or_default().push(opp);
+    }
+
+    // Convert each group to an AggregatedOpportunity
+    groups.values()
+        .filter_map(|group| {
+            let first = group.first()?;
+
+            let strategies_caught: Vec<StrategyMatch> = group.iter()
+                .map(|opp| StrategyMatch {
+                    name: opp.strategy_name.clone(),
+                    estimated_profit: opp.estimated_profit,
+                    trade_size: opp.trade_size,
+                    lost_to_competition: opp.lost_to_competition,
+                })
+                .collect();
+
+            Some(AggregatedOpportunity {
+                pair: first.pair.clone(),
+                block_number,
+                midmarket_spread_pct: first.midmarket_spread * 100.0,
+                executable_spread_pct: first.executable_spread * 100.0,
+                buy_dex: first.buy_dex.clone(),
+                sell_dex: first.sell_dex.clone(),
+                buy_price: first.buy_price,
+                sell_price: first.sell_price,
+                strategies_caught,
+                timestamp: Utc::now(),
+            })
+        })
+        .collect()
 }
 
 /// Report metrics for all strategies

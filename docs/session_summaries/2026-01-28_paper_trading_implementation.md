@@ -1,8 +1,8 @@
 # Session Summary: Multi-Config Paper Trading Implementation
 
 **Date:** 2026-01-28
-**Duration:** ~2 sessions
-**Status:** ✅ Running in production (data collection + paper trading)
+**Duration:** ~3 sessions
+**Status:** ✅ Running in production (data collection + paper trading + Discord alerts)
 
 ---
 
@@ -53,26 +53,46 @@ Split into two independent processes:
 │  - Reads from shared state file                             │
 │  - Reads config from TOML                                   │
 │  - SIGHUP handler for config reload                         │
+│  - Discord webhook alerts                                   │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-### New Files Created
+---
 
-| File | Purpose |
-|------|---------|
-| `src/bin/data_collector.rs` | Data collector binary |
-| `src/bin/paper_trading.rs` | Paper trading binary (v2) |
-| `src/data_collector/mod.rs` | Data collector module |
-| `src/data_collector/shared_state.rs` | JSON shared state |
-| `src/paper_trading/toml_config.rs` | TOML config reader |
-| `config/paper_trading.toml` | Strategy configurations |
+## Session 3: Executable Spread Fix + Discord Alerts
 
-### Dependencies Added
+### Critical Bug Fix: Midmarket vs Executable Spread
 
+**Problem:** Original code measured midmarket spread (raw price difference between DEXs).
+This incorrectly showed ~0.29% opportunities that would actually be unprofitable.
+
+**Solution:** Calculate executable spread = midmarket spread - DEX fees (0.6% round trip)
+
+```rust
+const DEX_FEE_PERCENT: f64 = 0.30;  // 0.3% per swap
+const ROUND_TRIP_FEE_PERCENT: f64 = DEX_FEE_PERCENT * 2.0;  // 0.6%
+
+let executable_spread = midmarket_spread - (ROUND_TRIP_FEE_PERCENT / 100.0);
+```
+
+**Result:** 0.29% midmarket spread becomes -0.31% executable (unprofitable). Need >0.75-1.0% midmarket for profit.
+
+### Added Discord Alerts
+
+New module `src/paper_trading/discord_alerts.rs`:
+- Sends webhook notifications when opportunities detected
+- Aggregates across all 13 strategies
+- Shows which strategies caught it, won/lost to competition, best strategy, profit range
+
+### Added Discovery Mode (Scenario 13)
+
+Ultra-low threshold strategy to detect ANY opportunities for market analysis:
 ```toml
-toml = "0.8"
-signal-hook = "0.3"
-signal-hook-tokio = { version = "0.3", features = ["futures-v0_3"] }
+[[strategy]]
+name = "Discovery Mode"
+min_profit_usd = -50.0
+max_slippage_percent = 0.001
+simulate_competition = false
 ```
 
 ---
@@ -82,7 +102,7 @@ signal-hook-tokio = { version = "0.3", features = ["futures-v0_3"] }
 ### Binaries
 
 1. **`data-collector`** - Continuous pool state syncing
-2. **`paper-trading`** - Strategy execution with hot reload
+2. **`paper-trading`** - Strategy execution with hot reload + Discord alerts
 3. **`dexarb-bot`** - Original monolithic bot (unchanged)
 
 ### Running Services
@@ -91,7 +111,7 @@ signal-hook-tokio = { version = "0.3", features = ["futures-v0_3"] }
 # View tmux session
 tmux attach -t dexarb
 # Window 0: collector - data collection
-# Window 1: paper - paper trading
+# Window 1: paper - paper trading with Discord
 
 # Hot reload config
 nano /home/botuser/bots/dexarb/config/paper_trading.toml
@@ -102,29 +122,56 @@ kill -HUP $(pgrep paper-trading)
 
 | Path | Purpose |
 |------|---------|
-| `config/paper_trading.toml` | Edit strategies here |
+| `config/paper_trading.toml` | 13 strategy configurations |
+| `src/rust-bot/.env` | Discord webhook + RPC config |
 | `data/pool_state.json` | Shared state (auto-generated) |
-| `logs/data_collector_*.log` | Collector logs |
 | `logs/paper_trading_*.log` | Paper trading logs |
+| `src/paper_trading/discord_alerts.rs` | Discord notification module |
+
+---
+
+## 13 Paper Trading Strategies
+
+| # | Strategy | Threshold | Trade Size | Competition |
+|---|----------|-----------|------------|-------------|
+| 1 | Conservative | 0.25% | $500 | 80% |
+| 2 | Moderate | 0.50% | $1,000 | 60% |
+| 3 | Aggressive | 1.00% | $1,500 | 40% |
+| 4 | Whale | 0.40% | $5,000 | 75% |
+| 5 | Micro Trader | 0.50% | $100 | 50% |
+| 6 | WETH Specialist | 0.50% | $1,200 | 65% |
+| 7 | WMATIC Specialist | 0.60% | $1,000 | 45% |
+| 8 | Diversifier | 0.50% | $1,000 | 55% |
+| 9 | Speed Demon | 0.50% | $1,000 | 55% |
+| 10 | Tortoise | 0.40% | $1,000 | 70% |
+| 11 | Gas Cowboy | 0.50% | $1,200 | 50% |
+| 12 | Penny Pincher | 0.50% | $1,000 | 65% |
+| 13 | Discovery Mode | 0.001% | $100 | 0% (disabled) |
 
 ---
 
 ## Current Status
 
 - **Data Collector:** ✅ Running, syncing 4 pools every 1s
-- **Paper Trading:** ✅ Running, 8 strategies enabled
-- **Opportunities Found:** 0 (spreads too tight ~0.03%, need >0.3%)
+- **Paper Trading:** ✅ Running, 13 strategies enabled
+- **Discord Alerts:** ✅ Enabled (webhook configured)
+- **Opportunities Found:** 0 (executable spreads below 0.6% threshold)
 
 ### Why No Opportunities?
 
-Current Polygon spreads (~0.03%) are below profit thresholds after accounting for:
-- $0.50 estimated gas cost
-- 15% slippage estimate
+Current Polygon DEX markets are highly efficient:
+- Midmarket spreads: ~0.003% - 0.3%
+- After 0.6% DEX fees: All negative executable spread
+- Need >0.75% midmarket spread for any profit
 
-To test detection, edit `config/paper_trading.toml`:
-```toml
-min_profit_usd = -1.0  # Allow negative profit for testing
-```
+---
+
+## Key Learnings
+
+1. **Midmarket ≠ Executable:** Always subtract DEX fees (0.6% for Uniswap V2/Sushi)
+2. **Market Efficiency:** Professional MEV bots keep spreads near-zero
+3. **Latency Matters:** 1s polling insufficient for competitive arbitrage
+4. **Discovery Mode:** Useful for understanding actual spread distribution
 
 ---
 
@@ -132,47 +179,23 @@ min_profit_usd = -1.0  # Allow negative profit for testing
 
 1. **Check services:**
    ```bash
-   tmux ls
-   ps aux | grep -E "(data-collector|paper-trading)"
+   tmux attach -t dexarb
+   pgrep -a "paper-trading\|data-collector"
    ```
 
-2. **View logs:**
+2. **View Discord alerts:** Check configured Discord channel
+
+3. **Restart with webhook:**
    ```bash
-   tail -f /home/botuser/bots/dexarb/logs/paper_trading_*.log
+   cd /home/botuser/bots/dexarb/src/rust-bot
+   DISCORD_WEBHOOK="your_webhook_url" ./target/release/paper-trading
    ```
-
-3. **Modify strategies:**
-   ```bash
-   nano /home/botuser/bots/dexarb/config/paper_trading.toml
-   kill -HUP $(pgrep paper-trading)
-   ```
-
-4. **Restart if needed:**
-   ```bash
-   tmux kill-session -t dexarb
-   # Then restart per instructions in this doc
-   ```
-
----
-
-## Git Status
-
-```
-Uncommitted:
-  config/paper_trading.toml          (new - TOML config)
-  data/pool_state.json               (generated - shared state)
-  src/bin/data_collector.rs          (new)
-  src/data_collector/                (new module)
-  src/paper_trading/toml_config.rs   (new)
-  Cargo.toml                         (modified - new deps/bins)
-  src/bin/paper_trading.rs           (modified - v2 architecture)
-```
 
 ---
 
 ## Next Steps
 
-1. **Monitor** for 24-48 hours
-2. **Tune thresholds** based on actual spread distribution
-3. **Add more pairs** if spreads improve on other tokens
-4. **Deploy winning config** for live trading
+1. **Monitor** for 24-48 hours for volatility events
+2. **Consider websockets** for lower latency data collection
+3. **Add more DEXs** (QuickSwap, Balancer) with different fee structures
+4. **Analyze** when spreads actually exceed 0.6% threshold
