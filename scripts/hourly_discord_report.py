@@ -65,10 +65,29 @@ def parse_opportunities(raw_output, period_start):
     """Parse FOUND opportunities from raw output within the time period."""
     opportunities = []
 
-    pattern = r'(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}).*?\[(\w+[^]]*)\] FOUND Opportunity: (\w+/\w+).*?Midmarket: ([\d.]+)%.*?Executable: ([\d.]+)%.*?Est\. Profit: \$([\d.]+).*?\| (.+)$'
+    # Pre-process: join wrapped lines (lines not starting with timestamp are continuations)
+    # Wrapped lines occur when tmux pane width causes line breaks mid-log
+    lines = raw_output.split('\n')
+    joined_lines = []
+    current_line = ""
+
+    for line in lines:
+        # Lines starting with timestamp pattern are new entries
+        if re.match(r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}', line):
+            if current_line:
+                joined_lines.append(current_line)
+            current_line = line
+        else:
+            # Continuation of previous line - join with space
+            current_line += " " + line.strip()
+
+    if current_line:
+        joined_lines.append(current_line)
+
+    pattern = r'(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}).*?\[(\w+[^]]*)\] FOUND Opportunity: (\w+/\w+).*?Midmarket: ([\d.]+)%.*?Executable: ([\d.]+)%.*?Est\. Profit: \$([\d.]+).*?\| (.+?)(?:\s*$)'
     v3_pattern = r'\[V3 fee=([\d.]+)%\]'
 
-    for line in raw_output.split('\n'):
+    for line in joined_lines:
         if 'FOUND' not in line:
             continue
 
@@ -141,13 +160,19 @@ def calculate_stats(opportunities):
 
     # Deduplicate opportunities by (pair, route) and aggregate
     # Group by unique (pair, route) combination
+    # Normalize route: strip whitespace, collapse multiple spaces
     unique_opps = defaultdict(lambda: {'count': 0, 'total_profit': 0.0, 'example': None})
     for o in opportunities:
-        key = (o['pair'], o['route'])
+        # Normalize the route for consistent grouping
+        normalized_route = ' '.join(o['route'].split())  # Collapse whitespace
+        key = (o['pair'], normalized_route)
         unique_opps[key]['count'] += 1
         unique_opps[key]['total_profit'] += o['profit']
         if unique_opps[key]['example'] is None:
-            unique_opps[key]['example'] = o  # Keep first example for display
+            # Store normalized route in example
+            example_copy = o.copy()
+            example_copy['route'] = normalized_route
+            unique_opps[key]['example'] = example_copy
 
     # Build list of unique opportunities with aggregated stats
     aggregated = []

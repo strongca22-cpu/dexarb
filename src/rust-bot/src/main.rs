@@ -66,6 +66,18 @@ async fn main() -> Result<()> {
     let mut executor = TradeExecutor::new(Arc::clone(&provider), wallet, config.clone());
     info!("Trade executor initialized (DRY RUN mode)");
 
+    // Enable tax logging for IRS compliance
+    if config.tax_log_enabled {
+        let tax_dir = config.tax_log_dir.clone()
+            .unwrap_or_else(|| "/home/botuser/bots/dexarb/data/tax".to_string());
+        match executor.enable_tax_logging(&tax_dir) {
+            Ok(_) => info!("Tax logging enabled: {}", tax_dir),
+            Err(e) => warn!("Failed to enable tax logging: {} - trades will NOT be logged for taxes!", e),
+        }
+    } else {
+        warn!("Tax logging DISABLED - trades will NOT be logged for IRS compliance!");
+    }
+
     // Initial pool sync
     info!("Performing initial pool sync...");
     syncer.initial_sync().await?;

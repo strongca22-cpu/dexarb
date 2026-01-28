@@ -75,5 +75,11 @@ pub fn load_config() -> Result<BotConfig> {
 
         poll_interval_ms: std::env::var("POLL_INTERVAL_MS")?.parse()?,
         max_gas_price_gwei: std::env::var("MAX_GAS_PRICE_GWEI")?.parse()?,
+
+        // Tax logging configuration
+        tax_log_dir: std::env::var("TAX_LOG_DIR").ok(),
+        tax_log_enabled: std::env::var("TAX_LOG_ENABLED")
+            .map(|v| v.to_lowercase() == "true")
+            .unwrap_or(true), // Default to enabled for safety
     })
 }

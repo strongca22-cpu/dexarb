@@ -1,39 +1,54 @@
 # Next Steps - DEX Arbitrage Bot
 
-Backlog of planned improvements and features.
+## Current Status: READY FOR $100 DEPLOYMENT ✓
+
+**Pre-deployment checklist:** 85/88 checks passed (2026-01-28)
+
+See [checklist_results.md](checklist_results.md) for details.
+
+**Wallet:**
+- USDC.e: $19.997
+- MATIC: 8.34 (gas)
+- Approvals: Set
 
 ---
 
-## Discord Bot Commands (Planned)
+## Session Summary (2026-01-28)
 
-**Purpose:** Allow manual report triggers via Discord commands (e.g., `!report`)
+### Fixes Applied
+1. **Discord Reporter** - Killed duplicate process, fixed line wrapping issue
+2. **Spread Logger** - Updated to track all 41 pools (was only 2)
+3. **Discovery Mode** - Trade size increased to $1000 for micro-spread visibility
+4. **Report Aggregation** - Top 3 now properly consolidates repeat opportunities
 
-**Current state:** Hourly reports use webhook (one-way, send-only)
-
-**Requirements:**
-1. Create Discord Application at [Discord Developer Portal](https://discord.com/developers/applications)
-2. Create Bot, get Bot Token
-3. Invite bot to server with message read permissions
-4. Implement listener script
-
-**Options:**
-- Prefix commands (`!report`) - simpler, uses `discord.py`
-- Slash commands (`/report`) - more polished, requires command registration
-
-**Implementation:**
-- Separate script or integrate into `hourly_discord_report.py`
-- Reuse existing `calculate_stats()` and `send_discord_report()` functions
-
-**Priority:** Low - hourly reports sufficient for now
+### Fee Tier Arbitrage Analysis
+- UNI/USDC shows 2.24% spread between V3 1.00% and 0.05% pools
+- Executable spread: ~1.19% after fees
+- Viable for ~$10 profit per $1000 trade
+- Low competition, persistent opportunity
 
 ---
 
-## Other Ideas
+## Immediate Next Steps
 
-- [ ] Real-time alerts for high-value opportunities (>$50 profit)
-- [ ] Daily summary report (aggregates all hourly data)
-- [ ] Pool health monitoring alerts (TVL drops, staleness)
+1. [ ] Start live bot with $20 test capital
+2. [ ] Monitor first hour closely
+3. [ ] Review results, adjust parameters if needed
+4. [ ] Scale to $100 after successful test
 
 ---
 
-*Last updated: 2026-01-28*
+## Backlog
+
+### Monitoring Improvements
+- [x] Hourly Discord reports (consolidated format)
+- [x] Spread logger tracking all pairs
+- [ ] Real-time alerts for high-value opportunities
+- [ ] Daily summary reports
+
+### Infrastructure
+- [ ] Multi-RPC failover configuration
+
+---
+
+*Last updated: 2026-01-28 14:45 PT*

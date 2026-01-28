@@ -10,7 +10,7 @@
 
 [general]
 # Path to shared pool state (written by data-collector)
-state_file = "/home/botuser/bots/dexarb/data/pool_state.json"
+state_file = "/home/botuser/bots/dexarb/data/pool_state_phase1.json"
 
 # How often to check for opportunities (ms)
 # Note: Some strategies override this with faster/slower polling
@@ -272,14 +272,17 @@ max_consecutive_losses = 5
 # Ultra-Low Threshold to Detect ANY Opportunities
 # Purpose: Understand what spread levels actually occur in the market
 # This is a diagnostic scenario - NOT for deployment
+#
+# TUNED: Larger trade size ($1000) so micro-spreads show positive profit
+# A 0.10% spread on $1000 = $1.00 gross, minus $0.50 gas = $0.50 net
 # ============================================================
 [[strategy]]
 name = "Discovery Mode"
 enabled = true
 pairs = ["WETH/USDC", "WMATIC/USDC", "WBTC/USDC", "USDT/USDC", "DAI/USDC", "LINK/USDC", "UNI/USDC"]
-min_profit_usd = -50.0           # Allow "unprofitable" trades to see all opportunities
-max_trade_size_usd = 100.0       # Small size for discovery
-max_slippage_percent = 0.001     # 0.001% = 1 basis point - will detect ~0.003% spreads
+min_profit_usd = -10.0           # Allow negative to see all opportunities
+max_trade_size_usd = 1000.0      # Larger size so micro-spreads show profit
+max_slippage_percent = 0.001     # 0.001% = 1 basis point - catches everything
 max_gas_gwei = 500.0             # Accept any gas for discovery
 simulate_competition = false     # No competition simulation - see raw opportunities
 competition_rate = 0.0

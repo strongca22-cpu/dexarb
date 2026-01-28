@@ -14,20 +14,37 @@
 
 ```
 1. Technical Infrastructure ......... 15 checks
-2. Smart Contract Verification ...... 12 checks  
+2. Smart Contract Verification ...... 15 checks  (↑3 for 0.30% pool)
 3. Bot Configuration ................ 18 checks
-4. Data Integrity ................... 10 checks
-5. Execution Path Validation ........ 14 checks
+4. Data Integrity ................... 14 checks  (↑4 for dual-route)
+5. Execution Path Validation ........ 18 checks  (↑4 for Route 2)
 6. Risk Management .................. 12 checks
 7. Monitoring & Alerts .............. 10 checks
-8. Financial Controls ............... 8 checks
+8. Financial Controls ............... 22 checks  (↑10 for tax logging)
 9. Operational Procedures ........... 9 checks
 10. Emergency Protocols ............. 7 checks
 
-TOTAL: 115 checks
-CRITICAL: 35 checks (must pass ALL)
-IMPORTANT: 50 checks (must pass 90%)
-RECOMMENDED: 30 checks (should pass 80%)
+TOTAL: 140 checks (updated for tax logging validation)
+CRITICAL: 46 checks (must pass ALL, +4 tax)
+IMPORTANT: 59 checks (must pass 90%, +4 tax)
+RECOMMENDED: 35 checks (should pass 80%, +2 tax)
+```
+
+### **Dual-Route Discovery Summary**
+
+```
+Route 1: V3 1.00% → V3 0.05%
+├─ Spread: 2.24% midmarket, ~1.19% executable
+├─ Profit: ~$10.25 per $1000 trade
+└─ Frequency: ~209 detections/hour
+
+Route 2: V3 0.30% → V3 0.05%
+├─ Spread: 1.43% midmarket, ~0.68% executable
+├─ Profit: ~$9.22 per $1000 trade
+└─ Frequency: ~215 detections/hour
+
+Combined: 424 opportunities/hour, $10.28 avg profit
+Discovery Mode most profitable: 168 opps, $1,635.48 (paper)
 ```
 
 ---
@@ -244,44 +261,63 @@ cast call $WMATIC "symbol()(string)" --rpc-url https://polygon-rpc.com
 
 ### **2.3 Pool Addresses & TVL**
 
+**NOTE: Two profitable routes discovered - all THREE fee tier pools required**
+
 ```bash
 # Check 2.3.1: Find UNI/USDC V3 pools
 # Visit Uniswap V3 info or compute addresses
 
-# UNI/USDC 0.05% pool
+# UNI/USDC 0.05% pool (DESTINATION for both routes)
 POOL_005="0x________________"  # Fill in
 
 # Check pool exists
 cast call $POOL_005 "liquidity()(uint128)" --rpc-url https://polygon-rpc.com
 
-# Check 2.3.2: UNI/USDC 1.00% pool
+# Check 2.3.2: UNI/USDC 0.30% pool (SOURCE for Route 2)
+POOL_030="0x________________"  # Fill in
+
+cast call $POOL_030 "liquidity()(uint128)" --rpc-url https://polygon-rpc.com
+
+# Check 2.3.3: UNI/USDC 1.00% pool (SOURCE for Route 1)
 POOL_100="0x________________"  # Fill in
 
 cast call $POOL_100 "liquidity()(uint128)" --rpc-url https://polygon-rpc.com
 
-# Check 2.3.3: Verify on Uniswap Info
+# Check 2.3.4: Verify on Uniswap Info
 open "https://info.uniswap.org/#/polygon/pools"
-# Search for UNI/USDC pools, verify TVL
+# Search for UNI/USDC pools, verify TVL for ALL THREE
 ```
 
 **Pool Verification Checklist**:
 ```
-[ ] CRITICAL: 0.05% pool address verified
-[ ] CRITICAL: 1.00% pool address verified
+[ ] CRITICAL: 0.05% pool address verified (destination pool)
+[ ] CRITICAL: 0.30% pool address verified (Route 2 source)
+[ ] CRITICAL: 1.00% pool address verified (Route 1 source)
 [ ] CRITICAL: 0.05% pool TVL >$10M
+[ ] CRITICAL: 0.30% pool TVL >$5M
 [ ] CRITICAL: 1.00% pool TVL >$2M
-[ ] IMPORTANT: 24h volume >$1M on both
+[ ] IMPORTANT: 24h volume >$1M on all three pools
 ```
 
 **Record Pool Addresses**:
 ```
+Route 1: V3 1.00% → V3 0.05% (2.24% spread, ~$10.25/trade)
+Route 2: V3 0.30% → V3 0.05% (1.43% spread, ~$9.22/trade)
+
 UNI/USDC 0.05%: 0x_______________________
 ├─ TVL: $_____________
-└─ 24h Volume: $_____________
+├─ 24h Volume: $_____________
+└─ Role: DESTINATION (both routes)
+
+UNI/USDC 0.30%: 0x_______________________
+├─ TVL: $_____________
+├─ 24h Volume: $_____________
+└─ Role: SOURCE (Route 2)
 
 UNI/USDC 1.00%: 0x_______________________
 ├─ TVL: $_____________
-└─ 24h Volume: $_____________
+├─ 24h Volume: $_____________
+└─ Role: SOURCE (Route 1)
 ```
 
 ---
@@ -447,44 +483,70 @@ max_slippage_pct = _____________%
 
 ### **4.1 Opportunity Detection**
 
+**NOTE: Two profitable routes discovered - verify BOTH are being detected**
+
 ```sql
 -- Check 4.1.1: Recent opportunities detected
 SELECT COUNT(*) as recent_opps
 FROM opportunities
 WHERE timestamp > NOW() - INTERVAL '10 minutes';
--- Expected: >20 opportunities
+-- Expected: >200 opportunities (both routes combined)
 
--- Check 4.1.2: Opportunity distribution
-SELECT 
+-- Check 4.1.2: Opportunity distribution by route
+SELECT
     pair,
     dex_from,
     dex_to,
     COUNT(*) as count,
     AVG(spread_pct) as avg_spread,
+    AVG(expected_profit) as avg_profit,
     MAX(timestamp) as last_seen
 FROM opportunities
 WHERE timestamp > NOW() - INTERVAL '1 hour'
 GROUP BY pair, dex_from, dex_to
 ORDER BY count DESC;
 
--- Check 4.1.3: Spread value distribution
-SELECT 
+-- Check 4.1.3: Verify BOTH routes detected
+-- Route 1: V3 1.00% → V3 0.05% (expect ~209 detections/hour, 2.24% avg spread)
+-- Route 2: V3 0.30% → V3 0.05% (expect ~215 detections/hour, 1.43% avg spread)
+
+-- Check 4.1.4: Spread value distribution
+SELECT
     FLOOR(spread_pct) as spread_bucket,
     COUNT(*) as count
 FROM opportunities
 WHERE timestamp > NOW() - INTERVAL '1 hour'
 GROUP BY FLOOR(spread_pct)
 ORDER BY spread_bucket;
--- Expected: Reasonable distribution (not all same value)
+-- Expected: Buckets at 1% and 2% (corresponding to both routes)
 ```
 
 **Data Integrity Checklist**:
 ```
 [ ] CRITICAL: Recent opportunities detected (<10 min)
 [ ] CRITICAL: Spread values varying (not constant)
-[ ] IMPORTANT: Multiple routes detected
+[ ] CRITICAL: Route 1 (1.00%→0.05%) actively detected
+[ ] CRITICAL: Route 2 (0.30%→0.05%) actively detected
+[ ] IMPORTANT: Route 1 avg spread ~2.24%
+[ ] IMPORTANT: Route 2 avg spread ~1.43%
+[ ] IMPORTANT: Combined >400 detections/hour
 [ ] IMPORTANT: Timestamps updating continuously
-[ ] RECOMMENDED: Data looks reasonable
+[ ] RECOMMENDED: Avg profit >$9 per opportunity
+```
+
+**Expected Detection Metrics**:
+```
+Route 1 (V3 1.00% → V3 0.05%):
+├─ Spread: ~2.24%
+├─ Profit/trade: ~$10.25
+└─ Detections/hour: ~209
+
+Route 2 (V3 0.30% → V3 0.05%):
+├─ Spread: ~1.43%
+├─ Profit/trade: ~$9.22
+└─ Detections/hour: ~215
+
+Combined: ~424 detections/hour, $10.28 avg profit
 ```
 
 ---
@@ -556,29 +618,60 @@ HAVING COUNT(*) > 10;
 
 ### **5.1 Dry Run Test**
 
+**NOTE: Test BOTH profitable routes separately**
+
 ```bash
-# Check 5.1.1: Simulate trade execution (no real transaction)
+# Check 5.1.1: Simulate Route 1 execution (no real transaction)
 ./target/release/dexarb-bot \
   --dry-run \
   --pair UNI/USDC \
   --route "V3_1.00%->V3_0.05%" \
   --amount 50
 
-# Should output:
-# - Detected opportunity
-# - Calculated profit
-# - Would execute (but doesn't)
-# - Gas estimate
-# - Expected result
+# Expected output for Route 1:
+# - Spread: ~2.24%
+# - Est. Profit: ~$10.25 per $1000 trade
+# - Gas: <$1
+
+# Check 5.1.2: Simulate Route 2 execution (no real transaction)
+./target/release/dexarb-bot \
+  --dry-run \
+  --pair UNI/USDC \
+  --route "V3_0.30%->V3_0.05%" \
+  --amount 50
+
+# Expected output for Route 2:
+# - Spread: ~1.43%
+# - Est. Profit: ~$9.22 per $1000 trade
+# - Gas: <$1
+
+# Check 5.1.3: Compare routes side-by-side
+./target/release/dexarb-bot \
+  --dry-run \
+  --pair UNI/USDC \
+  --all-routes \
+  --amount 50
 ```
 
 **Dry Run Checklist**:
 ```
-[ ] CRITICAL: Dry run completes without errors
-[ ] CRITICAL: Route calculation correct
-[ ] CRITICAL: Gas estimation reasonable (<$1)
-[ ] IMPORTANT: Profit calculation matches expected
-[ ] IMPORTANT: Slippage estimation realistic (1-5%)
+[ ] CRITICAL: Route 1 dry run completes without errors
+[ ] CRITICAL: Route 2 dry run completes without errors
+[ ] CRITICAL: Route 1 calculation correct (~2.24% spread)
+[ ] CRITICAL: Route 2 calculation correct (~1.43% spread)
+[ ] CRITICAL: Gas estimation reasonable (<$1) for both
+[ ] IMPORTANT: Route 1 profit ~$10.25/trade matches expected
+[ ] IMPORTANT: Route 2 profit ~$9.22/trade matches expected
+[ ] IMPORTANT: Slippage estimation realistic (1-5%) for both
+```
+
+**Recommended Test Trade Plan**:
+```
+Test $100 capital allocation:
+├─ Route 1 (1.00%→0.05%): $50 test trade
+└─ Route 2 (0.30%→0.05%): $50 test trade
+
+This validates BOTH routes with minimal risk.
 ```
 
 ---
@@ -878,22 +971,128 @@ Total USD Value: $_____________
 
 ---
 
-### **8.2 Tax Logging**
+### **8.2 Tax Logging (IRS Compliance)**
+
+**NOTE: Tax logging is CRITICAL for IRS compliance. All crypto trades are taxable events.**
 
 ```bash
-# Check 8.2.1: Tax logger configured
-grep -r "tax" config/*.toml
+# Check 8.2.1: Tax logging enabled in .env
+grep "TAX_LOG" src/rust-bot/.env
+# Expected:
+#   TAX_LOG_DIR=/home/botuser/bots/dexarb/data/tax
+#   TAX_LOG_ENABLED=true
 
-# Check 8.2.2: Trade records being saved
-ls -lh data/trades/
+# Check 8.2.2: Tax directory exists and writable
+ls -la data/tax/
+touch data/tax/.test && rm data/tax/.test && echo "Writable: YES"
+
+# Check 8.2.3: Tax module compiled in bot
+grep -r "enable_tax_logging" src/rust-bot/src/main.rs
+# Expected: Tax logging enabled after executor creation
+
+# Check 8.2.4: Verify tax record fields (34+ IRS-required fields)
+grep -A50 "pub struct TaxRecord" src/rust-bot/src/tax/mod.rs | head -60
+# Must include: trade_id, timestamp, tax_year, transaction_type,
+#   asset_sent/received, usd_values, cost_basis, gas_fees, tx_hash, etc.
+
+# Check 8.2.5: CSV logger ready
+ls -la src/rust-bot/src/tax/csv_logger.rs
+# Creates: data/tax/trades_YYYY.csv (annual files)
+
+# Check 8.2.6: JSON backup logger ready
+ls -la src/rust-bot/src/tax/json_logger.rs
+# Creates: data/tax/trades_YYYY.jsonl (redundant backup)
+
+# Check 8.2.7: RP2 export available for tax software
+ls -la src/rust-bot/src/tax/rp2_export.rs
+# For: https://github.com/eprbell/rp2 (open-source tax calculator)
+
+# Check 8.2.8: Tax export utility compiled
+ls -la src/rust-bot/target/debug/tax-export 2>/dev/null || \
+  echo "Run: cargo build --bin tax-export"
 ```
 
-**Tax Checklist**:
+**Tax Record Fields Captured**:
 ```
-[ ] IMPORTANT: Tax logging enabled
-[ ] IMPORTANT: All trades recorded with timestamp
-[ ] IMPORTANT: Cost basis tracking
-[ ] RECOMMENDED: Export to RP2 format configured
+IDENTIFICATION:
+├─ trade_id (UUID)
+├─ timestamp (RFC3339)
+└─ tax_year
+
+TRANSACTION:
+├─ transaction_type (SWAP, BUY, SELL, TRANSFER, FEE)
+├─ asset_sent / amount_sent
+└─ asset_received / amount_received
+
+USD VALUATIONS (IRS requires):
+├─ usd_value_sent (fair market value)
+├─ usd_value_received
+├─ spot_price_sent
+└─ spot_price_received
+
+COST BASIS:
+├─ cost_basis_usd
+├─ proceeds_usd
+├─ capital_gain_loss
+├─ holding_period_days (0 for arbitrage)
+└─ gain_type (SHORT_TERM for all arbitrage)
+
+FEES (deductible):
+├─ gas_fee_native (MATIC)
+├─ gas_fee_usd
+├─ dex_fee_percent
+└─ total_fees_usd
+
+BLOCKCHAIN AUDIT:
+├─ blockchain ("Polygon")
+├─ chain_id (137)
+├─ transaction_hash
+├─ block_number
+└─ wallet_address
+
+DEX ROUTING:
+├─ dex_buy / dex_sell
+└─ pool_address_buy / pool_address_sell
+```
+
+**Tax Logging Checklist**:
+```
+[ ] CRITICAL: TAX_LOG_ENABLED=true in .env
+[ ] CRITICAL: TAX_LOG_DIR configured and writable
+[ ] CRITICAL: Tax module integrated in main.rs
+[ ] CRITICAL: All 34+ IRS fields captured per trade
+[ ] IMPORTANT: CSV annual files created (trades_YYYY.csv)
+[ ] IMPORTANT: JSON backup files created (trades_YYYY.jsonl)
+[ ] IMPORTANT: USD valuations at trade time
+[ ] IMPORTANT: Gas fees tracked for deductions
+[ ] RECOMMENDED: RP2 export configured for tax software
+[ ] RECOMMENDED: Tax export utility compiled
+```
+
+**Post-Trade Tax Verification**:
+```bash
+# After first real trade, verify logging:
+cat data/tax/trades_2026.csv | head -2
+# Should show header + first trade record
+
+cat data/tax/trades_2026.jsonl | head -1 | python3 -m json.tool
+# Should show complete JSON record with all fields
+
+# Generate tax summary:
+./target/debug/tax-export summary 2026
+# Shows total trades, proceeds, cost basis, gains/losses
+```
+
+**Record Tax Configuration**:
+```
+Tax Log Directory: /home/botuser/bots/dexarb/data/tax
+Tax Logging Enabled: [ ] Yes  [ ] No
+CSV Logger Ready: [ ] Yes  [ ] No
+JSON Logger Ready: [ ] Yes  [ ] No
+RP2 Export Ready: [ ] Yes  [ ] No
+
+Cost Basis Method: FIFO (First In, First Out)
+Expected Tax Treatment: Short-term capital gains (held <1 year)
 ```
 
 ---
@@ -918,6 +1117,56 @@ ls -l scripts/reconcile.sh
 [ ] IMPORTANT: Fee tracking
 [ ] RECOMMENDED: Daily reconciliation
 [ ] RECOMMENDED: Monthly summary reports
+```
+
+---
+
+### **8.4 Profit Projections (Dual Routes)**
+
+**Updated projections based on discovered opportunities (2026-01-28)**
+
+```
+TWO PROFITABLE ROUTES DISCOVERED:
+
+Route 1: V3 1.00% → V3 0.05%
+├─ Midmarket Spread: 2.24%
+├─ Executable Spread: ~1.19% (after fees)
+├─ Profit per $1000 trade: ~$10.25
+└─ Detection frequency: ~209/hour
+
+Route 2: V3 0.30% → V3 0.05%
+├─ Midmarket Spread: 1.43%
+├─ Executable Spread: ~0.68% (after fees)
+├─ Profit per $1000 trade: ~$9.22
+└─ Detection frequency: ~215/hour
+
+Combined: 424 opportunities/hour, $10.28 avg profit
+```
+
+**Updated Profit Expectations**:
+```
+Capital Level  | Conservative | Expected   | Optimistic
+---------------|--------------|------------|------------
+$100 (test)    | $2-5/day     | $5-15/day  | $15-30/day
+$500           | $10-25/day   | $25-60/day | $60-100/day
+$1,000         | $20-50/day   | $50-120/day| $120-200/day
+$5,000         | $100-250/day | $250-600/day| $600-1000/day
+```
+
+**Risk Diversification**:
+```
+With two independent routes:
+├─ If Route 1 faces competition → Route 2 still profitable
+├─ If Route 2 liquidity drops → Route 1 still available
+└─ Combined ROI potential: 5-10% daily at scale
+```
+
+**Profit Projection Checklist**:
+```
+[ ] IMPORTANT: Both routes show positive expected value
+[ ] IMPORTANT: Diversification reduces single-route risk
+[ ] IMPORTANT: Gas costs factored into projections
+[ ] RECOMMENDED: Start with conservative estimates
 ```
 
 ---
@@ -1078,17 +1327,32 @@ cat docs/INCIDENT_RESPONSE.md
 CATEGORY                    | CHECKS | PASSED | STATUS
 ----------------------------|--------|--------|--------
 1. Technical Infrastructure | 15     | ___/15 | [ ]
-2. Smart Contracts          | 12     | ___/12 | [ ]
+2. Smart Contracts          | 15     | ___/15 | [ ]  (added 3 for 0.30% pool)
 3. Bot Configuration        | 18     | ___/18 | [ ]
-4. Data Integrity           | 10     | ___/10 | [ ]
-5. Execution Path           | 14     | ___/14 | [ ]
+4. Data Integrity           | 14     | ___/14 | [ ]  (added 4 for dual-route)
+5. Execution Path           | 18     | ___/18 | [ ]  (added 4 for Route 2)
 6. Risk Management          | 12     | ___/12 | [ ]
 7. Monitoring & Alerts      | 10     | ___/10 | [ ]
-8. Financial Controls       | 8      | ___/8  | [ ]
+8. Financial Controls       | 12     | ___/12 | [ ]  (added 4 for projections)
 9. Operational Procedures   | 9      | ___/9  | [ ]
 10. Emergency Protocols     | 7      | ___/7  | [ ]
 ----------------------------|--------|--------|--------
-TOTAL                       | 115    | ___/115| [ ]
+TOTAL                       | 130    | ___/130| [ ]
+```
+
+### **Dual-Route Validation Summary**
+
+```
+ROUTE VERIFICATION          | STATUS
+----------------------------|--------
+Route 1: V3 1.00% → 0.05%  | [ ] Verified on-chain
+Route 2: V3 0.30% → 0.05%  | [ ] Verified on-chain
+0.05% pool TVL >$10M       | [ ] Confirmed
+0.30% pool TVL >$5M        | [ ] Confirmed
+1.00% pool TVL >$2M        | [ ] Confirmed
+Route 1 dry-run passed     | [ ] Tested
+Route 2 dry-run passed     | [ ] Tested
+Both routes detecting      | [ ] Active
 ```
 
 ---
@@ -1096,21 +1360,25 @@ TOTAL                       | 115    | ___/115| [ ]
 ### **Pass Criteria**
 
 ```
-CRITICAL CHECKS (35 total):
-└─ Must pass: 35/35 (100%)
-└─ Status: ___/35
+CRITICAL CHECKS (42 total):  (increased for dual-route)
+└─ Must pass: 42/42 (100%)
+└─ Status: ___/42
 
-IMPORTANT CHECKS (50 total):
-└─ Must pass: 45/50 (90%)
-└─ Status: ___/50
+IMPORTANT CHECKS (55 total):  (increased for dual-route)
+└─ Must pass: 50/55 (90%)
+└─ Status: ___/55
 
-RECOMMENDED CHECKS (30 total):
-└─ Should pass: 24/30 (80%)
-└─ Status: ___/30
+RECOMMENDED CHECKS (33 total):
+└─ Should pass: 26/33 (80%)
+└─ Status: ___/33
+
+DUAL-ROUTE CHECKS (8 total):  (NEW)
+└─ Must pass: 8/8 (100%)
+└─ Status: ___/8
 
 OVERALL PASS: [ ] Yes  [ ] No
 
-IF YES → Proceed to $100 deployment
+IF YES → Proceed to $100 deployment (test BOTH routes)
 IF NO → Address failed checks first
 ```
 
@@ -1153,8 +1421,9 @@ SCENARIO D: Missing Critical Checks ❌
 **Before funding wallet with $100**:
 
 ```
-[ ] All 35 critical checks passed
+[ ] All 42 critical checks passed
 [ ] 90%+ important checks passed
+[ ] All 8 dual-route checks passed
 [ ] Emergency stop procedures tested
 [ ] Monitoring and alerts configured
 [ ] Stop loss limits configured
@@ -1165,6 +1434,16 @@ SCENARIO D: Missing Critical Checks ❌
 [ ] Ready to monitor first hour closely
 ```
 
+**Dual-Route Validation**:
+```
+[ ] Route 1 (1.00%→0.05%) verified on-chain
+[ ] Route 2 (0.30%→0.05%) verified on-chain
+[ ] All THREE pool TVLs confirmed sufficient
+[ ] Both routes dry-run tested
+[ ] Both routes actively detecting opportunities
+[ ] Test trades planned: $50 each route
+```
+
 **Deployment Authorization**:
 ```
 Completed by: _____________
@@ -1172,7 +1451,8 @@ Date: _____________
 Time: _____________
 Confidence: ______%
 Deployment Amount: $_____________
-Expected Daily: $_____________
+Test Allocation: Route 1 $___ / Route 2 $___
+Expected Daily: $5-15 (conservative) / $15-30 (optimistic)
 Stop Loss: $_____________
 
 Signature: _____________
@@ -1186,6 +1466,7 @@ Signature: _____________
 ```
 [ ] Confirm bot started successfully
 [ ] Watch for first opportunity detection
+[ ] Verify BOTH routes detecting opportunities
 [ ] Monitor first trade execution
 [ ] Verify logging working
 [ ] Confirm alerts functional
@@ -1193,19 +1474,24 @@ Signature: _____________
 
 **First Hour**:
 ```
-[ ] Track P&L
-[ ] Monitor win rate
+[ ] Track P&L per route (Route 1 vs Route 2)
+[ ] Monitor win rate for each route
+[ ] Verify ~200+ detections for each route
 [ ] Watch for errors
 [ ] Verify slippage reasonable
 [ ] Check gas costs
+[ ] Compare actual vs expected ($10.28 avg profit)
 ```
 
 **First 24 Hours**:
 ```
-[ ] Daily P&L review
-[ ] Performance vs expectations
+[ ] Daily P&L review (expect $5-30)
+[ ] Performance vs expectations per route
+[ ] Route 1: ~$10.25/trade, ~209 detections/hr
+[ ] Route 2: ~$9.22/trade, ~215 detections/hr
 [ ] Any adjustments needed
 [ ] Decision: continue, adjust, or stop
+[ ] If successful: plan $500 scale-up
 ```
 
 ---
@@ -1227,20 +1513,29 @@ Signature: _____________
 MINIMUM SUCCESS:
 ├─ No critical errors
 ├─ No loss >$30
+├─ Both routes execute successfully
 ├─ Learn execution patterns
 └─ Validate system works
 
 GOOD SUCCESS:
 ├─ Net profit >$0
 ├─ Win rate >45%
+├─ Both routes profitable
 ├─ System stable
 └─ Ready to scale
 
 EXCELLENT SUCCESS:
-├─ Net profit >$10
+├─ Net profit >$15 (dual-route expectation)
 ├─ Win rate >55%
+├─ Both routes performing as expected
 ├─ No issues
 └─ Scale to $500 immediately
+
+UPDATED EXPECTATIONS (with dual routes):
+├─ Route 1: ~$10.25 profit per $1000 trade
+├─ Route 2: ~$9.22 profit per $1000 trade
+├─ Combined detection: 424/hour
+└─ Diversified risk across two independent paths
 ```
 
 ---

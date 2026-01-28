@@ -334,4 +334,8 @@ pub struct BotConfig {
     // Performance
     pub poll_interval_ms: u64,
     pub max_gas_price_gwei: u64,
+
+    // Tax Logging (IRS Compliance)
+    pub tax_log_dir: Option<String>,
+    pub tax_log_enabled: bool,
 }
