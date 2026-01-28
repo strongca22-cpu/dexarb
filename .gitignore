@@ -25,3 +25,8 @@ Thumbs.db
 
 # Runtime data
 data/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
