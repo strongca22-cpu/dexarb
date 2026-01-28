@@ -488,6 +488,58 @@ const EXCLUDED_POOLS: &[(&str, &str)] = &[
 
 ---
 
+## Session 9: Hourly Discord Reports + Standardized Format
+
+### Problem
+
+Manual Discord reports required running a script each time. Need automated hourly reports with consistent format.
+
+### Solution
+
+Created `scripts/hourly_discord_report.py` that:
+1. Runs continuously in tmux window
+2. Publishes standardized report every hour on the hour
+3. First report at midnight Pacific time
+
+### Report Format
+
+```
+📊 DEX Arbitrage Paper Trading Report
+
+⚙️ General
+- Timestamp, Version, Period, Network
+
+🎯 Opportunity Overview
+- Total opportunities, Unique pairs, V2/V3 split
+
+💰 Profit Summary
+- Total potential, Best trade, Avg per opp, Estimated realized
+
+🏆 Top 3 Opportunities
+- Best trades with pair, profit, spread, route
+
+📈 Strategy Performance
+- Most opportunities, Most profit, Averages, Breakdown
+```
+
+### Setup
+
+```bash
+# Tmux session structure
+dexarb-phase1
+├── 0: collector    (data-collector)
+├── 1: paper        (paper-trading)
+└── 2: reports      (hourly Discord reports)
+
+# Log file
+data/logs/discord_reports.log
+```
+
+### Files Added
+- `scripts/hourly_discord_report.py` - Automated hourly Discord publisher
+
+---
+
 ## Next Steps
 
 1. ✅ ~~Add more pairs~~ (Phase 1 complete - 7 pairs)
@@ -507,8 +559,9 @@ const EXCLUDED_POOLS: &[(&str, &str)] = &[
 1. **Check services:**
    ```bash
    tmux attach -t dexarb-phase1
-   # Window 0: data collector (V2+V3)
-   # Window 1: paper trading (V3 enabled)
+   # Window 0: collector   - data-collector (V2+V3 pools)
+   # Window 1: paper       - paper-trading (15 strategies)
+   # Window 2: reports     - hourly Discord reports
    ```
 
 2. **Check pool state:**
@@ -516,7 +569,12 @@ const EXCLUDED_POOLS: &[(&str, &str)] = &[
    python3 -c "import json; d=json.load(open('/home/botuser/bots/dexarb/data/pool_state_phase1.json')); print(f'V2: {len(d[\"pools\"])}, V3: {len(d[\"v3_pools\"])}')"
    ```
 
-3. **Send Discord report:**
+3. **Check Discord reports:**
    ```bash
-   # Use the Python script pattern from Session 6
+   tail -f /home/botuser/bots/dexarb/data/logs/discord_reports.log
+   ```
+
+4. **Manual Discord report:**
+   ```bash
+   python3 /home/botuser/bots/dexarb/scripts/hourly_discord_report.py --once
    ```

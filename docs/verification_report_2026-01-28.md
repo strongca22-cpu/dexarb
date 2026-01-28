@@ -211,17 +211,20 @@ its compute units per second capacity...)
 
 ## Files Modified in This Session
 
-None yet - this is a verification report only.
+- `src/pool/syncer.rs` - V2 token ordering fix
+- `src/bin/paper_trading.rs` - Dead pool exclusion list
+- `scripts/hourly_discord_report.py` - Automated hourly Discord reports
 
 ---
 
-## Next Session TODO
+## Session TODO
 
-1. [ ] Fix V2 syncer token ordering (syncer.rs)
-2. [ ] Add minimum liquidity check (paper_trading.rs)
+1. [x] Fix V2 syncer token ordering (syncer.rs) ✅
+2. [x] Add dead pool exclusion (paper_trading.rs) ✅
 3. [ ] Reduce poll interval or add rate limit handling
-4. [ ] Re-run verification after fixes
+4. [x] Re-run verification after fixes ✅
 5. [ ] Verify all pool TVLs on-chain
+6. [x] Add automated hourly Discord reports ✅
 
 ---
 
