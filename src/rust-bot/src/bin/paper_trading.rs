@@ -1,14 +1,20 @@
-//! Paper Trading Binary (v2 - File-Based Architecture)
+//! Paper Trading Binary (v3 - V2+V3 Arbitrage)
 //!
 //! Reads pool state from shared JSON file (written by data-collector)
 //! and runs paper trading strategies based on TOML configuration.
+//!
+//! Supports both V2 and V3 pools for cross-protocol arbitrage:
+//! - V2↔V2: 0.6% round-trip fee (0.3% per swap)
+//! - V3↔V2: 0.35% round-trip with 0.05% V3 tier (game changer!)
+//! - V3↔V3: Variable based on fee tiers
 //!
 //! Supports hot-reloading via SIGHUP signal:
 //!   kill -HUP $(pgrep paper-trading)
 //!
 //! Discord Alerts:
 //!   Set DISCORD_WEBHOOK environment variable to enable alerts
-//!   Alerts are sent when opportunities are detected, aggregating across all strategies
+//!   Alerts are BATCHED and sent every 15 minutes (configurable)
+//!   Each batch summarizes all opportunities detected in the window
 //!
 //! Usage:
 //!   cargo run --bin paper-trading
@@ -16,13 +22,13 @@
 //!
 //! Author: AI-Generated
 //! Created: 2026-01-28
-//! Modified: 2026-01-28 (added Discord alerts with opportunity aggregation)
+//! Modified: 2026-01-28 (V3 arbitrage support)
 
 use anyhow::{Context, Result};
 use chrono::Utc;
 use dexarb_bot::data_collector::SharedPoolState;
 use dexarb_bot::paper_trading::{
-    AggregatedOpportunity, DiscordAlerter, MetricsAggregator, PaperTradingConfig,
+    AggregatedOpportunity, MetricsAggregator, OpportunityBatcher, PaperTradingConfig,
     SimulatedTradeAction, SimulatedExecutor, StrategyMatch, TraderMetrics, TomlConfig,
 };
 use futures::StreamExt;
@@ -129,13 +135,23 @@ async fn run_paper_trading(config_path: &PathBuf) -> Result<bool> {
         executors.insert(strategy.name.clone(), executor);
     }
 
-    // Initialize Discord alerter
-    let discord = DiscordAlerter::new();
-    if discord.is_enabled() {
-        info!("Discord alerts: ENABLED");
+    // Initialize Discord opportunity batcher (15 minute batches by default)
+    let batcher = Arc::new(OpportunityBatcher::new());
+    if batcher.is_enabled() {
+        info!("Discord alerts: ENABLED (batched every {} minutes)", batcher.batch_interval_secs() / 60);
     } else {
         info!("Discord alerts: DISABLED (set DISCORD_WEBHOOK to enable)");
     }
+
+    // Spawn background task for periodic Discord batch flush
+    let batcher_for_flush = Arc::clone(&batcher);
+    tokio::spawn(async move {
+        let interval_secs = batcher_for_flush.batch_interval_secs();
+        loop {
+            tokio::time::sleep(Duration::from_secs(interval_secs)).await;
+            batcher_for_flush.flush_and_send().await;
+        }
+    });
 
     let poll_interval = Duration::from_millis(config.general.poll_interval_ms);
     let metrics_interval = Duration::from_secs(config.general.metrics_interval_secs);
@@ -188,14 +204,14 @@ async fn run_paper_trading(config_path: &PathBuf) -> Result<bool> {
             all_opportunities.extend(opps);
         }
 
-        // If there are opportunities, aggregate and alert
+        // If there are opportunities, aggregate and add to batch
         if !all_opportunities.is_empty() {
             // Aggregate by unique market event (pair + direction)
             let aggregated = aggregate_opportunities(&all_opportunities, shared_state.block_number);
 
-            // Send Discord alert for each unique opportunity
-            for opp in &aggregated {
-                discord.send_opportunity_alert(opp).await;
+            // Add to Discord batch (will be sent every 15 minutes)
+            for opp in aggregated {
+                batcher.add_opportunity(opp).await;
             }
 
             // Execute trades for each strategy that caught the opportunity
@@ -224,18 +240,87 @@ async fn run_paper_trading(config_path: &PathBuf) -> Result<bool> {
         // Debug logging
         if iteration % 1000 == 0 {
             debug!(
-                "Iteration {} - block {} - {} pools tracked",
+                "Iteration {} - block {} - {} V2 pools, {} V3 pools tracked",
                 iteration,
                 shared_state.block_number,
-                shared_state.pools.len()
+                shared_state.pools.len(),
+                shared_state.v3_pools.len()
             );
         }
     }
 }
 
-/// DEX fee constants (Uniswap V2 / Sushiswap = 0.3% per swap)
-const DEX_FEE_PERCENT: f64 = 0.30;
-const ROUND_TRIP_FEE_PERCENT: f64 = DEX_FEE_PERCENT * 2.0;  // 0.6% for buy + sell
+/// DEX fee constants
+/// V2 DEXs (Uniswap/Sushiswap/Apeswap): 0.30% per swap
+/// V3 DEX fee tiers: 0.05%, 0.30%, 1.00%
+const V2_FEE_PERCENT: f64 = 0.30;
+
+/// Dead/illiquid pools to exclude from arbitrage detection
+/// These pools have <$100 TVL and generate false positives
+/// Format: (DEX name, pair symbol) - verified on-chain 2026-01-28
+const EXCLUDED_POOLS: &[(&str, &str)] = &[
+    // Apeswap dead pools (verified <$1 TVL)
+    ("Apeswap", "LINK/USDC"),   // $0.01 TVL
+    ("Apeswap", "UNI/USDC"),    // Low liquidity
+    ("Apeswap", "WMATIC/USDC"), // Shows 0 reserves
+    // Sushiswap low-liquidity pools
+    ("Sushiswap", "LINK/USDC"), // ~$43 TVL - too low for $100+ trades
+    // Add more as discovered
+];
+
+/// Check if a pool should be excluded from arbitrage detection
+fn is_excluded_pool(dex: &str, pair_symbol: &str) -> bool {
+    EXCLUDED_POOLS.iter().any(|(d, p)| *d == dex && *p == pair_symbol)
+}
+
+/// Token decimals for Polygon mainnet
+/// Used to normalize V2 raw prices for comparison with V3
+fn get_token_decimals(address: &str) -> u8 {
+    // Polygon mainnet token addresses (lowercase for comparison)
+    let addr = address.to_lowercase();
+    if addr.contains("7ceb23fd6bc0add59e62ac25578270cff1b9f619") { return 18; } // WETH
+    if addr.contains("2791bca1f2de4661ed88a30c99a7a9449aa84174") { return 6; }  // USDC
+    if addr.contains("0d500b1d8e8ef31e21c99d1db9a6444d3adf1270") { return 18; } // WMATIC
+    if addr.contains("1bfd67037b42cf73acf2047067bd4f2c47d9bfd6") { return 8; }  // WBTC
+    if addr.contains("c2132d05d31c914a87c6611c10748aeb04b58e8f") { return 6; }  // USDT
+    if addr.contains("8f3cf7ad23cd3cadbd9735aff958023239c6a063") { return 18; } // DAI
+    if addr.contains("53e0bca35ec356bd5dddfebbd1fc0fd03fabad39") { return 18; } // LINK
+    if addr.contains("b33eaad8d922b1083446dc23f610c2567fb5180f") { return 18; } // UNI
+    18 // Default to 18 decimals
+}
+
+/// Normalize V2 raw price to human-readable units
+/// V2 reserves are stored in ADDRESS-SORTED order (token0 < token1 by address)
+/// regardless of how TradingPair stores token0/token1
+/// raw_price = reserve1/reserve0 where reserve0 is the smaller-address token
+/// To normalize: multiply by 10^(actual_d0 - actual_d1)
+fn normalize_v2_price(raw_price: f64, token0_addr: &str, token1_addr: &str) -> f64 {
+    // Determine actual pool ordering (reserves are address-sorted)
+    let t0_lower = token0_addr.to_lowercase();
+    let t1_lower = token1_addr.to_lowercase();
+
+    // Compare addresses to determine which is actually reserve0
+    let (actual_d0, actual_d1) = if t0_lower < t1_lower {
+        // token0 < token1 by address, matches reserve order
+        (get_token_decimals(token0_addr) as i32, get_token_decimals(token1_addr) as i32)
+    } else {
+        // token1 < token0 by address, reserves are swapped
+        (get_token_decimals(token1_addr) as i32, get_token_decimals(token0_addr) as i32)
+    };
+
+    raw_price * 10_f64.powi(actual_d0 - actual_d1)
+}
+
+/// Unified pool representation for comparing V2 and V3 pools
+/// All prices are normalized to the SAME direction (token1/token0 based on address order)
+#[derive(Debug, Clone)]
+struct UnifiedPool {
+    dex: String,
+    price: f64,           // Normalized price for comparison
+    fee_percent: f64,     // Single swap fee (not round-trip)
+    is_v3: bool,
+    token0_addr: String,  // For normalization tracking
+}
 
 /// Raw opportunity from a single strategy scan
 #[derive(Debug, Clone)]
@@ -251,9 +336,16 @@ struct RawOpportunity {
     estimated_profit: f64,
     trade_size: f64,
     lost_to_competition: bool,
+    round_trip_fee: f64,  // Total fees for this specific route
 }
 
 /// Scan for arbitrage opportunities based on strategy config (detailed version)
+///
+/// Supports both V2 and V3 pools with variable fee calculations:
+/// - V2↔V2: 0.6% round-trip (0.3% + 0.3%)
+/// - V3(0.05%)↔V2: 0.35% round-trip (0.05% + 0.3%) - BEST!
+/// - V3(0.30%)↔V2: 0.6% round-trip (0.3% + 0.3%)
+/// - V3↔V3: Variable based on fee tiers
 ///
 /// Returns raw opportunities with all pricing details for aggregation
 fn scan_for_opportunities_detailed(
@@ -264,37 +356,81 @@ fn scan_for_opportunities_detailed(
     let mut opportunities = Vec::new();
 
     for pair_symbol in &config.pairs {
-        // Get pools for this pair
-        let pools = shared_state.get_pools_for_pair(pair_symbol);
+        // Collect all pools (V2 + V3) into unified representation
+        let mut unified_pools: Vec<UnifiedPool> = Vec::new();
 
-        if pools.len() < 2 {
+        // Add V2 pools (normalize price for V3 comparison)
+        // V2 stores raw reserve ratio; V3 stores decimal-adjusted price
+        // We need to normalize V2 to match V3's format
+        for (_key, pool) in &shared_state.pools {
+            if pool.pair_symbol == *pair_symbol {
+                // Skip excluded dead/illiquid pools
+                if is_excluded_pool(&pool.dex, &pool.pair_symbol) {
+                    continue;
+                }
+
+                let raw_price = pool.price;
+                if raw_price > 0.0 {
+                    // Normalize V2 price using token decimals
+                    // Now that syncer stores actual contract token order,
+                    // the stored token0/token1 match reserve order
+                    let normalized_price = normalize_v2_price(raw_price, &pool.token0, &pool.token1);
+                    unified_pools.push(UnifiedPool {
+                        dex: pool.dex.clone(),
+                        price: normalized_price,
+                        fee_percent: V2_FEE_PERCENT,
+                        is_v3: false,
+                        token0_addr: pool.token0.clone(),
+                    });
+                }
+            }
+        }
+
+        // Add V3 pools (get raw data from v3_pools HashMap)
+        // V3 prices are already decimal-adjusted (from tick calculation)
+        for (_key, pool) in &shared_state.v3_pools {
+            if pool.pair_symbol == *pair_symbol {
+                // Use validated_price() to handle overflow errors
+                // It returns stored price if valid, or recalculates from tick if invalid
+                let price = pool.validated_price();
+                if price > 0.0 && price < 1e15 {
+                    let fee_percent = pool.fee as f64 / 10000.0;  // 500 -> 0.05%, 3000 -> 0.30%
+                    unified_pools.push(UnifiedPool {
+                        dex: pool.dex.clone(),
+                        price,
+                        fee_percent,
+                        is_v3: true,
+                        token0_addr: pool.token0.clone(),
+                    });
+                }
+            }
+        }
+
+        if unified_pools.len() < 2 {
             continue;
         }
 
         // Compare each pair of pools
-        for i in 0..pools.len() {
-            for j in (i + 1)..pools.len() {
-                let pool_a = &pools[i];
-                let pool_b = &pools[j];
-
-                let price_a = pool_a.price();
-                let price_b = pool_b.price();
-
-                if price_a == 0.0 || price_b == 0.0 {
-                    continue;
-                }
+        for i in 0..unified_pools.len() {
+            for j in (i + 1)..unified_pools.len() {
+                let pool_a = &unified_pools[i];
+                let pool_b = &unified_pools[j];
 
                 // Calculate MIDMARKET spread (before fees)
-                let (midmarket_spread, buy_dex, sell_dex, buy_price, sell_price) = if price_b > price_a {
-                    let spread = (price_b - price_a) / price_a;
-                    (spread, pool_a.dex.to_string(), pool_b.dex.to_string(), price_a, price_b)
+                let (midmarket_spread, buy_pool, sell_pool) = if pool_b.price > pool_a.price {
+                    let spread = (pool_b.price - pool_a.price) / pool_a.price;
+                    (spread, pool_a, pool_b)
                 } else {
-                    let spread = (price_a - price_b) / price_b;
-                    (spread, pool_b.dex.to_string(), pool_a.dex.to_string(), price_b, price_a)
+                    let spread = (pool_a.price - pool_b.price) / pool_b.price;
+                    (spread, pool_b, pool_a)
                 };
 
+                // Calculate round-trip fee based on ACTUAL pool fees
+                // Buy on buy_pool (pay buy fee), sell on sell_pool (pay sell fee)
+                let round_trip_fee = buy_pool.fee_percent + sell_pool.fee_percent;
+
                 // Calculate EXECUTABLE spread (after DEX fees)
-                let executable_spread = midmarket_spread - (ROUND_TRIP_FEE_PERCENT / 100.0);
+                let executable_spread = midmarket_spread - (round_trip_fee / 100.0);
 
                 // Skip if executable spread is negative (fees exceed price difference)
                 if executable_spread <= 0.0 {
@@ -326,16 +462,24 @@ fn scan_for_opportunities_detailed(
                     false
                 };
 
+                // Tag V3 opportunities specially
+                let v3_tag = if buy_pool.is_v3 || sell_pool.is_v3 {
+                    format!(" [V3 fee={:.2}%]", round_trip_fee)
+                } else {
+                    String::new()
+                };
+
                 info!(
-                    "[{}] {} Opportunity: {} | Midmarket: {:.4}% | Executable: {:.4}% | Est. Profit: ${:.2} | {} -> {}",
+                    "[{}] {} Opportunity: {}{} | Midmarket: {:.4}% | Executable: {:.4}% | Est. Profit: ${:.2} | {} -> {}",
                     config.name,
                     if lost_to_competition { "LOST" } else { "FOUND" },
                     pair_symbol,
+                    v3_tag,
                     midmarket_spread * 100.0,
                     executable_spread * 100.0,
                     estimated_profit,
-                    buy_dex,
-                    sell_dex
+                    buy_pool.dex,
+                    sell_pool.dex
                 );
 
                 opportunities.push(RawOpportunity {
@@ -343,13 +487,14 @@ fn scan_for_opportunities_detailed(
                     strategy_name: config.name.clone(),
                     midmarket_spread,
                     executable_spread,
-                    buy_dex,
-                    sell_dex,
-                    buy_price,
-                    sell_price,
+                    buy_dex: buy_pool.dex.clone(),
+                    sell_dex: sell_pool.dex.clone(),
+                    buy_price: buy_pool.price,
+                    sell_price: sell_pool.price,
                     estimated_profit,
                     trade_size: config.max_trade_size_usd,
                     lost_to_competition,
+                    round_trip_fee,
                 });
             }
         }

@@ -31,6 +31,25 @@ pub fn load_config() -> Result<BotConfig> {
         })
         .collect();
 
+    // Load optional ApeSwap addresses
+    let apeswap_router = std::env::var("APESWAP_ROUTER")
+        .ok()
+        .and_then(|s| Address::from_str(&s).ok());
+    let apeswap_factory = std::env::var("APESWAP_FACTORY")
+        .ok()
+        .and_then(|s| Address::from_str(&s).ok());
+
+    // Load optional Uniswap V3 addresses (Phase 2)
+    let uniswap_v3_factory = std::env::var("UNISWAP_V3_FACTORY")
+        .ok()
+        .and_then(|s| Address::from_str(&s).ok());
+    let uniswap_v3_router = std::env::var("UNISWAP_V3_ROUTER")
+        .ok()
+        .and_then(|s| Address::from_str(&s).ok());
+    let uniswap_v3_quoter = std::env::var("UNISWAP_V3_QUOTER")
+        .ok()
+        .and_then(|s| Address::from_str(&s).ok());
+
     Ok(BotConfig {
         rpc_url: std::env::var("RPC_URL")?,
         chain_id: std::env::var("CHAIN_ID")?.parse()?,
@@ -44,6 +63,13 @@ pub fn load_config() -> Result<BotConfig> {
         sushiswap_router: Address::from_str(&std::env::var("SUSHISWAP_ROUTER")?)?,
         uniswap_factory: Address::from_str(&std::env::var("UNISWAP_FACTORY")?)?,
         sushiswap_factory: Address::from_str(&std::env::var("SUSHISWAP_FACTORY")?)?,
+
+        apeswap_router,
+        apeswap_factory,
+
+        uniswap_v3_factory,
+        uniswap_v3_router,
+        uniswap_v3_quoter,
 
         pairs,
 

@@ -3,16 +3,24 @@
 //! Sends webhook notifications when paper trading opportunities are detected.
 //! Aggregates opportunities across all strategies to provide comprehensive reports.
 //!
+//! Features:
+//!   - Real-time individual alerts (optional)
+//!   - Batched alerts every N minutes (configurable, default 15 min)
+//!   - Daily summary reports
+//!
 //! Author: AI-Generated
 //! Created: 2026-01-28
+//! Modified: 2026-01-28 (added batched alerts every 15 minutes)
 //!
 //! Usage:
 //!   Set DISCORD_WEBHOOK environment variable to your webhook URL
-//!   Alerts are sent automatically when opportunities are detected
+//!   Alerts are batched and sent every 15 minutes by default
 
 use serde::Serialize;
 use std::collections::HashMap;
 use std::env;
+use std::sync::Arc;
+use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 
 /// Discord webhook message structure
@@ -401,6 +409,329 @@ impl DiscordAlerter {
 impl Default for DiscordAlerter {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Batched opportunity for summary reports
+#[derive(Debug, Clone)]
+pub struct BatchedOpportunitySummary {
+    /// Trading pair
+    pub pair: String,
+    /// Route (buy_dex -> sell_dex)
+    pub route: String,
+    /// Number of times this opportunity was seen
+    pub occurrences: u32,
+    /// Best executable spread seen
+    pub best_spread_pct: f64,
+    /// Worst executable spread seen
+    pub worst_spread_pct: f64,
+    /// Best estimated profit
+    pub best_profit: f64,
+    /// Total estimated profit if all were captured
+    pub total_potential_profit: f64,
+    /// Best strategies that caught this
+    pub best_strategies: Vec<String>,
+    /// First seen timestamp
+    pub first_seen: chrono::DateTime<chrono::Utc>,
+    /// Last seen timestamp
+    pub last_seen: chrono::DateTime<chrono::Utc>,
+}
+
+/// Opportunity batcher - collects opportunities and sends batched alerts
+pub struct OpportunityBatcher {
+    /// Discord alerter for sending webhooks
+    alerter: DiscordAlerter,
+    /// Accumulated opportunities keyed by "pair:buy_dex:sell_dex"
+    opportunities: Arc<Mutex<HashMap<String, Vec<AggregatedOpportunity>>>>,
+    /// Batch interval in seconds (default: 900 = 15 minutes)
+    batch_interval_secs: u64,
+    /// Last batch send time
+    last_batch_time: Arc<Mutex<chrono::DateTime<chrono::Utc>>>,
+}
+
+impl OpportunityBatcher {
+    /// Create a new opportunity batcher with default 15-minute interval
+    pub fn new() -> Self {
+        Self {
+            alerter: DiscordAlerter::new(),
+            opportunities: Arc::new(Mutex::new(HashMap::new())),
+            batch_interval_secs: 900, // 15 minutes
+            last_batch_time: Arc::new(Mutex::new(chrono::Utc::now())),
+        }
+    }
+
+    /// Create with custom batch interval (in seconds)
+    pub fn with_interval(interval_secs: u64) -> Self {
+        Self {
+            alerter: DiscordAlerter::new(),
+            opportunities: Arc::new(Mutex::new(HashMap::new())),
+            batch_interval_secs: interval_secs,
+            last_batch_time: Arc::new(Mutex::new(chrono::Utc::now())),
+        }
+    }
+
+    /// Check if Discord alerts are enabled
+    pub fn is_enabled(&self) -> bool {
+        self.alerter.is_enabled()
+    }
+
+    /// Add an opportunity to the batch
+    pub async fn add_opportunity(&self, opportunity: AggregatedOpportunity) {
+        let key = format!("{}:{}:{}", opportunity.pair, opportunity.buy_dex, opportunity.sell_dex);
+        let mut opps = self.opportunities.lock().await;
+        opps.entry(key).or_default().push(opportunity);
+    }
+
+    /// Get the batch interval in seconds
+    pub fn batch_interval_secs(&self) -> u64 {
+        self.batch_interval_secs
+    }
+
+    /// Check if it's time to send a batch (based on interval)
+    pub async fn should_send_batch(&self) -> bool {
+        let last_time = self.last_batch_time.lock().await;
+        let elapsed = chrono::Utc::now().signed_duration_since(*last_time);
+        elapsed.num_seconds() >= self.batch_interval_secs as i64
+    }
+
+    /// Flush and send all accumulated opportunities as a batched alert
+    pub async fn flush_and_send(&self) {
+        // Swap out opportunities
+        let opps = {
+            let mut guard = self.opportunities.lock().await;
+            std::mem::take(&mut *guard)
+        };
+
+        // Update last batch time
+        {
+            let mut last_time = self.last_batch_time.lock().await;
+            *last_time = chrono::Utc::now();
+        }
+
+        if opps.is_empty() {
+            info!("No opportunities to batch - skipping Discord alert");
+            return;
+        }
+
+        // Aggregate opportunities by route
+        let summaries = self.aggregate_to_summaries(&opps);
+
+        // Send batched alert
+        self.alerter.send_batched_alert(&summaries, self.batch_interval_secs).await;
+    }
+
+    /// Aggregate raw opportunities into summaries
+    fn aggregate_to_summaries(
+        &self,
+        opps: &HashMap<String, Vec<AggregatedOpportunity>>,
+    ) -> Vec<BatchedOpportunitySummary> {
+        opps.iter().map(|(key, opportunities)| {
+            let first = &opportunities[0];
+            let route = format!("{} → {}", first.buy_dex, first.sell_dex);
+
+            let best_spread = opportunities.iter()
+                .map(|o| o.executable_spread_pct)
+                .fold(f64::MIN, f64::max);
+
+            let worst_spread = opportunities.iter()
+                .map(|o| o.executable_spread_pct)
+                .fold(f64::MAX, f64::min);
+
+            let best_profit = opportunities.iter()
+                .flat_map(|o| o.strategies_caught.iter())
+                .filter(|s| !s.lost_to_competition)
+                .map(|s| s.estimated_profit)
+                .fold(0.0_f64, f64::max);
+
+            let total_potential: f64 = opportunities.iter()
+                .flat_map(|o| o.strategies_caught.iter())
+                .filter(|s| !s.lost_to_competition)
+                .map(|s| s.estimated_profit)
+                .sum();
+
+            // Find best strategies (top 3 by profit)
+            let mut strategy_profits: HashMap<String, f64> = HashMap::new();
+            for opp in opportunities {
+                for sm in &opp.strategies_caught {
+                    if !sm.lost_to_competition {
+                        let entry = strategy_profits.entry(sm.name.clone()).or_insert(0.0);
+                        *entry += sm.estimated_profit;
+                    }
+                }
+            }
+            let mut sorted_strategies: Vec<_> = strategy_profits.into_iter().collect();
+            sorted_strategies.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+            let best_strategies: Vec<String> = sorted_strategies.into_iter()
+                .take(3)
+                .map(|(name, _)| name)
+                .collect();
+
+            let first_seen = opportunities.iter()
+                .map(|o| o.timestamp)
+                .min()
+                .unwrap_or_else(chrono::Utc::now);
+
+            let last_seen = opportunities.iter()
+                .map(|o| o.timestamp)
+                .max()
+                .unwrap_or_else(chrono::Utc::now);
+
+            BatchedOpportunitySummary {
+                pair: first.pair.clone(),
+                route,
+                occurrences: opportunities.len() as u32,
+                best_spread_pct: best_spread,
+                worst_spread_pct: worst_spread,
+                best_profit,
+                total_potential_profit: total_potential,
+                best_strategies,
+                first_seen,
+                last_seen,
+            }
+        }).collect()
+    }
+}
+
+impl Default for OpportunityBatcher {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl DiscordAlerter {
+    /// Send a batched alert summarizing opportunities over a time period
+    pub async fn send_batched_alert(&self, summaries: &[BatchedOpportunitySummary], interval_secs: u64) {
+        let webhook_url = match &self.webhook_url {
+            Some(url) => url,
+            None => return,
+        };
+
+        if summaries.is_empty() {
+            return;
+        }
+
+        // Calculate totals
+        let total_opportunities: u32 = summaries.iter().map(|s| s.occurrences).sum();
+        let total_potential: f64 = summaries.iter().map(|s| s.total_potential_profit).sum();
+        let best_single: f64 = summaries.iter().map(|s| s.best_profit).fold(0.0_f64, f64::max);
+
+        // Sort by total potential profit
+        let mut sorted_summaries = summaries.to_vec();
+        sorted_summaries.sort_by(|a, b| b.total_potential_profit.partial_cmp(&a.total_potential_profit).unwrap());
+
+        // Color based on total potential
+        let color = if total_potential > 100.0 {
+            0x00FF00  // Green - excellent
+        } else if total_potential > 50.0 {
+            0xFFFF00  // Yellow - good
+        } else if total_potential > 10.0 {
+            0xFFA500  // Orange - moderate
+        } else {
+            0x808080  // Gray - minimal
+        };
+
+        let interval_mins = interval_secs / 60;
+
+        // Build opportunity list (top 10)
+        let opp_list: String = sorted_summaries.iter()
+            .take(10)
+            .map(|s| {
+                format!(
+                    "**{}** ({}) - {} times | Best: ${:.2} | Total: ${:.2}\n  └ Spread: {:.2}%-{:.2}% | Best: {}",
+                    s.pair,
+                    s.route,
+                    s.occurrences,
+                    s.best_profit,
+                    s.total_potential_profit,
+                    s.worst_spread_pct,
+                    s.best_spread_pct,
+                    s.best_strategies.first().unwrap_or(&"N/A".to_string())
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n");
+
+        // Unique pairs
+        let unique_pairs: std::collections::HashSet<_> = summaries.iter().map(|s| &s.pair).collect();
+
+        // Unique routes
+        let unique_routes: std::collections::HashSet<_> = summaries.iter().map(|s| &s.route).collect();
+
+        let embed = DiscordEmbed {
+            title: format!("📊 Paper Trading Summary ({} min window)", interval_mins),
+            description: format!(
+                "**Period:** Last {} minutes\n**Timestamp:** {}",
+                interval_mins,
+                chrono::Utc::now().format("%Y-%m-%d %H:%M UTC")
+            ),
+            color,
+            fields: vec![
+                DiscordField {
+                    name: "📈 Overview".to_string(),
+                    value: format!(
+                        "```\nOpportunities: {}\nUnique Pairs:  {}\nUnique Routes: {}\n```",
+                        total_opportunities,
+                        unique_pairs.len(),
+                        unique_routes.len()
+                    ),
+                    inline: true,
+                },
+                DiscordField {
+                    name: "💰 Profit Summary".to_string(),
+                    value: format!(
+                        "```\nTotal Potential: ${:.2}\nBest Single:     ${:.2}\nAvg per Opp:     ${:.2}\n```",
+                        total_potential,
+                        best_single,
+                        if total_opportunities > 0 { total_potential / total_opportunities as f64 } else { 0.0 }
+                    ),
+                    inline: true,
+                },
+                DiscordField {
+                    name: "🎯 Top Opportunities".to_string(),
+                    value: if opp_list.is_empty() {
+                        "No profitable opportunities detected".to_string()
+                    } else {
+                        opp_list
+                    },
+                    inline: false,
+                },
+            ],
+            footer: Some(DiscordFooter {
+                text: format!("DEX Arbitrage Paper Trading | {} min batches | Polygon", interval_mins),
+            }),
+            timestamp: Some(chrono::Utc::now().to_rfc3339()),
+        };
+
+        let message = DiscordMessage {
+            content: Some(format!(
+                "📋 **{} opportunities detected** in the last {} minutes (${:.2} potential profit)",
+                total_opportunities,
+                interval_mins,
+                total_potential
+            )),
+            embeds: vec![embed],
+        };
+
+        match self.client.post(webhook_url)
+            .json(&message)
+            .send()
+            .await
+        {
+            Ok(response) => {
+                if response.status().is_success() {
+                    info!(
+                        "Discord batched alert sent: {} opportunities, ${:.2} potential",
+                        total_opportunities,
+                        total_potential
+                    );
+                } else {
+                    warn!("Discord webhook returned status: {}", response.status());
+                }
+            }
+            Err(e) => {
+                error!("Failed to send Discord batched alert: {}", e);
+            }
+        }
     }
 }
 

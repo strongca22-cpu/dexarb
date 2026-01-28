@@ -32,7 +32,10 @@ pub mod toml_config;
 // Re-exports for convenience
 pub use collector::{PoolStateCollector, SimpleBlockCollector};
 pub use config::PaperTradingConfig;
-pub use discord_alerts::{AggregatedOpportunity, DiscordAlerter, StrategyMatch, DailySummary, StrategyStats};
+pub use discord_alerts::{
+    AggregatedOpportunity, DiscordAlerter, StrategyMatch, DailySummary, StrategyStats,
+    OpportunityBatcher, BatchedOpportunitySummary,
+};
 pub use engine::{Collector, Engine, Executor, Strategy};
 pub use executor::{MultiExecutor, SimulatedExecutor, SimulatedTradeAction};
 pub use metrics::{MetricsAggregator, SimulatedTradeResult, TraderMetrics};

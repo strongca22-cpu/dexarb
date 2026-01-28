@@ -1,16 +1,17 @@
-# Paper Trading Configuration
+# Paper Trading Configuration - PHASE 1 EXPANSION
 #
-# 12+ Scenarios from Parameter Analysis Document
-# Testing different hypotheses to find the optimal strategy
+# 15 Scenarios: Original 13 + Stablecoin Specialist + Altcoin Hunter
+# Testing with 7 pairs (WETH, WMATIC, WBTC, USDT, DAI, LINK, UNI) × 3 DEXs
 #
 # Edit this file and send SIGHUP to reload: kill -HUP $(pgrep paper-trading)
 #
 # Created: 2026-01-28
-# Updated: 2026-01-28 (Phase 1 expansion - added 5 new pairs)
+# Updated: 2026-01-28 (Phase 1 expansion - added 5 new pairs + ApeSwap)
 
 [general]
-# Path to shared pool state (written by data-collector)
-state_file = "/home/botuser/bots/dexarb/data/pool_state.json"
+# Path to shared pool state (written by data-collector with STATE_FILE env)
+# NOTE: Use STATE_FILE=/home/botuser/bots/dexarb/data/pool_state_phase1.json when starting collector
+state_file = "/home/botuser/bots/dexarb/data/pool_state_phase1.json"
 
 # How often to check for opportunities (ms)
 # Note: Some strategies override this with faster/slower polling

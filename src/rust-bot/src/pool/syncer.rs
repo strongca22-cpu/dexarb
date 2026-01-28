@@ -108,6 +108,30 @@ impl<P: Middleware + 'static> PoolSyncer<P> {
                     warn!("Failed to sync Sushiswap pool for {}: {}", pair.symbol, e);
                 }
             }
+
+            // Sync ApeSwap pool (if configured)
+            if self.config.apeswap_factory.is_some() {
+                match self.sync_pool(DexType::Apeswap, &pair).await {
+                    Ok(pool) => {
+                        self.state_manager.update_pool(pool);
+                        info!(
+                            "Synced Apeswap pool: {} (reserves: {} / {})",
+                            pair.symbol,
+                            self.state_manager
+                                .get_pool(DexType::Apeswap, &pair.symbol)
+                                .map(|p| format!("{}", p.reserve0))
+                                .unwrap_or_default(),
+                            self.state_manager
+                                .get_pool(DexType::Apeswap, &pair.symbol)
+                                .map(|p| format!("{}", p.reserve1))
+                                .unwrap_or_default()
+                        );
+                    }
+                    Err(e) => {
+                        warn!("Failed to sync Apeswap pool for {}: {}", pair.symbol, e);
+                    }
+                }
+            }
         }
 
         let (count, min_block, max_block) = self.state_manager.stats();
@@ -120,6 +144,10 @@ impl<P: Middleware + 'static> PoolSyncer<P> {
     }
 
     /// Sync a specific pool's reserves
+    ///
+    /// IMPORTANT: V2 pools sort tokens by address (token0 < token1).
+    /// We must get the actual token0/token1 from the pool contract, not from config.
+    /// This matches the fix applied to V3 syncer.
     async fn sync_pool(&self, dex: DexType, pair: &TradingPair) -> Result<PoolState> {
         // Get pool address from factory
         let pool_address = self.get_pool_address(dex, pair).await?;
@@ -128,9 +156,19 @@ impl<P: Middleware + 'static> PoolSyncer<P> {
             anyhow::bail!("Pool not found for pair {} on {:?}", pair.symbol, dex);
         }
 
+        let pool = IUniswapV2Pair::new(pool_address, Arc::clone(&self.provider));
+
         // Fetch reserves using getReserves()
-        let (reserve0, reserve1, _block_timestamp_last) =
-            self.get_reserves(pool_address).await?;
+        let (reserve0, reserve1, _block_timestamp_last) = pool
+            .get_reserves()
+            .call()
+            .await
+            .context("Failed to get reserves")?;
+
+        // CRITICAL: Get the ACTUAL token0/token1 from the pool contract
+        // V2 pools sort tokens by address, which may differ from config order
+        let actual_token0 = pool.token_0().call().await.context("Failed to get token0")?;
+        let actual_token1 = pool.token_1().call().await.context("Failed to get token1")?;
 
         // Get current block number
         let current_block = self
@@ -140,27 +178,42 @@ impl<P: Middleware + 'static> PoolSyncer<P> {
             .context("Failed to get block number")?
             .as_u64();
 
+        // Create pair with actual pool ordering (preserves symbol from config)
+        let actual_pair = TradingPair {
+            token0: actual_token0,
+            token1: actual_token1,
+            symbol: pair.symbol.clone(),
+        };
+
         debug!(
-            "Pool {} on {:?}: address={:?}, reserves=({}, {}), block={}",
-            pair.symbol, dex, pool_address, reserve0, reserve1, current_block
+            "Pool {} on {:?}: address={:?}, token0={:?}, token1={:?}, reserves=({}, {}), block={}",
+            pair.symbol, dex, pool_address, actual_token0, actual_token1, reserve0, reserve1, current_block
         );
 
         Ok(PoolState {
             address: pool_address,
             dex,
-            pair: pair.clone(),
+            pair: actual_pair,
             reserve0: U256::from(reserve0),
             reserve1: U256::from(reserve1),
             last_updated: current_block,
         })
     }
 
-    /// Get pool address from factory contract
+    /// Get pool address from factory contract (V2 pools only)
     async fn get_pool_address(&self, dex: DexType, pair: &TradingPair) -> Result<Address> {
         let factory_address = match dex {
             DexType::Uniswap => self.config.uniswap_factory,
             DexType::Sushiswap => self.config.sushiswap_factory,
-            DexType::Quickswap => anyhow::bail!("Quickswap not implemented in Phase 1"),
+            DexType::Quickswap => self.config.uniswap_factory, // Quickswap == Uniswap slot on Polygon
+            DexType::Apeswap => {
+                self.config.apeswap_factory
+                    .ok_or_else(|| anyhow::anyhow!("ApeSwap factory not configured"))?
+            }
+            // V3 types are handled by V3PoolSyncer, not this V2 syncer
+            DexType::UniswapV3_005 | DexType::UniswapV3_030 | DexType::UniswapV3_100 => {
+                anyhow::bail!("V3 pools should be synced using V3PoolSyncer")
+            }
         };
 
         let factory = IUniswapV2Factory::new(factory_address, Arc::clone(&self.provider));
@@ -197,7 +250,17 @@ impl<P: Middleware + 'static> PoolSyncer<P> {
         dex: DexType,
         pair: TradingPair,
     ) -> Result<PoolState> {
-        let (reserve0, reserve1, _) = self.get_reserves(pool_address).await?;
+        let pool = IUniswapV2Pair::new(pool_address, Arc::clone(&self.provider));
+
+        let (reserve0, reserve1, _) = pool
+            .get_reserves()
+            .call()
+            .await
+            .context("Failed to get reserves")?;
+
+        // Get actual token ordering from pool contract
+        let actual_token0 = pool.token_0().call().await.context("Failed to get token0")?;
+        let actual_token1 = pool.token_1().call().await.context("Failed to get token1")?;
 
         let current_block = self
             .provider
@@ -206,10 +269,16 @@ impl<P: Middleware + 'static> PoolSyncer<P> {
             .context("Failed to get block number")?
             .as_u64();
 
+        let actual_pair = TradingPair {
+            token0: actual_token0,
+            token1: actual_token1,
+            symbol: pair.symbol.clone(),
+        };
+
         let pool_state = PoolState {
             address: pool_address,
             dex,
-            pair,
+            pair: actual_pair,
             reserve0: U256::from(reserve0),
             reserve1: U256::from(reserve1),
             last_updated: current_block,
