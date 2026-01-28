@@ -6,6 +6,7 @@
 //! Author: AI-Generated
 //! Created: 2026-01-27
 //! Modified: 2026-01-27 - Added opportunity detection (Day 3)
+//! Modified: 2026-01-28 - Added trade execution (Day 4)
 
 mod arbitrage;
 mod config;
@@ -13,7 +14,7 @@ mod pool;
 mod types;
 
 use anyhow::Result;
-use arbitrage::OpportunityDetector;
+use arbitrage::{OpportunityDetector, TradeExecutor};
 use config::load_config;
 use ethers::prelude::*;
 use pool::{PoolStateManager, PoolSyncer};
@@ -56,6 +57,18 @@ async fn main() -> Result<()> {
     // Initialize opportunity detector
     let detector = OpportunityDetector::new(config.clone(), state_manager.clone());
     info!("Opportunity detector initialized");
+
+    // Initialize trade executor
+    // Parse wallet from private key
+    let wallet: LocalWallet = config
+        .private_key
+        .parse::<LocalWallet>()?
+        .with_chain_id(config.chain_id);
+    info!("Wallet loaded: {:?}", wallet.address());
+
+    // Create executor in DRY RUN mode by default for safety
+    let executor = TradeExecutor::new(Arc::clone(&provider), wallet, config.clone());
+    info!("Trade executor initialized (DRY RUN mode)");
 
     // Initial pool sync
     info!("Performing initial pool sync...");
@@ -128,15 +141,37 @@ async fn main() -> Result<()> {
                 );
             }
 
-            // TODO Day 4: Execute best opportunity
+            // Execute best opportunity
             if let Some(best) = opportunities.first() {
-                warn!(
-                    "⏸️  BEST: {} - Buy {:?} Sell {:?} - ${:.2} (execution not yet implemented)",
+                info!(
+                    "🎯 BEST: {} - Buy {:?} Sell {:?} - ${:.2}",
                     best.pair.symbol,
                     best.buy_dex,
                     best.sell_dex,
                     best.estimated_profit
                 );
+
+                match executor.execute(best).await {
+                    Ok(result) => {
+                        if result.success {
+                            info!(
+                                "✅ Trade complete: {} | Net profit: ${:.2} | Time: {}ms",
+                                result.opportunity,
+                                result.net_profit_usd,
+                                result.execution_time_ms
+                            );
+                        } else {
+                            warn!(
+                                "❌ Trade failed: {} | Error: {}",
+                                result.opportunity,
+                                result.error.unwrap_or_else(|| "Unknown".to_string())
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        error!("Execution error: {}", e);
+                    }
+                }
             }
         }
 

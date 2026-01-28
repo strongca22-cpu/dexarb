@@ -68,9 +68,10 @@ dexarb/
 │   │       │   ├── state.rs        # PoolStateManager
 │   │       │   ├── syncer.rs       # PoolSyncer with ABIs
 │   │       │   └── calculator.rs   # AMM price math
-│   │       └── arbitrage/          # Day 3: Opportunity detection
+│   │       └── arbitrage/          # Day 3-4: Opportunity detection & execution
 │   │           ├── mod.rs
-│   │           └── detector.rs     # OpportunityDetector
+│   │           ├── detector.rs     # OpportunityDetector
+│   │           └── executor.rs     # TradeExecutor (Day 4)
 │   └── contracts/                  # Solidity (Phase 2)
 ├── README.md
 └── .gitignore
@@ -100,7 +101,7 @@ dexarb/
 
 1. ~~Implement pool syncing (`src/pool/`) - Day 2 per checklist~~ ✓
 2. ~~Implement opportunity detection (`src/arbitrage/`) - Day 3~~ ✓
-3. Implement trade execution - Day 4
+3. ~~Implement trade execution - Day 4~~ ✓
 4. Test on Mumbai testnet - Day 5
 5. Deploy to mainnet with small capital - Day 6-7
 
@@ -172,3 +173,36 @@ dexarb/
 - Build swap function using Uniswap V2 Router ABI
 - Add slippage protection
 - See `docs/phase1_execution_checklist.md` Day 4 section
+
+## Session 4 Summary (Day 4)
+
+**Objective**: Implement trade execution per Day 4 checklist
+
+**Completed**:
+1. Created `src/rust-bot/src/arbitrage/executor.rs` with:
+   - `TradeExecutor` struct with provider, wallet, config
+   - `execute()` - main execution function for arbitrage
+   - `swap()` - single swap using Uniswap V2 Router ABI
+   - `ensure_approval()` - ERC20 token approvals
+   - `calculate_min_out()` - slippage protection
+   - `simulate_execution()` - dry run mode
+2. Added ABIs: `IUniswapV2Router02`, `IERC20`
+3. Integrated executor into main loop
+4. Default to DRY RUN mode for safety
+
+**Key Safety Features**:
+- **DRY RUN by default**: Simulates trades without actual execution
+- **Gas price check**: Rejects if gas > MAX_GAS_PRICE_GWEI
+- **Slippage protection**: Minimum output enforced
+- **Deadline**: 5-minute deadline on swaps
+- **Comprehensive logging**: All steps logged
+
+**Phase 1 Limitation** (documented):
+- Two separate transactions = leg risk
+- Price can move between buy and sell
+- Phase 2 will use flash loans for atomic execution
+
+**Next Session** (Day 5):
+- Test on Mumbai testnet with real transactions
+- Or proceed to mainnet with small capital
+- See `docs/phase1_execution_checklist.md` Day 5 section

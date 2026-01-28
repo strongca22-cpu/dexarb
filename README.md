@@ -25,7 +25,7 @@ dexarb/
 └── README.md
 ```
 
-## Status: Phase 1 Day 3 Complete
+## Status: Phase 1 Day 4 Complete
 
 - [x] Repository initialized
 - [x] Documentation added
@@ -41,7 +41,10 @@ dexarb/
   - OpportunityDetector with spread calculation
   - Profit estimation with gas costs
   - All calculations in Rust (microsecond latency)
-- [ ] Trade execution (Day 4)
+- [x] **Trade execution** (Day 4)
+  - TradeExecutor with Uniswap V2 Router
+  - DRY RUN mode by default (safe testing)
+  - Slippage protection & gas price checks
 - [ ] Testnet testing (Day 5)
 - [ ] Mainnet deployment (Day 6-7)
 
