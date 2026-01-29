@@ -57,10 +57,11 @@ abigen!(
 );
 
 /// V3 fee tiers to check for each pair
-pub const V3_FEE_TIERS: [(u32, DexType); 3] = [
+pub const V3_FEE_TIERS: [(u32, DexType); 4] = [
+    (100, DexType::UniswapV3_001),   // 0.01% - stablecoin pairs (USDT/USDC, DAI/USDC)
     (500, DexType::UniswapV3_005),   // 0.05% - best for stable/correlated pairs
     (3000, DexType::UniswapV3_030),  // 0.30% - standard tier
-    (10000, DexType::UniswapV3_100), // 1.00% - exotic pairs
+    (10000, DexType::UniswapV3_100), // 1.00% - exotic pairs (filtered at sync/detect time)
 ];
 
 /// Syncs V3 pool state from blockchain
@@ -134,7 +135,7 @@ impl<P: Middleware + 'static> V3PoolSyncer<P> {
             }
         }
 
-        info!("V3 sync complete: {} pools synced (0.05% + 0.30% tiers only)", pools.len());
+        info!("V3 sync complete: {} pools synced (0.01% + 0.05% + 0.30% tiers)", pools.len());
         Ok(pools)
     }
 
@@ -429,8 +430,9 @@ mod tests {
 
     #[test]
     fn test_v3_fee_tiers() {
-        assert_eq!(V3_FEE_TIERS[0].0, 500);
-        assert_eq!(V3_FEE_TIERS[1].0, 3000);
-        assert_eq!(V3_FEE_TIERS[2].0, 10000);
+        assert_eq!(V3_FEE_TIERS[0].0, 100);
+        assert_eq!(V3_FEE_TIERS[1].0, 500);
+        assert_eq!(V3_FEE_TIERS[2].0, 3000);
+        assert_eq!(V3_FEE_TIERS[3].0, 10000);
     }
 }

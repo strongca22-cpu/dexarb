@@ -30,6 +30,7 @@ pub enum DexType {
     Sushiswap,
     Quickswap,     // Alias for clarity
     Apeswap,       // Phase 1 expansion - third V2 DEX
+    UniswapV3_001, // Uniswap V3 0.01% fee tier (stablecoins)
     UniswapV3_005, // Phase 2 - Uniswap V3 0.05% fee tier
     UniswapV3_030, // Phase 2 - Uniswap V3 0.30% fee tier
     UniswapV3_100, // Phase 2 - Uniswap V3 1.00% fee tier
@@ -38,12 +39,13 @@ pub enum DexType {
 impl DexType {
     /// Returns true if this is a V3 DEX
     pub fn is_v3(&self) -> bool {
-        matches!(self, DexType::UniswapV3_005 | DexType::UniswapV3_030 | DexType::UniswapV3_100)
+        matches!(self, DexType::UniswapV3_001 | DexType::UniswapV3_005 | DexType::UniswapV3_030 | DexType::UniswapV3_100)
     }
 
     /// Returns the fee in basis points for V3 pools
     pub fn v3_fee_bps(&self) -> Option<u32> {
         match self {
+            DexType::UniswapV3_001 => Some(1),    // 0.01% = 100 / 10000
             DexType::UniswapV3_005 => Some(5),    // 0.05% = 500 / 10000
             DexType::UniswapV3_030 => Some(30),   // 0.30% = 3000 / 10000
             DexType::UniswapV3_100 => Some(100),  // 1.00% = 10000 / 10000
@@ -54,6 +56,7 @@ impl DexType {
     /// Get V3 fee tier (for factory queries)
     pub fn v3_fee_tier(&self) -> Option<u32> {
         match self {
+            DexType::UniswapV3_001 => Some(100),
             DexType::UniswapV3_005 => Some(500),
             DexType::UniswapV3_030 => Some(3000),
             DexType::UniswapV3_100 => Some(10000),
@@ -69,6 +72,7 @@ impl fmt::Display for DexType {
             DexType::Sushiswap => write!(f, "Sushiswap"),
             DexType::Quickswap => write!(f, "Quickswap"),
             DexType::Apeswap => write!(f, "Apeswap"),
+            DexType::UniswapV3_001 => write!(f, "UniswapV3_0.01%"),
             DexType::UniswapV3_005 => write!(f, "UniswapV3_0.05%"),
             DexType::UniswapV3_030 => write!(f, "UniswapV3_0.30%"),
             DexType::UniswapV3_100 => write!(f, "UniswapV3_1.00%"),
@@ -128,7 +132,7 @@ pub struct V3PoolState {
     pub sqrt_price_x96: U256,
     /// Current tick
     pub tick: i32,
-    /// Fee tier (500 = 0.05%, 3000 = 0.30%, 10000 = 1.00%)
+    /// Fee tier (100 = 0.01%, 500 = 0.05%, 3000 = 0.30%, 10000 = 1.00%)
     pub fee: u32,
     /// Current in-range liquidity
     pub liquidity: u128,

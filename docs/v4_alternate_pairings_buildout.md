@@ -2,7 +2,7 @@
 
 ## Multi-Pair Expansion Strategy
 
-**Version**: 4.4
+**Version**: 4.5
 **Date**: 2026-01-29
 **Based On**: Live bot data, $500 incident postmortem, Quoter gap analysis
 **Goal**: Systematically expand pair coverage with empirical validation per pair
@@ -11,20 +11,21 @@
 
 ## Current State
 
-### Active Pairings (7 pairs, 14 V3 pools)
+### Active Pairings (7 pairs, 21 V3 pools in data-collector/paper-trading, 14 in live bot)
 
 All paired with USDC.e (`0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174`).
-Each monitored at 0.05% and 0.30% V3 fee tiers. 1% fee tier excluded (phantom liquidity on Polygon, confirmed by Quoter testing).
+Data-collector and paper-trading monitor 0.01%, 0.05%, and 0.30% V3 fee tiers (0.01% added 2026-01-29).
+Live bot still on 0.05% and 0.30% only (old binary, unchanged). 1% fee tier excluded (phantom liquidity on Polygon).
 
-| # | Pair | Token Address | Fee Tiers | Status |
-|---|------|--------------|-----------|--------|
-| 1 | WETH/USDC | `0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619` | 0.05%, 0.30% | Active |
-| 2 | WMATIC/USDC | `0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270` | 0.05%, 0.30% | Active |
-| 3 | WBTC/USDC | `0x1BFD67037B42Cf73acF2047067bd4F2C47D9BfD6` | 0.05%, 0.30% | Active |
-| 4 | USDT/USDC | `0xc2132D05D31c914a87C6611C10748AEb04B58e8F` | 0.05%, 0.30% | Active |
-| 5 | DAI/USDC | `0x8f3Cf7ad23Cd3CaDbD9735AFf958023239c6A063` | 0.05%, 0.30% | Active |
-| 6 | LINK/USDC | `0x53E0bca35eC356BD5ddDFebbD1Fc0fD03FaBad39` | 0.05%, 0.30% | Active |
-| 7 | UNI/USDC | `0xb33EaAd8d922B1083446DC23f610c2567fB5180f` | 0.05%, 0.30% | Active |
+| # | Pair | Token Address | Fee Tiers (paper) | 0.01% Liquidity | Status |
+|---|------|--------------|-------------------|-----------------|--------|
+| 1 | WETH/USDC | `0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619` | 0.01%, 0.05%, 0.30% | 749B (low) | Active |
+| 2 | WMATIC/USDC | `0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270` | 0.01%, 0.05%, 0.30% | 328T (moderate) | Active |
+| 3 | WBTC/USDC | `0x1BFD67037B42Cf73acF2047067bd4F2C47D9BfD6` | 0.01%, 0.05%, 0.30% | 0 (no pool) | Active |
+| 4 | USDT/USDC | `0xc2132D05D31c914a87C6611C10748AEb04B58e8F` | 0.01%, 0.05%, 0.30% | 128T (deep) | Active |
+| 5 | DAI/USDC | `0x8f3Cf7ad23Cd3CaDbD9735AFf958023239c6A063` | 0.01%, 0.05%, 0.30% | 150e18 (deep) | Active |
+| 6 | LINK/USDC | `0x53E0bca35eC356BD5ddDFebbD1Fc0fD03FaBad39` | 0.01%, 0.05%, 0.30% | 0 (no pool) | Active |
+| 7 | UNI/USDC | `0xb33EaAd8d922B1083446DC23f610c2567fB5180f` | 0.01%, 0.05%, 0.30% | 0 (no pool) | Active |
 
 **Removed:**
 | Pair | Reason | Date |
@@ -39,13 +40,13 @@ These are hard constraints that limit what pairs can be added without code chang
 
 2. **V3-only** — V2 sync is dropped from the main loop. V2 code exists but is not called. Re-enabling V2 would require re-adding `PoolSyncer` to `main.rs` and fixing the V2 price calculation inversion bug.
 
-3. **0.05% and 0.30% fee tiers only** — `V3_FEE_TIERS` in `v3_syncer.rs` defines three tiers (500, 3000, 10000) but 1% (10000) is filtered out at sync and detection time. The 0.01% fee tier (100) is NOT included in `V3_FEE_TIERS` — adding it requires a code change (see "0.01% Fee Tier" section below).
+3. **0.01%, 0.05%, and 0.30% fee tiers** — `V3_FEE_TIERS` in `v3_syncer.rs` defines four tiers (100, 500, 3000, 10000). The 1% tier (10000) is filtered out at sync and detection time. The 0.01% tier was added 2026-01-29 and is active in data-collector/paper-trading. Live bot still on old binary (0.05% + 0.30% only).
 
 4. **Flat .env config** — Pairs are defined as `token0:token1:symbol` in a comma-separated `TRADING_PAIRS` string. No per-pair configuration (min spread, max trade size, etc.). All pairs share the same global `MAX_TRADE_SIZE_USD`, `MIN_PROFIT_USD`, and `MAX_SLIPPAGE_PERCENT`.
 
 5. **Single-threaded execution** — The bot tries opportunities sequentially in profit order. While scanning is parallel, only one trade can execute at a time.
 
-6. **RPC budget** — Each pair adds ~4 RPC calls/cycle (2 pools x 2 calls). At 3s poll interval, 7 pairs = 14 pools = ~29 calls/cycle = ~9.7 calls/sec. On Alchemy WSS (free tier 22.2M/month, ~25.1M projected).
+6. **RPC budget** — Each pair adds ~6 RPC calls/cycle (3 pools x 2 calls) with 0.01% tier. At 3s poll interval, 7 pairs = 21 pools = ~43 calls/cycle = ~14.3 calls/sec. Data-collector at ~37.2M/month projected (may need Alchemy Growth tier). Live bot still at 14 pools (~29 calls/cycle, ~25.1M/month).
 
 ### Key Lessons from Live Testing
 
@@ -195,35 +196,57 @@ Gate checks run via `scripts/pool_gate_check.py` at block ~82274740.
 
 ---
 
-## 0.01% Fee Tier Consideration
+## 0.01% Fee Tier — IMPLEMENTED (2026-01-29)
 
 ### What It Is
 
 Uniswap V3 has a 0.01% (1 bps) fee tier designed for stablecoin pairs. On Polygon:
-- USDT/USDC and DAI/USDC likely have 0.01% pools
-- These pools have extremely low swap fees
-- Cross-tier arb: 0.01% <-> 0.05% gives only 0.06% round-trip fee (vs 0.35% for 0.05% <-> 0.30%)
+- USDT/USDC and DAI/USDC have active 0.01% pools with deep liquidity
+- Cross-tier arb: 0.01% ↔ 0.05% gives only 0.06% round-trip fee (vs 0.35% for 0.05% ↔ 0.30%)
+- WMATIC/USDC and WETH/USDC also have 0.01% pools (lower liquidity)
 
-### Code Change Required
+### Implementation (2026-01-29)
 
-`V3_FEE_TIERS` in `v3_syncer.rs` currently defines:
+Added `UniswapV3_001` to `DexType` enum and `(100, DexType::UniswapV3_001)` to `V3_FEE_TIERS`:
+
 ```rust
-pub const V3_FEE_TIERS: [(u32, DexType); 3] = [
+pub const V3_FEE_TIERS: [(u32, DexType); 4] = [
+    (100, DexType::UniswapV3_001),   // 0.01%
     (500, DexType::UniswapV3_005),   // 0.05%
     (3000, DexType::UniswapV3_030),  // 0.30%
-    (10000, DexType::UniswapV3_100), // 1.00%
+    (10000, DexType::UniswapV3_100), // 1.00% (filtered at sync/detect time)
 ];
 ```
 
-Adding 0.01% requires:
-1. Add `UniswapV3_001` variant to `DexType` enum in `types.rs`
-2. Add `(100, DexType::UniswapV3_001)` to `V3_FEE_TIERS`
-3. Update detector fee logic to handle 0.01% combinations
-4. Test: verify 0.01% pools exist for USDT/USDC and DAI/USDC on Polygon
+Files modified: `types.rs`, `v3_syncer.rs`, `shared_state.rs`, `syncer.rs`, `executor.rs`.
+Detector and paper trading needed no changes — generic fee-based logic handles 0.01% automatically.
 
-### When to Do This
+### Deployment Status
 
-Defer until after at least one candidate pair from Group A passes all gates. The 0.01% tier is only useful for stablecoin pairs (USDT/USDC, DAI/USDC) which are already active. It adds new arb routes to existing pairs rather than new pairs.
+- **Data-collector**: restarted, syncing 21 V3 pools (7 pairs × 3 tiers)
+- **Paper-trading**: restarted, detecting 0.01%↔0.05% routes
+- **Live bot**: NOT restarted, still on old binary with 14 V3 pools (0.05% + 0.30% only)
+
+### Observed 0.01% Pool Data (from data-collector JSON)
+
+| Pair | 0.01% Liquidity | 0.01% Price | Notes |
+|------|----------------|-------------|-------|
+| USDT/USDC | 128T | 1.00120 | Deep liquidity, active |
+| DAI/USDC | 150e18 | 0.99980 | Deep liquidity, active |
+| WMATIC/USDC | 328T | 0.11777 | Moderate liquidity |
+| WETH/USDC | 749B | 0.00034 | Low liquidity |
+| WBTC/USDC | 0 | 114133 | No liquidity |
+| LINK/USDC | 0 | 0.0779 | No liquidity |
+| UNI/USDC | 0 | 0.1999 | No liquidity |
+
+### Early Paper Trading Results
+
+New routes detected immediately:
+- **WMATIC/USDC 0.05%↔0.01%**: 0.06% round-trip, 0.17% midmarket, 0.11% executable, ~$0.49
+- **WMATIC/USDC 0.30%↔0.01%**: 0.31% round-trip, 0.41% midmarket, 0.10% executable, ~$0.41
+- **WETH/USDC 0.05%↔0.01%**: 0.06% round-trip, 0.14% midmarket, 0.08% executable, ~$0.22
+
+Need 24-48h of data to assess frequency and reliability of these spreads.
 
 ---
 
@@ -315,18 +338,19 @@ AAVE passed Gates 1-3 (pools exist, both active, Quoter executable at $140). How
 - **Removed** from `.env`, `paper_trading.toml`, all strategies. Gate check data preserved above.
 - **Lesson**: Gate checks (pool existence + activity + Quoter depth) are necessary but not sufficient. Observation period (Gate 4) caught a phantom that passed all automated checks.
 
-**Round 3: 0.01% fee tier for stablecoins** — CONFIRMED VIABLE
+**Round 3: 0.01% fee tier** — IMPLEMENTED (2026-01-29)
 
 Gate checks confirmed both USDT/USDC and DAI/USDC have active 0.01% pools:
 - USDT 0.01% pool: `0xdac8a8e6dbf8c690ec6815e0ff03491b2770255d` (liquidity: 128T)
 - DAI 0.01% pool: `0x5645dcb64c059aa11212707fbf4e7f984440a8cf` (liquidity: 150e18)
 - Both Quoter-executable at $140 trade size
 
-Implementation:
-1. Add `UniswapV3_001` to `DexType` enum in `types.rs`
-2. Add `(100, DexType::UniswapV3_001)` to `V3_FEE_TIERS` in `v3_syncer.rs`
-3. This gives existing pairs new routes: 0.01%↔0.05% (0.06% round-trip) and 0.01%↔0.30% (0.31% round-trip)
-4. Rebuild, restart, observe spread data
+Implementation complete:
+- Added `UniswapV3_001` to `DexType` enum + all match arms (`types.rs`, `syncer.rs`, `executor.rs`, `shared_state.rs`)
+- Added `(100, DexType::UniswapV3_001)` to `V3_FEE_TIERS` in `v3_syncer.rs`
+- Data-collector and paper-trading restarted with 21 V3 pools (7 pairs × 3 active tiers)
+- Live bot remains on old binary (14 pools, 0.05% + 0.30% only)
+- Early paper trading detects 0.01%↔0.05% routes for WMATIC and WETH. See "0.01% Fee Tier — IMPLEMENTED" section above for details.
 
 **Round 4: No further alt-token candidates available**
 
@@ -348,34 +372,38 @@ Re-check periodically (monthly) — new pools may be created as Polygon V3 ecosy
 
 ## RPC Budget Impact
 
-### Current Load
+### Current Load (data-collector / paper-trading)
 
 | Metric | Value |
 |--------|-------|
 | Active pairs | 7 |
-| V3 pools (0.05% + 0.30% each) | 14 |
-| RPC calls/cycle | ~29 (14 pools x 2 + 1 block) |
+| V3 pools (0.01% + 0.05% + 0.30%) | 21 |
+| RPC calls/cycle | ~43 (21 pools × 2 + 1 block) |
 | Poll interval | 3s |
-| Calls/sec | ~9.7 |
-| Monthly calls | ~25.1M |
+| Calls/sec | ~14.3 |
+| Monthly calls | ~37.2M |
 | RPC provider | Alchemy WSS (free tier) |
 
-### Projected Load by Pair Count
+Note: Live bot still at 14 pools / ~29 calls/cycle / ~25.1M/month (old binary, 0.05% + 0.30% only).
+
+### Projected Load by Pair Count (with 0.01% tier)
+
+With 3 active fee tiers per pair: pools = pairs × 3, calls/cycle = pools × 2 + 1.
 
 | Active Pairs | Pools | Calls/Cycle | Calls/Sec | Monthly |
 |-------------|-------|-------------|-----------|---------|
-| 7 (current) | 14 | 29 | 9.7 | 25.1M |
-| 9 | 18 | 37 | 12.3 | 32.0M |
-| 10 | 20 | 41 | 13.7 | 35.4M |
-| 12 | 24 | 49 | 16.3 | 42.3M |
-| 15 | 30 | 61 | 20.3 | 52.7M |
+| 7 (current) | 21 | 43 | 14.3 | 37.2M |
+| 9 | 27 | 55 | 18.3 | 47.5M |
+| 10 | 30 | 61 | 20.3 | 52.7M |
+| 12 | 36 | 73 | 24.3 | 63.1M |
+| 15 | 45 | 91 | 30.3 | 78.7M |
 
 ### RPC Provider Considerations
 
-- **Alchemy free tier (current):** 22.2M calls/month. Current 7-pair load (~25.1M) within budget.
+- **Alchemy free tier (current):** 22.2M calls/month. Current 7-pair load (~37.2M) **exceeds budget** with 0.01% tier. Monitor for throttling.
 - **Alchemy Growth ($49/month):** 300M calls/month. Supports up to ~30+ pairs comfortably.
 - **PublicNode (backup):** Free but drops WebSocket connections under burst load. Not suitable for V3 sync.
-- **Recommendation:** Monitor Alchemy free tier usage. Upgrade to Growth if throttled or adding more pairs.
+- **Recommendation:** Upgrade to Alchemy Growth tier if throttled. Current load (~37.2M) is 1.67x the free tier limit. Alternatively, increase poll interval to 5s to reduce to ~22.3M/month.
 
 ### Pruning Inactive Pairs
 
@@ -403,11 +431,14 @@ Currently all pairs share global `MAX_TRADE_SIZE_USD`, `MIN_PROFIT_USD`, `MAX_SL
 - Detector to look up per-pair thresholds
 - Executor to use per-pair slippage/size limits
 
-### For 0.01% fee tier
+### For 0.01% fee tier — DONE (2026-01-29)
 
-- Add `UniswapV3_001` to `DexType` enum in `types.rs`
-- Add `(100, DexType::UniswapV3_001)` to `V3_FEE_TIERS` in `v3_syncer.rs`
-- Update any fee-tier display logic in detector/logging
+Implemented. See "0.01% Fee Tier — IMPLEMENTED" section above.
+- Added `UniswapV3_001` to `DexType` enum in `types.rs`
+- Added `(100, DexType::UniswapV3_001)` to `V3_FEE_TIERS` in `v3_syncer.rs`
+- Updated exhaustive match arms in `syncer.rs` and `executor.rs`
+- Added deserialization mapping in `shared_state.rs`
+- No changes needed to detector or paper trading (generic fee logic)
 
 ---
 
@@ -476,7 +507,8 @@ Confirm: correct token name, not a scam/clone, has transfer activity.
 | 4.2 | 2026-01-29 | Gate check results: AAVE passes (only new candidate). CRV/SUSHI/BAL/GRT/SNX/1INCH/GHST/COMP/stMATIC/wstETH all fail. USDT+DAI 0.01% pools confirmed active. Created `scripts/pool_gate_check.py`. Updated rollout sequence with empirical findings. |
 | 4.3 | 2026-01-29 | AAVE/USDC added (8th pair). Phantom 69% spread observed — Quoter rejects every cycle. Alchemy WSS migration (from PublicNode). 1% fee tier filter added to data collector's `sync_v3_pools_subset()`. RPC budget updated for 8 pairs on Alchemy. |
 | 4.4 | 2026-01-29 | AAVE/USDC removed — phantom confirmed (302,000x Quoter gap, $9M/15min phantom profit in Discord reports). Config separated: `.env.live` for live bot, `.env` for dev/paper. Back to 7 pairs. |
+| 4.5 | 2026-01-29 | 0.01% fee tier implemented. `UniswapV3_001` added to `DexType`. Data-collector and paper-trading syncing 21 V3 pools (7 pairs × 3 tiers). Live bot unchanged (14 pools). Early paper results: WMATIC 0.05%↔0.01% showing ~$0.49, WETH 0.05%↔0.01% showing ~$0.22. RPC budget updated to 43 calls/cycle (~37.2M/month). |
 
 ---
 
-*Last updated: 2026-01-29 (v4.4 — AAVE removed, config separated, 7 active pairs)*
+*Last updated: 2026-01-29 (v4.5 — 0.01% fee tier implemented, 21 V3 pools in paper, 14 in live)*

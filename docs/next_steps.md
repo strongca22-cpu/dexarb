@@ -211,13 +211,13 @@ Paper trading now only reports 0.30% ↔ 0.05% routes. Reports will show realist
 
 | Metric | Value |
 |--------|-------|
-| Calls per scan cycle | ~29 (14 V3 pools × 2 + 1 block) |
+| Calls per scan cycle | ~43 (21 V3 pools × 2 + 1 block) |
 | Current interval | 3s |
 | RPC provider | Alchemy (free tier, 22.2M calls/month) |
-| Monthly calls (estimated) | ~25.1M |
-| Calls/sec | ~9.7 |
+| Monthly calls (estimated) | ~37.2M |
+| Calls/sec | ~14.3 |
 
-**Note:** Migrated from PublicNode WSS to Alchemy WSS on 2026-01-29. PublicNode dropped WebSocket connections under burst load during V3 sync. Alchemy is stable (~40ms/pool vs ~500ms on PublicNode). 7-pair load within Alchemy free tier (22.2M/month).
+**Note:** 0.01% fee tier added 2026-01-29 (data-collector + paper-trading only; live bot still on 14 pools). 21 V3 pools = 7 pairs × 3 active tiers (0.01%, 0.05%, 0.30%). Migrated from PublicNode WSS to Alchemy WSS on 2026-01-29. May need Alchemy Growth tier ($49/mo, 300M calls) if throttled.
 
 ---
 
@@ -270,7 +270,7 @@ Pool gate checks run via `scripts/pool_gate_check.py`. See `docs/v4_alternate_pa
 ### Actionable Items
 
 - [x] **AAVE/USDC** — Added, observed, **removed**. Phantom 69% spread confirmed (0.05% @ 0.010822 vs 0.30% @ 0.006390, Quoter gap 302,000x). Polluted paper trading Discord with ~$9M/15min phantom profit. Removed from `.env`, `paper_trading.toml`, and all strategies. Gate check data preserved in docs.
-- [ ] **Add 0.01% fee tier** — USDT/USDC and DAI/USDC have active 0.01% pools. Code change: add `UniswapV3_001` to `DexType`, add `(100, ...)` to `V3_FEE_TIERS`. Unlocks 0.01%↔0.05% routes (0.06% round-trip fee).
+- [x] **Add 0.01% fee tier** — DONE (2026-01-29). Added `UniswapV3_001` to `DexType`, `(100, ...)` to `V3_FEE_TIERS`. Data-collector and paper-trading restarted with 21 V3 pools (was 14). Live bot unchanged (still 14 pools). Paper trading detecting 0.01%↔0.05% routes (0.06% round-trip fee). USDT/USDC and DAI/USDC 0.01% pools confirmed active with deep liquidity.
 - [ ] **Prune inactive pairs** — after 48h of spread data, remove any pairs that never show spread variation (saves 4 RPC calls/cycle each).
 - [x] **Separate data-collector config from live bot** — DONE. Live bot reads `.env.live` (7 proven pairs), data collector/paper trading read `.env`. Config split via `load_config_from_file()` in `config.rs`.
 
@@ -325,4 +325,4 @@ python3 scripts/pool_gate_check.py --all                   # everything
 
 ---
 
-*Last updated: 2026-01-29 (AAVE removed — phantom confirmed. Config separated: .env.live for live bot, .env for dev/paper. 7 active pairs.)*
+*Last updated: 2026-01-29 (0.01% fee tier added to data-collector + paper-trading. 21 V3 pools. Live bot unchanged at 14 pools.)*

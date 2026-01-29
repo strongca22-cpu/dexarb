@@ -752,7 +752,7 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
             DexType::Sushiswap => self.config.sushiswap_router,
             DexType::Apeswap => self.config.apeswap_router.unwrap_or(self.config.uniswap_router),
             // V3 DEX types - use V3 router
-            DexType::UniswapV3_005 | DexType::UniswapV3_030 | DexType::UniswapV3_100 => {
+            DexType::UniswapV3_001 | DexType::UniswapV3_005 | DexType::UniswapV3_030 | DexType::UniswapV3_100 => {
                 self.config.uniswap_v3_router.unwrap_or(self.config.uniswap_router)
             }
         }

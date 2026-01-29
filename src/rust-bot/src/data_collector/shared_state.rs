@@ -119,6 +119,7 @@ impl SerializableV3PoolState {
     /// Convert back to V3PoolState
     pub fn to_v3_pool_state(&self) -> Result<V3PoolState> {
         let dex = match self.dex.as_str() {
+            "UniswapV3_0.01%" => DexType::UniswapV3_001,
             "UniswapV3_0.05%" => DexType::UniswapV3_005,
             "UniswapV3_0.30%" => DexType::UniswapV3_030,
             "UniswapV3_1.00%" => DexType::UniswapV3_100,
