@@ -292,6 +292,7 @@ fn get_token_decimals(address: &str) -> u8 {
     if addr.contains("8f3cf7ad23cd3cadbd9735aff958023239c6a063") { return 18; } // DAI
     if addr.contains("53e0bca35ec356bd5dddfebbd1fc0fd03fabad39") { return 18; } // LINK
     if addr.contains("b33eaad8d922b1083446dc23f610c2567fb5180f") { return 18; } // UNI
+    if addr.contains("d6df932a45c0f255f85145f286ea0b292b21c90b") { return 18; } // AAVE
     18 // Default to 18 decimals
 }
 

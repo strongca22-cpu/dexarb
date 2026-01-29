@@ -4,8 +4,9 @@ repos/
 # Rust build artifacts
 src/rust-bot/target/
 
-# Environment files
+# Environment files (contain private keys and API credentials)
 .env
+.env.*
 .env.local
 
 # Logs

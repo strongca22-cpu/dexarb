@@ -342,8 +342,12 @@ impl<P: Middleware + 'static> V3PoolSyncer<P> {
 
             let pair = TradingPair::new(token0, token1, pair_config.symbol.clone());
 
-            // Try each fee tier
+            // Try each fee tier (skip 1% — phantom liquidity on Polygon)
             for (fee_tier, dex_type) in V3_FEE_TIERS {
+                if fee_tier >= 10000 {
+                    debug!("Skipping {} @ 1% fee tier (phantom liquidity)", pair.symbol);
+                    continue;
+                }
                 match self.sync_v3_pool(factory_address, &pair, fee_tier, dex_type).await {
                     Ok(Some(pool)) => {
                         debug!(

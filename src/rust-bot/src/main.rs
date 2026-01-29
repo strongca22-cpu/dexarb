@@ -15,7 +15,7 @@
 
 use anyhow::Result;
 use dexarb_bot::arbitrage::{OpportunityDetector, TradeExecutor};
-use dexarb_bot::config::load_config;
+use dexarb_bot::config::load_config_from_file;
 use dexarb_bot::pool::{PoolStateManager, V3PoolSyncer};
 use dexarb_bot::types;
 use ethers::prelude::*;
@@ -33,9 +33,9 @@ async fn main() -> Result<()> {
 
     info!("Phase 1 DEX Arbitrage Bot Starting (V3-only, parallel sync)...");
 
-    // Load configuration
-    let config = load_config()?;
-    info!("Configuration loaded");
+    // Load configuration from .env.live (separate from dev/paper .env)
+    let config = load_config_from_file(".env.live")?;
+    info!("Configuration loaded from .env.live");
     info!("RPC URL: {}", &config.rpc_url[..40.min(config.rpc_url.len())]);
     info!("Trading pairs: {}", config.pairs.len());
     info!("Poll interval: {}ms", config.poll_interval_ms);

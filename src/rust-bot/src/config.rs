@@ -1,5 +1,11 @@
 //! Configuration management
 //! Load settings from .env file
+//!
+//! Two entry points:
+//! - load_config(): loads from .env (data collector, dev/paper workflows)
+//! - load_config_from_file(): loads from a specific env file (live bot uses .env.live)
+//!
+//! Modified: 2026-01-29 - Added load_config_from_file() for live/dev config separation
 
 use crate::types::TradingPairConfig;
 use anyhow::{Context, Result};
@@ -9,9 +15,19 @@ pub use crate::types::BotConfig;
 use ethers::types::Address;
 use std::str::FromStr;
 
+/// Load config from default .env file (used by data collector, dev tools)
 pub fn load_config() -> Result<BotConfig> {
     dotenv::dotenv().ok();
+    load_config_inner()
+}
 
+/// Load config from a specific env file (used by live bot with .env.live)
+pub fn load_config_from_file(filename: &str) -> Result<BotConfig> {
+    dotenv::from_filename(filename).ok();
+    load_config_inner()
+}
+
+fn load_config_inner() -> Result<BotConfig> {
     let trading_pairs_str =
         std::env::var("TRADING_PAIRS").context("TRADING_PAIRS not set")?;
 

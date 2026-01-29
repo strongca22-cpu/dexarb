@@ -6,7 +6,7 @@
 # Edit this file and send SIGHUP to reload: kill -HUP $(pgrep paper-trading)
 #
 # Created: 2026-01-28
-# Updated: 2026-01-28 (Phase 1 expansion - added 5 new pairs)
+# Updated: 2026-01-29 (Removed AAVE/USDC - confirmed phantom 69% spread, pollutes reports)
 
 [general]
 # Path to shared pool state (written by data-collector)

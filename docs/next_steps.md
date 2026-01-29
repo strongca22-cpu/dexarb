@@ -3,6 +3,7 @@
 ## Current Status: LIVE — Scanning, No Trades Yet (Price Impact Too High)
 
 **Date:** 2026-01-29
+**Config:** Split — live bot reads `.env.live` (7 pairs), data collector reads `.env` (7 pairs)
 **LIVE_MODE:** true (bot + watcher running in tmux)
 
 **Wallet (unchanged — zero capital spent):**
@@ -210,14 +211,13 @@ Paper trading now only reports 0.30% ↔ 0.05% routes. Reports will show realist
 
 | Metric | Value |
 |--------|-------|
-| Calls per scan cycle | ~203 (84 V2 + 105 V3 + 14 block) |
-| Current interval | 10s (public node) |
-| Monthly calls at 10s | ~52.6M |
-| Alchemy monthly cap | 22.2M |
-| Min interval (full sync) | ~25s |
-| Min interval (V3-only) | ~13s |
+| Calls per scan cycle | ~29 (14 V3 pools × 2 + 1 block) |
+| Current interval | 3s |
+| RPC provider | Alchemy (free tier, 22.2M calls/month) |
+| Monthly calls (estimated) | ~25.1M |
+| Calls/sec | ~9.7 |
 
-**Recommendation:** Use Alchemy for reliability/latency, not frequency. V3-only sync (dropping unused V2) would allow ~13s interval within budget. Transition speed (minutes-to-hours) means faster scanning provides marginal benefit.
+**Note:** Migrated from PublicNode WSS to Alchemy WSS on 2026-01-29. PublicNode dropped WebSocket connections under burst load during V3 sync. Alchemy is stable (~40ms/pool vs ~500ms on PublicNode). 7-pair load within Alchemy free tier (22.2M/month).
 
 ---
 
@@ -255,7 +255,28 @@ Previous cycle = 10s sleep + 5-8s V2 sync + 10.5s V3 sync + 0.6s Quoter = ~30s t
 ### Deployment Status
 
 - **Build**: compiles successfully after `tokio::join!` lifetime fix
-- **Deployment**: pending — old binary still running in `live-bot` tmux
+- **Deployment**: LIVE — V3-only binary in `live-bot` tmux (2026-01-29)
+- **RPC**: Alchemy WSS (migrated from PublicNode 2026-01-29)
+- **Active pairs**: 7 (WETH, WMATIC, WBTC, USDT, DAI, LINK, UNI — all /USDC)
+- **Cycle time**: ~3.6s (confirmed from logs)
+- **Capital at risk**: zero (all Quoter rejections are read-only)
+
+---
+
+## V4 Pair Expansion — Gate Check Results (2026-01-29)
+
+Pool gate checks run via `scripts/pool_gate_check.py`. See `docs/v4_alternate_pairings_buildout.md` for full details.
+
+### Actionable Items
+
+- [x] **AAVE/USDC** — Added, observed, **removed**. Phantom 69% spread confirmed (0.05% @ 0.010822 vs 0.30% @ 0.006390, Quoter gap 302,000x). Polluted paper trading Discord with ~$9M/15min phantom profit. Removed from `.env`, `paper_trading.toml`, and all strategies. Gate check data preserved in docs.
+- [ ] **Add 0.01% fee tier** — USDT/USDC and DAI/USDC have active 0.01% pools. Code change: add `UniswapV3_001` to `DexType`, add `(100, ...)` to `V3_FEE_TIERS`. Unlocks 0.01%↔0.05% routes (0.06% round-trip fee).
+- [ ] **Prune inactive pairs** — after 48h of spread data, remove any pairs that never show spread variation (saves 4 RPC calls/cycle each).
+- [x] **Separate data-collector config from live bot** — DONE. Live bot reads `.env.live` (7 proven pairs), data collector/paper trading read `.env`. Config split via `load_config_from_file()` in `config.rs`.
+
+### Eliminated Candidates
+
+CRV, SUSHI, BAL, GRT, SNX, 1INCH, GHST, COMP, stMATIC, wstETH — all failed gate checks (missing pools or zero liquidity at 0.05% tier). Re-check monthly.
 
 ---
 
@@ -272,8 +293,9 @@ Both reduce leg risk. Per-cycle Quoter is retained until one of these is impleme
 ### Other
 
 - [ ] Fix V2 price calculation (inverted reserve ratio) — V2 not in use
-- [ ] Alchemy RPC migration for reliability/latency
+- [x] Alchemy RPC migration — DONE (2026-01-29). All processes on Alchemy WSS.
 - [ ] Optimize for >$140 trade sizes (need deeper V3 liquidity)
+- [x] Separate live bot config from dev/paper config — DONE. Live bot reads `.env.live`, data collector reads `.env`.
 
 ---
 
@@ -293,8 +315,14 @@ tmux send-keys -t bot-watcher "./scripts/stop_after_trade.sh" Enter
 
 # Pre-deployment checklist
 ./scripts/checklist_full.sh
+
+# Pool gate checks (validate candidate pairs)
+python3 scripts/pool_gate_check.py AAVE                    # single known token
+python3 scripts/pool_gate_check.py --group A               # Group A candidates
+python3 scripts/pool_gate_check.py --group stablecoin --fees 100,500,3000  # 0.01% check
+python3 scripts/pool_gate_check.py --all                   # everything
 ```
 
 ---
 
-*Last updated: 2026-01-29 (architecture overhaul implemented — V3-only, parallel sync, 3s poll, 1% excluded)*
+*Last updated: 2026-01-29 (AAVE removed — phantom confirmed. Config separated: .env.live for live bot, .env for dev/paper. 7 active pairs.)*
