@@ -31,9 +31,14 @@ After V3-only fix, prices are correct:
 UNI/USDC: 0.05%=0.210194, 0.30%=0.208290, 1.00%=0.205579
 ```
 
-### Blocking Issue: Trade Executor
+### Blocking Issue: Trade Executor (Root Cause Confirmed)
 
-The TradeExecutor sends V3 swaps through the V2 router (`swapExactTokensForTokens`), which reverts. V3 requires `exactInputSingle` on the V3 SwapRouter (`0xE592427A0AEce92De3Edee1F18E0157C05861564`).
+The TradeExecutor has **no V3 swap implementation**:
+
+- `get_router_address()` correctly resolves V3 DexTypes to the V3 SwapRouter
+- But `execute_swap()` calls `swapExactTokensForTokens` (V2 function) on the V3 router
+- The V3 router doesn't have this function → reverts with empty `0x` data
+- **Fix needed in `executor.rs`**: Add `ISwapRouter` ABI with `exactInputSingle`, branch swap logic by `dex.is_v3()`
 
 ---
 
@@ -67,9 +72,15 @@ tmux send-keys -t live-bot "./target/release/dexarb-bot 2>&1 | tee data/bot_live
 
 ## Backlog
 
-### Critical
-- [ ] **V3 swap routing in TradeExecutor** (currently reverts on V3 trades)
-- [ ] Fix V2 price calculation (inverted reserve ratio)
+### Critical — V3 Swap Execution (executor.rs)
+- [ ] Add `ISwapRouter` ABI binding (`exactInputSingle`)
+- [ ] Add `is_v3()` check in `execute_swap()` to branch V2 vs V3 logic
+- [ ] Build V3 params: `(tokenIn, tokenOut, fee, recipient, deadline, amountIn, amountOutMinimum, sqrtPriceLimitX96)`
+- [ ] Handle V3 return type (single `uint256`, not array)
+- [ ] Approve tokens for V3 SwapRouter address (separate from V2 approvals)
+
+### Deferred
+- [ ] Fix V2 price calculation (inverted reserve ratio) — for future V2↔V3 arb
 
 ### Monitoring
 - [x] Hourly Discord reports

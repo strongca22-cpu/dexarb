@@ -62,15 +62,42 @@ The key opportunity is between V3 fee tiers:
 2. **Gas limit too low** - MAX_GAS_PRICE_GWEI was 100, Polygon was at 583 gwei. **Fix**: Increased to 1000 (still cheap at ~$0.12/swap).
 3. **Profit threshold too high** - MIN_PROFIT_USD was 5.0, real opportunities at $4.88. **Fix**: Lowered to 3.0.
 
-### Remaining Issue
-- **Trade execution reverts** - "Contract call reverted with data: 0x". TradeExecutor uses V2 router (`swapExactTokensForTokens`) for V3 pools. V3 requires `exactInputSingle` on V3 SwapRouter.
+### Remaining Issue: V3 Trade Execution
+
+**Symptom:** `Contract call reverted with data: 0x`
+
+**Root Cause Analysis:**
+
+The TradeExecutor has **no V3 swap implementation**. The execution path is:
+
+1. `get_router_address()` (executor.rs:546-550) — correctly resolves V3 DexTypes to the V3 SwapRouter address (`0xE592427A0AEce92De3Edee1F18E0157C05861564`)
+2. `execute_swap()` (executor.rs:458-464) — calls `swapExactTokensForTokens` (a **V2-only** function) on the V3 router
+3. The V3 router doesn't have `swapExactTokensForTokens`, so the call reverts with empty data
+
+**What's Missing:**
+
+| Component | Status |
+|-----------|--------|
+| V3 Router address in config | Working (`UNISWAP_V3_ROUTER` set) |
+| V3 Router ABI (`ISwapRouter`) | **Missing** — no `exactInputSingle` binding |
+| V3-aware swap dispatch | **Missing** — all swaps use V2 ABI |
+| V3 swap parameter building | **Missing** — V3 needs `ExactInputSingleParams` struct, not path array |
+
+**Fix Required in `executor.rs`:**
+
+1. Add `ISwapRouter` ABI with `exactInputSingle(ExactInputSingleParams)`
+2. Add `is_v3()` check in `execute_swap()` to branch between V2 and V3 logic
+3. Build V3 params: `(tokenIn, tokenOut, fee, recipient, deadline, amountIn, amountOutMinimum, sqrtPriceLimitX96)`
+4. V3 returns single `uint256` output (not array like V2)
 
 ### Verified Working
 - V3 price detection correct: UNI/USDC 0.05%=0.210194, 0.30%=0.208290, 1.00%=0.205579
 - Real opportunity: UNI/USDC 1.19% spread, $4.88 est profit (buy 1.00% tier, sell 0.05% tier)
+- Router address resolution correct for V3 DexTypes
+- Gas price check working at new 1000 gwei limit
 
 ## Next Steps
 
-1. **Fix TradeExecutor for V3 swaps** (use V3 SwapRouter + exactInputSingle)
-2. Validate execution on mainnet
+1. **Add V3 swap support to TradeExecutor** — `ISwapRouter::exactInputSingle` ABI + V3-aware dispatch
+2. Validate V3 execution on mainnet
 3. Fix V2 price calculation for future V2↔V3 arbitrage
