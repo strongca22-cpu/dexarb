@@ -1,0 +1,227 @@
+{
+  "version": "1.1",
+  "last_updated": "2026-01-29T22:00:00Z",
+  "changelog": "v1.1: Trimmed whitelist from 16 to 10 pools based on quote depth matrix. Moved 6 thin/marginal pools to blacklist. Only sturdiest pools remain.",
+  "config": {
+    "default_min_liquidity": 1000000000,
+    "whitelist_enforcement": "strict",
+    "liquidity_thresholds": {
+      "v3_100": 10000000000,
+      "v3_500": 5000000000,
+      "v3_3000": 3000000000,
+      "v3_10000": 0
+    }
+  },
+  "whitelist": {
+    "pools": [
+      {
+        "address": "0x45dda9cb7c25131df268515131f647d726f50608",
+        "pair": "WETH/USDC",
+        "dex": "UniswapV3",
+        "fee_tier": 500,
+        "status": "active",
+        "min_liquidity": 5000000000,
+        "notes": "Deep — 0.3% impact@$5K",
+        "added": "2026-01-29",
+        "last_verified": "2026-01-29"
+      },
+      {
+        "address": "0x0e44ceb592acfc5d3f09d996302eb4c499ff8c10",
+        "pair": "WETH/USDC",
+        "dex": "UniswapV3",
+        "fee_tier": 3000,
+        "status": "active",
+        "min_liquidity": 3000000000,
+        "notes": "Deep — 1.8% impact@$5K",
+        "added": "2026-01-29",
+        "last_verified": "2026-01-29"
+      },
+      {
+        "address": "0xa374094527e1673a86de625aa59517c5de346d32",
+        "pair": "WMATIC/USDC",
+        "dex": "UniswapV3",
+        "fee_tier": 500,
+        "status": "active",
+        "min_liquidity": 5000000000,
+        "notes": "Deep — 3.8% impact@$5K. Orphan (no 0.30% counterpart)",
+        "added": "2026-01-29",
+        "last_verified": "2026-01-29"
+      },
+      {
+        "address": "0xeef1a9507b3d505f0062f2be9453981255b503c8",
+        "pair": "WBTC/USDC",
+        "dex": "UniswapV3",
+        "fee_tier": 500,
+        "status": "active",
+        "min_liquidity": 5000000000,
+        "notes": "Deep — 0.1% impact@$5K. Orphan (0.30% counterpart blacklisted)",
+        "added": "2026-01-29",
+        "last_verified": "2026-01-29"
+      },
+      {
+        "address": "0x3f5228d0e7d75467366be7de2c31d0d098ba2c23",
+        "pair": "USDT/USDC",
+        "dex": "UniswapV3",
+        "fee_tier": 500,
+        "status": "active",
+        "min_liquidity": 1000000000,
+        "notes": "Very deep stablecoin — 0.1% impact@$5K",
+        "added": "2026-01-29",
+        "last_verified": "2026-01-29"
+      },
+      {
+        "address": "0x24555b1e26407b8b56621da41f175c5e2b80f1b8",
+        "pair": "USDT/USDC",
+        "dex": "UniswapV3",
+        "fee_tier": 3000,
+        "status": "active",
+        "min_liquidity": 1000000000,
+        "notes": "Very deep stablecoin — 0.1% impact@$5K",
+        "added": "2026-01-29",
+        "last_verified": "2026-01-29"
+      },
+      {
+        "address": "0xdac8a8e6dbf8c690ec6815e0ff03491b2770255d",
+        "pair": "USDT/USDC",
+        "dex": "UniswapV3",
+        "fee_tier": 100,
+        "status": "active",
+        "min_liquidity": 10000000000,
+        "notes": "Very deep stablecoin — 0.0% impact@$5K",
+        "added": "2026-01-29",
+        "last_verified": "2026-01-29"
+      },
+      {
+        "address": "0x5f69c2ec01c22843f8273838d570243fd1963014",
+        "pair": "DAI/USDC",
+        "dex": "UniswapV3",
+        "fee_tier": 500,
+        "status": "active",
+        "min_liquidity": 1000000000,
+        "notes": "Very deep stablecoin — 0.0% impact@$5K",
+        "added": "2026-01-29",
+        "last_verified": "2026-01-29"
+      },
+      {
+        "address": "0x5645dcb64c059aa11212707fbf4e7f984440a8cf",
+        "pair": "DAI/USDC",
+        "dex": "UniswapV3",
+        "fee_tier": 100,
+        "status": "active",
+        "min_liquidity": 10000000000,
+        "notes": "Very deep stablecoin — 0.0% impact@$5K",
+        "added": "2026-01-29",
+        "last_verified": "2026-01-29"
+      },
+      {
+        "address": "0x94ab9e4553ffb839431e37cc79ba8905f45bfbea",
+        "pair": "LINK/USDC",
+        "dex": "UniswapV3",
+        "fee_tier": 3000,
+        "status": "active",
+        "min_liquidity": 3000000000,
+        "notes": "Deep — 0.6% impact@$5K. Orphan (0.05% counterpart blacklisted)",
+        "added": "2026-01-29",
+        "last_verified": "2026-01-29"
+      }
+    ]
+  },
+  "blacklist": {
+    "pools": [
+      {
+        "address": "0x04537f43f6add7b1b60cab199c7a910024ee0594",
+        "pair": "WETH/USDC",
+        "dex": "UniswapV3",
+        "fee_tier": 100,
+        "reason": "Low liquidity (831B), near-zero executable depth for $140 trades. Caused $3.35 loss on 2026-01-29.",
+        "phantom_spread": "0.78%",
+        "impact_at_5k": "99.2%",
+        "date_added": "2026-01-29",
+        "discovered_by": "live_incident"
+      },
+      {
+        "address": "0x226d890ece7e75375589cceaf0c3b56436b61c60",
+        "pair": "UNI/USDC",
+        "dex": "UniswapV3",
+        "fee_tier": 500,
+        "reason": "Dead pool — $10 in returns $1.29 out. 100% impact@$5K.",
+        "impact_at_5k": "100%",
+        "date_added": "2026-01-29",
+        "discovered_by": "depth_matrix"
+      },
+      {
+        "address": "0x74d3c85df4dbd03c7c12f7649faa6457610e7604",
+        "pair": "UNI/USDC",
+        "dex": "UniswapV3",
+        "fee_tier": 3000,
+        "reason": "Marginal — 16.8% impact@$5K. Rapid-fire repeat trades drain spread quickly.",
+        "impact_at_5k": "16.8%",
+        "date_added": "2026-01-29",
+        "discovered_by": "depth_matrix"
+      },
+      {
+        "address": "0x257d365f7870742c87bb3a8a53a609979908799a",
+        "pair": "DAI/USDC",
+        "dex": "UniswapV3",
+        "fee_tier": 3000,
+        "reason": "Exhausted liquidity at current tick — maxes out at ~$44 regardless of input. 99.1% impact@$5K.",
+        "impact_at_5k": "99.1%",
+        "date_added": "2026-01-29",
+        "discovered_by": "depth_matrix"
+      },
+      {
+        "address": "0x22177148e681a6ca5242c9888ace170ee7ec47bd",
+        "pair": "LINK/USDC",
+        "dex": "UniswapV3",
+        "fee_tier": 500,
+        "reason": "Thin — 73.1% impact@$5K. Impact eats spread even at $140.",
+        "impact_at_5k": "73.1%",
+        "date_added": "2026-01-29",
+        "discovered_by": "depth_matrix"
+      },
+      {
+        "address": "0x88f3c15523544835ff6c738ddb30995339ad57d6",
+        "pair": "WMATIC/USDC",
+        "dex": "UniswapV3",
+        "fee_tier": 3000,
+        "reason": "Thin — 53.5% impact@$5K, 8%+ loss at $100. Not viable at $140 trade size.",
+        "impact_at_5k": "53.5%",
+        "date_added": "2026-01-29",
+        "discovered_by": "depth_matrix"
+      },
+      {
+        "address": "0x847b64f9d3a95e977d157866447a5c0a5dfa0ee5",
+        "pair": "WBTC/USDC",
+        "dex": "UniswapV3",
+        "fee_tier": 3000,
+        "reason": "Borderline — 5.5% impact@$5K. Rapid-fire repeat trades risky. Removing to keep only deepest pools.",
+        "impact_at_5k": "5.5%",
+        "date_added": "2026-01-29",
+        "discovered_by": "depth_matrix"
+      }
+    ],
+    "fee_tiers": [
+      {
+        "tier": 10000,
+        "reason": "Systematic phantom liquidity across all 1% pools on Polygon. 100% Quoter rejection rate.",
+        "applies_to": "all_v3",
+        "date_added": "2026-01-28",
+        "evidence": "phantom_spread_analysis.md"
+      }
+    ],
+    "pairs": []
+  },
+  "observation": {
+    "comment": "Pools under observation - not blacklisted, but need monitoring before promotion to active",
+    "pools": [
+      {
+        "address": "0x0a6c4588b7d8bd22cf120283b1fff953420c45f3",
+        "pair": "WMATIC/USDC",
+        "fee_tier": 100,
+        "concern": "0.01% non-stablecoin pair. 94.6% impact@$5K but works at $100.",
+        "status": "monitoring",
+        "added": "2026-01-29"
+      }
+    ]
+  }
+}

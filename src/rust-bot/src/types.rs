@@ -360,4 +360,12 @@ pub struct BotConfig {
 
     // Live trading mode (false = dry run/paper trading)
     pub live_mode: bool,
+
+    // Shared pool state file (written by data collector)
+    // If set, bot reads pool data from this file instead of syncing via RPC
+    pub pool_state_file: Option<String>,
+
+    // Pool whitelist/blacklist config file (Phase 1.1)
+    // If set, only whitelisted pools participate in detection
+    pub whitelist_file: Option<String>,
 }

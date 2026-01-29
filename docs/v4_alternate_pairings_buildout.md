@@ -11,7 +11,7 @@
 
 ## Current State
 
-### Active Pairings (7 pairs, 21 V3 pools in data-collector/paper-trading, 14 in live bot)
+### Active Pairings (7 pairs, 18 V3 pools in data-collector/paper-trading, 14 in live bot)
 
 All paired with USDC.e (`0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174`).
 Data-collector and paper-trading monitor 0.01%, 0.05%, and 0.30% V3 fee tiers (0.01% added 2026-01-29).
@@ -46,7 +46,7 @@ These are hard constraints that limit what pairs can be added without code chang
 
 5. **Single-threaded execution** — The bot tries opportunities sequentially in profit order. While scanning is parallel, only one trade can execute at a time.
 
-6. **RPC budget** — Each pair adds ~6 RPC calls/cycle (3 pools x 2 calls) with 0.01% tier. At 3s poll interval, 7 pairs = 21 pools = ~43 calls/cycle = ~14.3 calls/sec. Data-collector at ~37.2M/month projected (may need Alchemy Growth tier). Live bot still at 14 pools (~29 calls/cycle, ~25.1M/month).
+6. **RPC budget** — Each pair adds 4-6 RPC calls/cycle depending on whether 0.01% pool exists. Zero-liquidity pools filtered at startup. At 3s poll interval, 7 pairs = 18 pools = ~37 calls/cycle = ~12.3 calls/sec. Data-collector at ~32.0M/month projected (may need Alchemy Growth tier). Live bot still at 14 pools (~29 calls/cycle, ~25.1M/month).
 
 ### Key Lessons from Live Testing
 
@@ -377,33 +377,34 @@ Re-check periodically (monthly) — new pools may be created as Polygon V3 ecosy
 | Metric | Value |
 |--------|-------|
 | Active pairs | 7 |
-| V3 pools (0.01% + 0.05% + 0.30%) | 21 |
-| RPC calls/cycle | ~43 (21 pools × 2 + 1 block) |
+| V3 pools (0.01% + 0.05% + 0.30%, zero-liq filtered) | 18 |
+| RPC calls/cycle | ~37 (18 pools × 2 + 1 block) |
 | Poll interval | 3s |
-| Calls/sec | ~14.3 |
-| Monthly calls | ~37.2M |
+| Calls/sec | ~12.3 |
+| Monthly calls | ~32.0M |
 | RPC provider | Alchemy WSS (free tier) |
 
 Note: Live bot still at 14 pools / ~29 calls/cycle / ~25.1M/month (old binary, 0.05% + 0.30% only).
+Zero-liquidity pools filtered at startup (WBTC/LINK/UNI at 0.01% skipped). 21→18 pools.
 
-### Projected Load by Pair Count (with 0.01% tier)
+### Projected Load by Pair Count (with 0.01% tier, zero-liq filtered)
 
-With 3 active fee tiers per pair: pools = pairs × 3, calls/cycle = pools × 2 + 1.
+Actual pool count depends on which pairs have active 0.01% pools. Estimate ~2.5 pools/pair average.
 
-| Active Pairs | Pools | Calls/Cycle | Calls/Sec | Monthly |
-|-------------|-------|-------------|-----------|---------|
-| 7 (current) | 21 | 43 | 14.3 | 37.2M |
-| 9 | 27 | 55 | 18.3 | 47.5M |
-| 10 | 30 | 61 | 20.3 | 52.7M |
-| 12 | 36 | 73 | 24.3 | 63.1M |
-| 15 | 45 | 91 | 30.3 | 78.7M |
+| Active Pairs | Est. Pools | Calls/Cycle | Calls/Sec | Monthly |
+|-------------|-----------|-------------|-----------|---------|
+| 7 (current) | 18 | 37 | 12.3 | 32.0M |
+| 9 | 23 | 47 | 15.7 | 40.6M |
+| 10 | 26 | 53 | 17.7 | 45.8M |
+| 12 | 31 | 63 | 21.0 | 54.4M |
+| 15 | 39 | 79 | 26.3 | 68.3M |
 
 ### RPC Provider Considerations
 
-- **Alchemy free tier (current):** 22.2M calls/month. Current 7-pair load (~37.2M) **exceeds budget** with 0.01% tier. Monitor for throttling.
+- **Alchemy free tier (current):** 22.2M calls/month. Current 7-pair load (~32.0M) exceeds budget with 0.01% tier (after zero-liq filter). Monitor for throttling.
 - **Alchemy Growth ($49/month):** 300M calls/month. Supports up to ~30+ pairs comfortably.
 - **PublicNode (backup):** Free but drops WebSocket connections under burst load. Not suitable for V3 sync.
-- **Recommendation:** Upgrade to Alchemy Growth tier if throttled. Current load (~37.2M) is 1.67x the free tier limit. Alternatively, increase poll interval to 5s to reduce to ~22.3M/month.
+- **Recommendation:** Upgrade to Alchemy Growth tier if throttled. Current load (~32.0M) is 1.44x the free tier limit. Alternatively, increase poll interval to 5s to reduce to ~19.2M/month.
 
 ### Pruning Inactive Pairs
 
@@ -511,4 +512,4 @@ Confirm: correct token name, not a scam/clone, has transfer activity.
 
 ---
 
-*Last updated: 2026-01-29 (v4.5 — 0.01% fee tier implemented, 21 V3 pools in paper, 14 in live)*
+*Last updated: 2026-01-29 (v4.5 — 0.01% fee tier, zero-liq filter. 18 V3 pools in paper, 14 in live)*

@@ -5,15 +5,19 @@
 //! 1% fee tier excluded (phantom liquidity on Polygon).
 //! V2 detection retained but not called from scan_opportunities (V2 sync dropped).
 //!
+//! Phase 1.1: Whitelist/blacklist filtering — pools must be whitelisted to participate.
+//!
 //! Author: AI-Generated
 //! Created: 2026-01-27
 //! Modified: 2026-01-29 - Added V3 pool support
 //! Modified: 2026-01-29 - V3-only: drop V2 from scan, exclude 1% fee tier
+//! Modified: 2026-01-29 - Phase 1.1: whitelist/blacklist filtering
 
+use crate::filters::WhitelistFilter;
 use crate::pool::{PoolStateManager, PriceCalculator};
 use crate::types::{ArbitrageOpportunity, BotConfig, DexType, PoolState, TradingPair};
 use ethers::types::{Address, U256};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 /// Minimum spread percentage to consider (covers fees)
 const MIN_SPREAD_PERCENT: f64 = 0.3;
@@ -41,14 +45,31 @@ struct UnifiedPool {
 pub struct OpportunityDetector {
     config: BotConfig,
     state_manager: PoolStateManager,
+    whitelist: WhitelistFilter,
 }
 
 impl OpportunityDetector {
-    /// Create a new OpportunityDetector
+    /// Create a new OpportunityDetector.
+    /// Loads the whitelist from `config.whitelist_file` if set, otherwise uses defaults.
     pub fn new(config: BotConfig, state_manager: PoolStateManager) -> Self {
+        let whitelist = match &config.whitelist_file {
+            Some(path) => match WhitelistFilter::load(path) {
+                Ok(wl) => wl,
+                Err(e) => {
+                    warn!("Failed to load whitelist from {}: {}. Using permissive defaults.", path, e);
+                    WhitelistFilter::default()
+                }
+            },
+            None => {
+                info!("No WHITELIST_FILE configured, using permissive defaults (advisory mode)");
+                WhitelistFilter::default()
+            }
+        };
+
         Self {
             config,
             state_manager,
+            whitelist,
         }
     }
 
@@ -96,43 +117,44 @@ impl OpportunityDetector {
         // Collect V3 pools only (V2 excluded - price format incompatible)
         let mut unified_pools: Vec<UnifiedPool> = Vec::new();
 
-        // Add V3 pools with liquidity filtering
+        // Add V3 pools with whitelist + liquidity filtering (Phase 1.1)
         for pool in self.state_manager.get_v3_pools_for_pair(pair_symbol) {
             let price = pool.price();
-            if price > 0.0 && price < 1e15 {  // Sanity check
-                // Skip 1% fee tier — all 1% pools on Polygon have phantom liquidity
-                // (confirmed by live Quoter testing: UNI, WBTC, LINK all rejected)
-                if pool.fee >= 10000 {
-                    debug!(
-                        "Skipping {} {:?} - 1% fee tier excluded (phantom liquidity)",
-                        pair_symbol, pool.dex
-                    );
-                    continue;
-                }
-
-                let fee_percent = pool.fee as f64 / 10000.0;  // 500 -> 0.05%
-
-                // Skip pools with essentially zero liquidity
-                // V3 liquidity is in sqrt(token0*token1) units; < 1000 is dust
-                if pool.liquidity < 1000 {
-                    debug!(
-                        "Skipping {} {:?} - liquidity too low: {}",
-                        pair_symbol, pool.dex, pool.liquidity
-                    );
-                    continue;
-                }
-
-                unified_pools.push(UnifiedPool {
-                    dex: pool.dex,
-                    price,
-                    fee_percent,
-                    address: pool.address,
-                    pair: pool.pair.clone(),
-                    token0_decimals: pool.token0_decimals,
-                    token1_decimals: pool.token1_decimals,
-                    liquidity: pool.liquidity,
-                });
+            if price <= 0.0 || price >= 1e15 {
+                continue; // Sanity check
             }
+
+            // Phase 1.1: Whitelist/blacklist check (covers fee tier blacklist,
+            // pool blacklist, pair blacklist, and strict whitelist enforcement).
+            // This supersedes the old `fee >= 10000` check — the 1% tier is
+            // blacklisted in the whitelist config.
+            if !self.whitelist.is_pool_allowed(&pool.address, pool.fee, pair_symbol) {
+                continue;
+            }
+
+            let fee_percent = pool.fee as f64 / 10000.0;  // 500 -> 0.05%
+
+            // Phase 1.1: Per-pool / per-tier minimum liquidity
+            // Replaces the old flat `< 1000` check with tier-aware thresholds.
+            let min_liq = self.whitelist.min_liquidity_for(&pool.address, pool.fee);
+            if pool.liquidity < min_liq {
+                debug!(
+                    "Skipping {} {:?} - liquidity {} below threshold {} (fee tier {})",
+                    pair_symbol, pool.dex, pool.liquidity, min_liq, pool.fee
+                );
+                continue;
+            }
+
+            unified_pools.push(UnifiedPool {
+                dex: pool.dex,
+                price,
+                fee_percent,
+                address: pool.address,
+                pair: pool.pair.clone(),
+                token0_decimals: pool.token0_decimals,
+                token1_decimals: pool.token1_decimals,
+                liquidity: pool.liquidity,
+            });
         }
 
         if unified_pools.len() < 2 {
@@ -475,6 +497,8 @@ mod tests {
             tax_log_dir: None,
             tax_log_enabled: false,
             live_mode: false,
+            pool_state_file: None,
+            whitelist_file: None,
         }
     }
 

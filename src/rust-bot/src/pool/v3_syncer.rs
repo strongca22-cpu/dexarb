@@ -253,6 +253,18 @@ impl<P: Middleware + 'static> V3PoolSyncer<P> {
             .await
             .context("Failed to get liquidity")?;
 
+        // Skip pools with zero liquidity (phantom pools — have addresses and
+        // stuck prices but no actual tradeable depth). Saves 4 RPC calls per
+        // phantom pool and prevents them from entering the known_pools list.
+        if liquidity == 0 {
+            debug!(
+                "Skipping {} @ {}% fee — zero liquidity (phantom pool)",
+                pair.symbol,
+                fee_tier as f64 / 10000.0
+            );
+            return Ok(None);
+        }
+
         // CRITICAL: Get the ACTUAL token0/token1 from the pool contract
         // V3 pools sort tokens by address, which may differ from config order
         let actual_token0 = pool.token_0().call().await.context("Failed to get token0")?;

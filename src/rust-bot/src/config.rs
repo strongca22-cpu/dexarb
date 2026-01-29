@@ -102,5 +102,11 @@ fn load_config_inner() -> Result<BotConfig> {
         live_mode: std::env::var("LIVE_MODE")
             .map(|v| v.to_lowercase() == "true")
             .unwrap_or(false),
+
+        // Shared pool state file (data collector writes, live bot reads)
+        pool_state_file: std::env::var("POOL_STATE_FILE").ok(),
+
+        // Pool whitelist/blacklist config (Phase 1.1)
+        whitelist_file: std::env::var("WHITELIST_FILE").ok(),
     })
 }
