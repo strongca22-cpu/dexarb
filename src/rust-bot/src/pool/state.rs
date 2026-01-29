@@ -1,11 +1,13 @@
 //! Pool State Management
 //!
 //! Thread-safe storage for DEX pool states using DashMap.
+//! Supports both V2 (reserves) and V3 (concentrated liquidity) pools.
 //!
 //! Author: AI-Generated
 //! Created: 2026-01-27
+//! Modified: 2026-01-29 - Added V3 pool support
 
-use crate::types::{DexType, PoolState};
+use crate::types::{DexType, PoolState, V3PoolState};
 use dashmap::DashMap;
 use std::sync::Arc;
 use tracing::debug;
@@ -14,10 +16,13 @@ use tracing::debug;
 ///
 /// Uses DashMap for concurrent read/write access to pool states.
 /// Key is (DexType, pair_symbol) tuple for fast lookups.
+/// Supports both V2 and V3 pools.
 #[derive(Debug)]
 pub struct PoolStateManager {
-    /// Pool states indexed by (DEX, pair_symbol)
+    /// V2 Pool states indexed by (DEX, pair_symbol)
     pools: Arc<DashMap<(DexType, String), PoolState>>,
+    /// V3 Pool states indexed by (DEX, pair_symbol)
+    v3_pools: Arc<DashMap<(DexType, String), V3PoolState>>,
 }
 
 impl PoolStateManager {
@@ -25,6 +30,7 @@ impl PoolStateManager {
     pub fn new() -> Self {
         Self {
             pools: Arc::new(DashMap::new()),
+            v3_pools: Arc::new(DashMap::new()),
         }
     }
 
@@ -100,6 +106,58 @@ impl PoolStateManager {
         let key = (dex, pair_symbol.to_string());
         self.pools.contains_key(&key)
     }
+
+    // === V3 Pool Methods ===
+
+    /// Add or update a V3 pool state
+    pub fn update_v3_pool(&self, pool: V3PoolState) {
+        let key = (pool.dex, pool.pair.symbol.clone());
+        debug!(
+            "Updating V3 pool: {} on {:?} - tick: {}, fee: {}",
+            pool.pair.symbol, pool.dex, pool.tick, pool.fee
+        );
+        self.v3_pools.insert(key, pool);
+    }
+
+    /// Get V3 pool state for a specific DEX and pair
+    pub fn get_v3_pool(&self, dex: DexType, pair_symbol: &str) -> Option<V3PoolState> {
+        let key = (dex, pair_symbol.to_string());
+        self.v3_pools.get(&key).map(|entry| entry.clone())
+    }
+
+    /// Get all V3 pools for a specific pair across all fee tiers
+    pub fn get_v3_pools_for_pair(&self, pair_symbol: &str) -> Vec<V3PoolState> {
+        self.v3_pools
+            .iter()
+            .filter(|entry| entry.key().1 == pair_symbol)
+            .map(|entry| entry.value().clone())
+            .collect()
+    }
+
+    /// Get all V3 pool states
+    pub fn get_all_v3_pools(&self) -> Vec<V3PoolState> {
+        self.v3_pools.iter().map(|entry| entry.value().clone()).collect()
+    }
+
+    /// Get V3 pool count
+    pub fn v3_pool_count(&self) -> usize {
+        self.v3_pools.len()
+    }
+
+    /// Get combined stats: (v2_count, v3_count, oldest_block, newest_block)
+    pub fn combined_stats(&self) -> (usize, usize, u64, u64) {
+        let v2_count = self.pools.len();
+        let v3_count = self.v3_pools.len();
+
+        let v2_blocks: Vec<u64> = self.pools.iter().map(|e| e.value().last_updated).collect();
+        let v3_blocks: Vec<u64> = self.v3_pools.iter().map(|e| e.value().last_updated).collect();
+
+        let all_blocks: Vec<u64> = v2_blocks.into_iter().chain(v3_blocks.into_iter()).collect();
+        let min_block = all_blocks.iter().min().copied().unwrap_or(0);
+        let max_block = all_blocks.iter().max().copied().unwrap_or(0);
+
+        (v2_count, v3_count, min_block, max_block)
+    }
 }
 
 impl Default for PoolStateManager {
@@ -112,6 +170,7 @@ impl Clone for PoolStateManager {
     fn clone(&self) -> Self {
         Self {
             pools: Arc::clone(&self.pools),
+            v3_pools: Arc::clone(&self.v3_pools),
         }
     }
 }

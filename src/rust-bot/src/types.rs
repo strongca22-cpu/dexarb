@@ -338,4 +338,7 @@ pub struct BotConfig {
     // Tax Logging (IRS Compliance)
     pub tax_log_dir: Option<String>,
     pub tax_log_enabled: bool,
+
+    // Live trading mode (false = dry run/paper trading)
+    pub live_mode: bool,
 }

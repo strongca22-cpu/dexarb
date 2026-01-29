@@ -1,21 +1,36 @@
-//! Opportunity Detector
+//! Opportunity Detector (V2 + V3)
 //!
 //! Scans pool states to detect arbitrage opportunities between DEXs.
-//! Uses constant product formula to calculate actual profits.
+//! Supports both V2 (constant product) and V3 (concentrated liquidity) pools.
+//! Key V3 arbitrage: 0.05% ↔ 1.00% fee tiers have ~1.05% round-trip but 2%+ spreads.
 //!
 //! Author: AI-Generated
 //! Created: 2026-01-27
+//! Modified: 2026-01-29 - Added V3 pool support
 
 use crate::pool::{PoolStateManager, PriceCalculator};
-use crate::types::{ArbitrageOpportunity, BotConfig, PoolState};
-use ethers::types::U256;
+use crate::types::{ArbitrageOpportunity, BotConfig, DexType, PoolState, TradingPair, V3PoolState};
+use ethers::types::{Address, U256};
 use tracing::{debug, info};
 
-/// Minimum spread percentage to consider (covers 0.6% DEX fees)
+/// Minimum spread percentage to consider (covers fees)
 const MIN_SPREAD_PERCENT: f64 = 0.3;
 
 /// Estimated gas cost in USD for two swaps on Polygon
 const ESTIMATED_GAS_COST_USD: f64 = 0.50;
+
+/// V2 DEX fee percentage (Quickswap, Sushiswap, Apeswap)
+const V2_FEE_PERCENT: f64 = 0.30;
+
+/// Unified pool representation for comparing V2 and V3
+#[derive(Debug, Clone)]
+struct UnifiedPool {
+    dex: DexType,
+    price: f64,
+    fee_percent: f64,  // Single swap fee
+    address: Address,
+    pair: TradingPair,
+}
 
 /// Opportunity detector for cross-DEX arbitrage
 pub struct OpportunityDetector {
@@ -32,14 +47,32 @@ impl OpportunityDetector {
         }
     }
 
-    /// Scan all configured pairs for arbitrage opportunities
+    /// Scan all configured pairs for arbitrage opportunities (V2 + V3)
     /// Returns opportunities sorted by estimated profit (highest first)
     pub fn scan_opportunities(&self) -> Vec<ArbitrageOpportunity> {
         let mut opportunities = Vec::new();
 
         for pair_config in &self.config.pairs {
+            // Check V2-only opportunities (legacy)
             if let Some(opp) = self.check_pair(&pair_config.symbol) {
                 opportunities.push(opp);
+            }
+
+            // Check V3 opportunities (including V3↔V3 and V3↔V2)
+            if let Some(opp) = self.check_pair_unified(&pair_config.symbol) {
+                // Only add if better than existing for same pair
+                let dominated = opportunities.iter().any(|existing| {
+                    existing.pair.symbol == pair_config.symbol
+                        && existing.estimated_profit >= opp.estimated_profit
+                });
+                if !dominated {
+                    // Remove dominated existing opportunity for same pair
+                    opportunities.retain(|existing| {
+                        existing.pair.symbol != pair_config.symbol
+                            || existing.estimated_profit > opp.estimated_profit
+                    });
+                    opportunities.push(opp);
+                }
             }
         }
 
@@ -51,6 +84,120 @@ impl OpportunityDetector {
         });
 
         opportunities
+    }
+
+    /// Check a pair using unified V2+V3 pool comparison
+    /// This is the key method for V3 fee tier arbitrage
+    fn check_pair_unified(&self, pair_symbol: &str) -> Option<ArbitrageOpportunity> {
+        // Collect all pools (V2 + V3) into unified representation
+        let mut unified_pools: Vec<UnifiedPool> = Vec::new();
+
+        // Add V2 pools
+        for pool in self.state_manager.get_pools_for_pair(pair_symbol) {
+            if pool.price() > 0.0 && !pool.reserve0.is_zero() {
+                unified_pools.push(UnifiedPool {
+                    dex: pool.dex,
+                    price: pool.price(),
+                    fee_percent: V2_FEE_PERCENT,
+                    address: pool.address,
+                    pair: pool.pair.clone(),
+                });
+            }
+        }
+
+        // Add V3 pools
+        for pool in self.state_manager.get_v3_pools_for_pair(pair_symbol) {
+            let price = pool.price();
+            if price > 0.0 && price < 1e15 {  // Sanity check
+                let fee_percent = pool.fee as f64 / 10000.0;  // 500 -> 0.05%
+                unified_pools.push(UnifiedPool {
+                    dex: pool.dex,
+                    price,
+                    fee_percent,
+                    address: pool.address,
+                    pair: pool.pair.clone(),
+                });
+            }
+        }
+
+        if unified_pools.len() < 2 {
+            return None;
+        }
+
+        // Find best opportunity by comparing all pairs
+        let mut best_opportunity: Option<ArbitrageOpportunity> = None;
+        let mut best_profit: f64 = 0.0;
+
+        for i in 0..unified_pools.len() {
+            for j in (i + 1)..unified_pools.len() {
+                let pool_a = &unified_pools[i];
+                let pool_b = &unified_pools[j];
+
+                // Determine buy (lower price) and sell (higher price)
+                let (buy_pool, sell_pool) = if pool_b.price > pool_a.price {
+                    (pool_a, pool_b)
+                } else {
+                    (pool_b, pool_a)
+                };
+
+                // Calculate midmarket spread (before fees)
+                let midmarket_spread = (sell_pool.price - buy_pool.price) / buy_pool.price;
+
+                // Calculate round-trip fee
+                let round_trip_fee = (buy_pool.fee_percent + sell_pool.fee_percent) / 100.0;
+
+                // Calculate executable spread (after fees)
+                let executable_spread = midmarket_spread - round_trip_fee;
+
+                if executable_spread <= 0.0 {
+                    continue;
+                }
+
+                // Estimate profit
+                let gross = executable_spread * self.config.max_trade_size_usd;
+                let slippage_estimate = gross * 0.10;  // 10% slippage estimate
+                let net_profit = gross - ESTIMATED_GAS_COST_USD - slippage_estimate;
+
+                if net_profit < self.config.min_profit_usd {
+                    continue;
+                }
+
+                // Check if this is the best opportunity
+                if net_profit > best_profit {
+                    best_profit = net_profit;
+
+                    info!(
+                        "🎯 V3 OPPORTUNITY: {} | Buy {:?} ({:.2}%) @ {:.6} | Sell {:?} ({:.2}%) @ {:.6} | Spread {:.2}% | Net ${:.2}",
+                        pair_symbol,
+                        buy_pool.dex, buy_pool.fee_percent,
+                        buy_pool.price,
+                        sell_pool.dex, sell_pool.fee_percent,
+                        sell_pool.price,
+                        executable_spread * 100.0,
+                        net_profit
+                    );
+
+                    best_opportunity = Some(ArbitrageOpportunity {
+                        pair: buy_pool.pair.clone(),
+                        buy_dex: buy_pool.dex,
+                        sell_dex: sell_pool.dex,
+                        buy_price: buy_pool.price,
+                        sell_price: sell_pool.price,
+                        spread_percent: executable_spread * 100.0,
+                        estimated_profit: net_profit,
+                        trade_size: U256::from((self.config.max_trade_size_usd * 1e6) as u64),  // USDC has 6 decimals
+                        timestamp: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap()
+                            .as_secs(),
+                        buy_pool_address: Some(buy_pool.address),
+                        sell_pool_address: Some(sell_pool.address),
+                    });
+                }
+            }
+        }
+
+        best_opportunity
     }
 
     /// Check a specific pair for arbitrage opportunity

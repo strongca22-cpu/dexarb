@@ -81,5 +81,10 @@ pub fn load_config() -> Result<BotConfig> {
         tax_log_enabled: std::env::var("TAX_LOG_ENABLED")
             .map(|v| v.to_lowercase() == "true")
             .unwrap_or(true), // Default to enabled for safety
+
+        // Live trading mode (default to false for safety)
+        live_mode: std::env::var("LIVE_MODE")
+            .map(|v| v.to_lowercase() == "true")
+            .unwrap_or(false),
     })
 }
