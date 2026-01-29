@@ -25,7 +25,7 @@ dexarb/
 └── README.md
 ```
 
-## Status: Phase 1 Day 4 Complete
+## Status: Phase 1 Day 5 - V3 Integration Complete
 
 - [x] Repository initialized
 - [x] Documentation added
@@ -45,8 +45,16 @@ dexarb/
   - TradeExecutor with Uniswap V2 Router
   - DRY RUN mode by default (safe testing)
   - Slippage protection & gas price checks
-- [ ] Testnet testing (Day 5)
-- [ ] Mainnet deployment (Day 6-7)
+- [x] **V3 Pool Integration** (Day 5)
+  - V3PoolSyncer for Uniswap V3 concentrated liquidity
+  - 3 fee tiers: 0.05%, 0.30%, 1.00%
+  - Unified detector comparing V2↔V2, V2↔V3, V3↔V3
+  - Key profitable routes: 0.05%↔1.00% (~$10/trade)
+- [x] **Tax Logging** (IRS Compliance)
+  - 34+ field TaxRecord for Form 8949
+  - CSV + JSON dual logging
+- [ ] Live trading validation
+- [ ] Mainnet deployment
 
 ## Quick Start
 
