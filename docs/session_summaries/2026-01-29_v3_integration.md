@@ -20,7 +20,7 @@ Added Uniswap V3 pool support to the live trading bot. Previously, V3 opportunit
 ### 3. Opportunity Detector Enhanced (detector.rs)
 - New `UnifiedPool` struct for comparing V2 and V3 pools
 - New `check_pair_unified()` method
-- Compares all pool pairs (V2↔V2, V2↔V3, V3↔V3)
+- **Updated**: V3-only comparison (V2 pools excluded due to price inversion bug)
 - Proper fee calculation: round_trip_fee = buy_fee + sell_fee
 
 ### 4. Config Updates
@@ -55,8 +55,22 @@ The key opportunity is between V3 fee tiers:
 9ac19e4 feat: add V3 pool support for fee tier arbitrage
 ```
 
+## Live Testing Results (2026-01-29 evening)
+
+### Issues Found & Fixed
+1. **V2 price inversion** - V2 `price()` returns reserve0/reserve1 (e.g., 206B for UNI/USDC) while V3 returns correct ~0.21. Created phantom 100%+ spreads. **Fix**: Excluded V2 pools from `check_pair_unified()`.
+2. **Gas limit too low** - MAX_GAS_PRICE_GWEI was 100, Polygon was at 583 gwei. **Fix**: Increased to 1000 (still cheap at ~$0.12/swap).
+3. **Profit threshold too high** - MIN_PROFIT_USD was 5.0, real opportunities at $4.88. **Fix**: Lowered to 3.0.
+
+### Remaining Issue
+- **Trade execution reverts** - "Contract call reverted with data: 0x". TradeExecutor uses V2 router (`swapExactTokensForTokens`) for V3 pools. V3 requires `exactInputSingle` on V3 SwapRouter.
+
+### Verified Working
+- V3 price detection correct: UNI/USDC 0.05%=0.210194, 0.30%=0.208290, 1.00%=0.205579
+- Real opportunity: UNI/USDC 1.19% spread, $4.88 est profit (buy 1.00% tier, sell 0.05% tier)
+
 ## Next Steps
 
-1. Run live bot with V3 support
-2. Monitor for V3↔V3 opportunities
-3. Validate execution on mainnet
+1. **Fix TradeExecutor for V3 swaps** (use V3 SwapRouter + exactInputSingle)
+2. Validate execution on mainnet
+3. Fix V2 price calculation for future V2↔V3 arbitrage

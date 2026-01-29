@@ -86,26 +86,14 @@ impl OpportunityDetector {
         opportunities
     }
 
-    /// Check a pair using unified V2+V3 pool comparison
-    /// This is the key method for V3 fee tier arbitrage
+    /// Check a pair using V3-only pool comparison
+    /// This is the key method for V3 fee tier arbitrage (0.05% ↔ 0.30% ↔ 1.00%)
+    /// NOTE: V2 pools excluded due to price calculation differences
     fn check_pair_unified(&self, pair_symbol: &str) -> Option<ArbitrageOpportunity> {
-        // Collect all pools (V2 + V3) into unified representation
+        // Collect V3 pools only (V2 excluded - price format incompatible)
         let mut unified_pools: Vec<UnifiedPool> = Vec::new();
 
-        // Add V2 pools
-        for pool in self.state_manager.get_pools_for_pair(pair_symbol) {
-            if pool.price() > 0.0 && !pool.reserve0.is_zero() {
-                unified_pools.push(UnifiedPool {
-                    dex: pool.dex,
-                    price: pool.price(),
-                    fee_percent: V2_FEE_PERCENT,
-                    address: pool.address,
-                    pair: pool.pair.clone(),
-                });
-            }
-        }
-
-        // Add V3 pools
+        // Add V3 pools only
         for pool in self.state_manager.get_v3_pools_for_pair(pair_symbol) {
             let price = pool.price();
             if price > 0.0 && price < 1e15 {  // Sanity check
