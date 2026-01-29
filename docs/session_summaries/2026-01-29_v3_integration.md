@@ -90,14 +90,27 @@ The TradeExecutor has **no V3 swap implementation**. The execution path is:
 3. Build V3 params: `(tokenIn, tokenOut, fee, recipient, deadline, amountIn, amountOutMinimum, sqrtPriceLimitX96)`
 4. V3 returns single `uint256` output (not array like V2)
 
-### Verified Working
-- V3 price detection correct: UNI/USDC 0.05%=0.210194, 0.30%=0.208290, 1.00%=0.205579
-- Real opportunity: UNI/USDC 1.19% spread, $4.88 est profit (buy 1.00% tier, sell 0.05% tier)
-- Router address resolution correct for V3 DexTypes
-- Gas price check working at new 1000 gwei limit
+### V3 Swap Routing Fix (executor.rs)
+
+Added `ISwapRouter` ABI with `exactInputSingle` and V3-aware dispatch:
+- `swap()` branches on `dex.is_v3()` → calls `swap_v3()` or `swap_v2()`
+- `swap_v3()` builds `ExactInputSingleParams` struct with fee tier, deadline, sqrtPriceLimitX96=0
+- Token approvals correctly route to V3 SwapRouter address
+
+### INCIDENT: $500 Loss on First V3 Trade
+
+**Trade**: Buy tx `0x4dbb...acae` — 500 USDC → 0.0112 UNI (worth $0.05) on V3 1.00% pool. Sell failed ("Too little received"). Net loss ~$500.
+
+**Root Cause 1**: `calculate_min_out` (executor.rs:553) doesn't convert between token decimals. USDC has 6 decimals, UNI has 18. The computed min_out of 102,275,689 in UNI's 18-decimal format = 0.0000000001 UNI — zero slippage protection.
+
+**Root Cause 2**: No pool liquidity check. The V3 1.00% UNI/USDC pool had almost no liquidity. 500 USDC consumed everything.
+
+**Wallet after incident**: 520 USDC, 0.0112 UNI, 8.06 MATIC. LIVE_MODE set to false.
 
 ## Next Steps
 
-1. **Add V3 swap support to TradeExecutor** — `ISwapRouter::exactInputSingle` ABI + V3-aware dispatch
-2. Validate V3 execution on mainnet
-3. Fix V2 price calculation for future V2↔V3 arbitrage
+1. **Fix `calculate_min_out` decimal conversion** — scale by `10^(out_decimals - in_decimals)`
+2. **Add pool liquidity check** — reject trades where liquidity < trade_size
+3. **Use V3 Quoter for pre-trade simulation** — `quoteExactInputSingle` before executing
+4. **Parse actual amountOut from Swap event** — current code uses placeholder
+5. Fix V2 price calculation for future V2↔V3 arbitrage

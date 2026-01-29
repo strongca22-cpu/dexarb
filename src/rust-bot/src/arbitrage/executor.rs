@@ -1,12 +1,15 @@
 //! Trade Executor
 //!
-//! Executes arbitrage trades across DEXs using Uniswap V2 Router interface.
+//! Executes arbitrage trades across DEXs using Uniswap V2 and V3 Router interfaces.
+//! V2: swapExactTokensForTokens (Quickswap, Sushiswap, Apeswap)
+//! V3: exactInputSingle (Uniswap V3 fee tiers: 0.05%, 0.30%, 1.00%)
 //! Phase 1 implementation with two separate transactions (has leg risk).
 //! Includes IRS-compliant tax logging for all executed trades.
 //!
 //! Author: AI-Generated
 //! Created: 2026-01-28
 //! Modified: 2026-01-28 (Phase 5: Tax logging integration)
+//! Modified: 2026-01-29 (V3 SwapRouter support: exactInputSingle)
 
 use crate::tax::{TaxLogger, TaxRecordBuilder};
 use crate::types::{ArbitrageOpportunity, BotConfig, DexType, TradeResult};
@@ -26,6 +29,13 @@ abigen!(
         function swapExactTokensForTokens(uint256 amountIn, uint256 amountOutMin, address[] calldata path, address to, uint256 deadline) external returns (uint256[] memory amounts)
         function getAmountsOut(uint256 amountIn, address[] calldata path) external view returns (uint256[] memory amounts)
     ]"#
+);
+
+// Uniswap V3 SwapRouter ABI (exactInputSingle for single-hop V3 swaps)
+// ExactInputSingleParams: (tokenIn, tokenOut, fee, recipient, deadline, amountIn, amountOutMinimum, sqrtPriceLimitX96)
+abigen!(
+    ISwapRouter,
+    r#"[{"inputs":[{"components":[{"internalType":"address","name":"tokenIn","type":"address"},{"internalType":"address","name":"tokenOut","type":"address"},{"internalType":"uint24","name":"fee","type":"uint24"},{"internalType":"address","name":"recipient","type":"address"},{"internalType":"uint256","name":"deadline","type":"uint256"},{"internalType":"uint256","name":"amountIn","type":"uint256"},{"internalType":"uint256","name":"amountOutMinimum","type":"uint256"},{"internalType":"uint160","name":"sqrtPriceLimitX96","type":"uint160"}],"internalType":"struct ISwapRouter.ExactInputSingleParams","name":"params","type":"tuple"}],"name":"exactInputSingle","outputs":[{"internalType":"uint256","name":"amountOut","type":"uint256"}],"stateMutability":"payable","type":"function"}]"#
 );
 
 // ERC20 ABI for token approvals
@@ -415,9 +425,25 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
         })
     }
 
-    /// Execute a single swap on a DEX
+    /// Execute a single swap on a DEX (routes to V2 or V3 based on DexType)
     /// Returns (tx_hash, amount_out, block_number)
     async fn swap(
+        &self,
+        dex: DexType,
+        token_in: Address,
+        token_out: Address,
+        amount_in: U256,
+        min_amount_out: U256,
+    ) -> Result<(TxHash, U256, u64)> {
+        if dex.is_v3() {
+            return self.swap_v3(dex, token_in, token_out, amount_in, min_amount_out).await;
+        }
+        self.swap_v2(dex, token_in, token_out, amount_in, min_amount_out).await
+    }
+
+    /// Execute a V2 swap (swapExactTokensForTokens)
+    /// Used for Quickswap, Sushiswap, Apeswap
+    async fn swap_v2(
         &self,
         dex: DexType,
         token_in: Address,
@@ -449,7 +475,7 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
         let wallet_address = self.wallet.address();
 
         debug!(
-            "Swap: {} {} -> {} on {:?}",
+            "V2 Swap: {} {} -> {} on {:?}",
             amount_in, token_in, token_out, dex
         );
         debug!("  Min out: {}, Deadline: {}", min_amount_out, deadline);
@@ -466,7 +492,7 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
         let pending_tx = tx.send().await.map_err(|e| anyhow!("Send failed: {}", e))?;
         let tx_hash = pending_tx.tx_hash();
 
-        info!("Swap tx submitted: {:?}", tx_hash);
+        info!("V2 swap tx submitted: {:?}", tx_hash);
 
         // Wait for confirmation
         let receipt = pending_tx
@@ -475,7 +501,7 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
             .ok_or_else(|| anyhow!("No receipt returned"))?;
 
         if receipt.status != Some(U64::from(1)) {
-            return Err(anyhow!("Transaction reverted"));
+            return Err(anyhow!("V2 transaction reverted"));
         }
 
         // Extract block number for tax logging
@@ -485,6 +511,85 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
 
         // Parse output amount from logs (simplified - assumes last log has amount)
         // In production, you'd parse the Swap event properly
+        let amount_out = min_amount_out; // Placeholder - actual amount would come from logs
+
+        Ok((tx_hash, amount_out, block_number))
+    }
+
+    /// Execute a V3 swap (exactInputSingle)
+    /// Used for Uniswap V3 fee tiers: 0.05%, 0.30%, 1.00%
+    async fn swap_v3(
+        &self,
+        dex: DexType,
+        token_in: Address,
+        token_out: Address,
+        amount_in: U256,
+        min_amount_out: U256,
+    ) -> Result<(TxHash, U256, u64)> {
+        let router_address = self.get_router_address(dex);
+        let fee = dex.v3_fee_tier().ok_or_else(|| anyhow!("Not a V3 DEX type: {:?}", dex))?;
+
+        // Create signer client
+        let client = SignerMiddleware::new(
+            self.provider.clone(),
+            self.wallet.clone().with_chain_id(self.config.chain_id),
+        );
+        let client = Arc::new(client);
+
+        let router = ISwapRouter::new(router_address, client.clone());
+
+        // Set deadline (current time + 5 minutes)
+        let deadline = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 300;
+
+        let wallet_address = self.wallet.address();
+
+        debug!(
+            "V3 Swap: {} {} -> {} on {:?} (fee tier: {})",
+            amount_in, token_in, token_out, dex, fee
+        );
+        debug!("  Min out: {}, Deadline: {}", min_amount_out, deadline);
+
+        // Build ExactInputSingleParams struct (generated by abigen from V3 SwapRouter ABI)
+        // sqrtPriceLimitX96 = 0 means no price limit (accept any price within slippage)
+        let params = i_swap_router::ExactInputSingleParams {
+            token_in,
+            token_out,
+            fee,
+            recipient: wallet_address,
+            deadline: U256::from(deadline),
+            amount_in,
+            amount_out_minimum: min_amount_out,
+            sqrt_price_limit_x96: U256::zero(), // 0 = no limit
+        };
+
+        let tx = router.exact_input_single(params);
+
+        let pending_tx = tx.send().await.map_err(|e| anyhow!("V3 send failed: {}", e))?;
+        let tx_hash = pending_tx.tx_hash();
+
+        info!("V3 swap tx submitted: {:?}", tx_hash);
+
+        // Wait for confirmation
+        let receipt = pending_tx
+            .await
+            .map_err(|e| anyhow!("V3 confirmation failed: {}", e))?
+            .ok_or_else(|| anyhow!("No receipt returned"))?;
+
+        if receipt.status != Some(U64::from(1)) {
+            return Err(anyhow!("V3 transaction reverted"));
+        }
+
+        // Extract block number for tax logging
+        let block_number = receipt.block_number
+            .map(|bn| bn.as_u64())
+            .unwrap_or(0);
+
+        // Parse output amount from logs (simplified)
+        // In production, parse the V3 Swap event for actual amountOut
         let amount_out = min_amount_out; // Placeholder - actual amount would come from logs
 
         Ok((tx_hash, amount_out, block_number))

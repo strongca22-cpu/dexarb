@@ -1,96 +1,76 @@
 # Next Steps - DEX Arbitrage Bot
 
-## Current Status: V3 DETECTION WORKING, EXECUTION BLOCKED
+## Current Status: HALTED — $500 LOSS ON FIRST V3 TRADE
 
 **Date:** 2026-01-29
+**LIVE_MODE:** false (disabled after incident)
 
-**Wallet:**
-- USDC.e: ~$1,020
-- MATIC: 8.21 (gas)
-- Approvals: Set
+**Wallet (post-incident):**
+- USDC.e: 520.02 (was ~1,020)
+- UNI: 0.0112 (dust from failed arb)
+- MATIC: 8.06 (gas)
 
 ---
 
-## Session Summary (2026-01-29 - Live Testing)
+## Incident Report (2026-01-29)
 
 ### What Happened
 
-1. **Pre-deployment checklist passed** (140/140 checks via `scripts/checklist_full.sh`)
-2. **Started live bot** in tmux with trade monitor
-3. **Discovered V2 price inversion bug** - V2 `price()` returns inverted values vs V3 (e.g., 206B vs 0.21), creating phantom 100%+ spread opportunities
-4. **Fixed: V3-only detection** - Removed V2 pools from `check_pair_unified()` in `detector.rs`
-5. **Fixed: Gas price limit** - Increased `MAX_GAS_PRICE_GWEI` from 100 to 1000 (Polygon spikes to 500+ gwei but still cheap at ~$0.12/swap)
-6. **Fixed: Profit threshold** - Lowered `MIN_PROFIT_USD` from 5.0 to 3.0 (real opportunities at $4.88)
-7. **V3 detection now working correctly** - Real opportunities found (UNI/USDC 1.19% spread, $4.88 est profit)
-8. **Trade execution failing** - "Contract call reverted with data: 0x" - TradeExecutor likely using V2 router for V3 pools
+1. V3 `exactInputSingle` swap support added to `executor.rs` — compiled and deployed
+2. Bot detected UNI/USDC opportunity: buy 1.00% tier @ 0.2056, sell 0.05% @ 0.2102
+3. **Buy leg EXECUTED on-chain**: 500 USDC → 0.0112 UNI (worth $0.05)
+4. Sell leg failed at gas estimation: "Too little received"
+5. **Net loss: ~$500** due to two critical bugs
 
-### Key Finding: V3 Prices Correct, V2 Inverted
+### Root Cause 1: `calculate_min_out` Decimal Mismatch
 
-After V3-only fix, prices are correct:
-```
-UNI/USDC: 0.05%=0.210194, 0.30%=0.208290, 1.00%=0.205579
-```
+`executor.rs:553` computes `amount_in_raw * price` without converting token decimals:
+- Input: 500,000,000 (500 USDC, 6 decimals)
+- Price: 0.205579
+- Computed min_out: 102,275,689
+- In UNI's 18-decimal format: **0.0000000001 UNI** — effectively zero slippage protection
+- Correct min_out: ~102 * 10^18 = 1.02 * 10^20
 
-### Blocking Issue: Trade Executor (Root Cause Confirmed)
+### Root Cause 2: No Pool Liquidity Check
 
-The TradeExecutor has **no V3 swap implementation**:
+The V3 1.00% UNI/USDC pool had almost no liquidity. The 500 USDC trade consumed everything, receiving 99.99% less UNI than expected. The detector checks price but never checks if pool liquidity can absorb the trade size.
 
-- `get_router_address()` correctly resolves V3 DexTypes to the V3 SwapRouter
-- But `execute_swap()` calls `swapExactTokensForTokens` (V2 function) on the V3 router
-- The V3 router doesn't have this function → reverts with empty `0x` data
-- **Fix needed in `executor.rs`**: Add `ISwapRouter` ABI with `exactInputSingle`, branch swap logic by `dex.is_v3()`
+### On-Chain Evidence
+
+- Buy tx: `0x4dbb48aeac557cde8ca986d422d0d70515a29c74588429116aea833fe110acae`
+- Approval tx: `0x781ae7e444067b2ab93ec010892ff7c699aff27e3e684b39742b80908702243b`
+- Sell tx: never sent (reverted at `eth_estimateGas`)
 
 ---
 
-## Immediate Next Steps
+## Critical Fixes Required Before Re-enabling LIVE_MODE
 
-1. [x] Add V3 support to live bot (detector, syncer, state manager)
-2. [x] Add LIVE_MODE environment variable
-3. [x] Build and test compilation
-4. [x] Start live bot with V3 in tmux
-5. [x] Monitor for V3↔V3 opportunities (working - UNI/USDC detected)
-6. [ ] **FIX: Add V3 swap routing to TradeExecutor** (use V3 SwapRouter + exactInputSingle)
-7. [ ] Validate execution on mainnet
+1. [ ] **Fix `calculate_min_out` decimal conversion** — must scale output by `10^(out_decimals - in_decimals)`
+2. [ ] **Add pool liquidity check** — reject trades where pool liquidity < trade_size
+3. [ ] **Use V3 Quoter for pre-trade simulation** — call `quoteExactInputSingle` before executing
+4. [ ] **Parse actual `amountOut` from V3 Swap event** — current code uses `min_amount_out` as placeholder
+
+### Previously Completed (V3 swap routing)
+- [x] Add `ISwapRouter` ABI binding (`exactInputSingle`)
+- [x] Add `is_v3()` check in `swap()` to branch V2 vs V3 logic
+- [x] Build V3 `ExactInputSingleParams` struct
+- [x] Token approvals routed to V3 SwapRouter
+
+### Deferred
+- [ ] Fix V2 price calculation (inverted reserve ratio)
 
 ---
 
 ## Commands
 
 ```bash
-# Start live bot
+# Start live bot (LIVE_MODE=false for dry run)
 tmux new-session -d -s live-bot
 tmux send-keys -t live-bot "./target/release/dexarb-bot 2>&1 | tee data/bot_live.log" Enter
-
-# Monitor for first trade
-./scripts/monitor_trade.sh
 
 # Pre-deployment checklist
 ./scripts/checklist_full.sh
 ```
-
----
-
-## Backlog
-
-### Critical — V3 Swap Execution (executor.rs)
-- [ ] Add `ISwapRouter` ABI binding (`exactInputSingle`)
-- [ ] Add `is_v3()` check in `execute_swap()` to branch V2 vs V3 logic
-- [ ] Build V3 params: `(tokenIn, tokenOut, fee, recipient, deadline, amountIn, amountOutMinimum, sqrtPriceLimitX96)`
-- [ ] Handle V3 return type (single `uint256`, not array)
-- [ ] Approve tokens for V3 SwapRouter address (separate from V2 approvals)
-
-### Deferred
-- [ ] Fix V2 price calculation (inverted reserve ratio) — for future V2↔V3 arb
-
-### Monitoring
-- [x] Hourly Discord reports
-- [x] Spread logger
-- [ ] Real-time alerts for high-value opportunities
-- [ ] Daily summary reports
-
-### Infrastructure
-- [ ] Multi-RPC failover
-- [ ] Staggered V3 sync (reduce RPC calls)
 
 ---
 
