@@ -9,8 +9,18 @@
 //! - Multiple fee tiers (0.05%, 0.30%, 1.00%)
 //! - Concentrated liquidity (ticks instead of reserves)
 //!
+//! Two sync modes:
+//! - sync_all_v3_pools: Full discovery (factory lookup, token addresses, decimals).
+//!   Used once at startup. Sequential, requires &mut self for decimals cache.
+//! - sync_known_pools_parallel: Fast ongoing sync (slot0 + liquidity only).
+//!   Used in main loop. Concurrent via join_all, ~200ms vs ~5.6s sequential.
+//!
+//! 1% fee tier excluded — all 1% pools on Polygon have phantom liquidity
+//! (confirmed by live Quoter testing across UNI, WBTC, LINK).
+//!
 //! Author: AI-Generated
 //! Created: 2026-01-28
+//! Modified: 2026-01-29 - Drop 1% fee tier, add parallel sync
 
 use crate::types::{BotConfig, DexType, TradingPair, V3PoolState};
 use anyhow::{Context, Result};
@@ -97,8 +107,12 @@ impl<P: Middleware + 'static> V3PoolSyncer<P> {
 
             let pair = TradingPair::new(token0, token1, pair_config.symbol.clone());
 
-            // Try each fee tier
+            // Try each fee tier (skip 1% — phantom liquidity on Polygon)
             for (fee_tier, dex_type) in V3_FEE_TIERS {
+                if fee_tier >= 10000 {
+                    debug!("Skipping {} @ 1% fee tier (phantom liquidity)", pair.symbol);
+                    continue;
+                }
                 match self.sync_v3_pool(factory_address, &pair, fee_tier, dex_type).await {
                     Ok(Some(pool)) => {
                         info!(
@@ -120,8 +134,79 @@ impl<P: Middleware + 'static> V3PoolSyncer<P> {
             }
         }
 
-        info!("V3 sync complete: {} pools synced", pools.len());
+        info!("V3 sync complete: {} pools synced (0.05% + 0.30% tiers only)", pools.len());
         Ok(pools)
+    }
+
+    /// Fast parallel sync of known V3 pools (slot0 + liquidity only).
+    ///
+    /// Used in the main loop after initial sync. Since pool addresses, tokens,
+    /// and decimals are already cached from the initial sync, we only need to
+    /// fetch the changing state (sqrtPriceX96, tick, liquidity).
+    ///
+    /// All pools synced concurrently via futures::future::join_all.
+    /// Each pool fires slot0 + liquidity in parallel via tokio::join!.
+    /// Block number fetched once and shared across all updates.
+    ///
+    /// Performance: 14 pools × 2 RPC calls each + 1 block call, all concurrent.
+    /// With ~200ms RPC latency: ~400ms total (vs ~5.6s sequential).
+    pub async fn sync_known_pools_parallel(
+        &self,
+        known_pools: &[V3PoolState],
+    ) -> Vec<V3PoolState> {
+        use futures::future::join_all;
+
+        // Get block number once (shared across all pool syncs)
+        let current_block = match self.provider.get_block_number().await {
+            Ok(bn) => bn.as_u64(),
+            Err(e) => {
+                warn!("Failed to get block number for parallel sync: {}", e);
+                return Vec::new();
+            }
+        };
+
+        let futs: Vec<_> = known_pools.iter().map(|pool| {
+            let provider = Arc::clone(&self.provider);
+            let pool_state = pool.clone();
+
+            async move {
+                let contract = UniswapV3Pool::new(pool_state.address, provider);
+
+                // Parallel: slot0 + liquidity (2 RPC calls per pool, concurrent)
+                // Bind ContractCall objects before .call() to extend their lifetime
+                let slot0_call = contract.slot_0();
+                let liq_call = contract.liquidity();
+                let (slot0_res, liq_res) = tokio::join!(
+                    slot0_call.call(),
+                    liq_call.call()
+                );
+
+                match (slot0_res, liq_res) {
+                    (Ok((sqrt_price, tick, _, _, _, _, _)), Ok(liq)) => {
+                        Some(V3PoolState {
+                            sqrt_price_x96: U256::from(sqrt_price.as_u128()),
+                            tick: tick as i32,
+                            liquidity: liq,
+                            last_updated: current_block,
+                            ..pool_state
+                        })
+                    }
+                    _ => {
+                        warn!(
+                            "Failed to fast-sync pool {} {:?} at {:?}",
+                            pool_state.pair.symbol, pool_state.dex, pool_state.address
+                        );
+                        None
+                    }
+                }
+            }
+        }).collect();
+
+        join_all(futs)
+            .await
+            .into_iter()
+            .filter_map(|r| r)
+            .collect()
     }
 
     /// Sync a specific V3 pool

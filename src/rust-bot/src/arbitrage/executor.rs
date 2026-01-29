@@ -6,10 +6,16 @@
 //! Phase 1 implementation with two separate transactions (has leg risk).
 //! Includes IRS-compliant tax logging for all executed trades.
 //!
+//! Post-incident fixes (2026-01-29 $500 loss):
+//!   1. calculate_min_out now handles token decimal conversion (6 vs 18 dec)
+//!   2. V3 Quoter pre-trade simulation (quoteExactInputSingle) before execution
+//!   3. Actual amountOut parsed from ERC20 Transfer events in receipt logs
+//!
 //! Author: AI-Generated
 //! Created: 2026-01-28
 //! Modified: 2026-01-28 (Phase 5: Tax logging integration)
 //! Modified: 2026-01-29 (V3 SwapRouter support: exactInputSingle)
+//! Modified: 2026-01-29 (Post-incident: decimal fix, quoter, event parsing)
 
 use crate::tax::{TaxLogger, TaxRecordBuilder};
 use crate::types::{ArbitrageOpportunity, BotConfig, DexType, TradeResult};
@@ -38,6 +44,16 @@ abigen!(
     r#"[{"inputs":[{"components":[{"internalType":"address","name":"tokenIn","type":"address"},{"internalType":"address","name":"tokenOut","type":"address"},{"internalType":"uint24","name":"fee","type":"uint24"},{"internalType":"address","name":"recipient","type":"address"},{"internalType":"uint256","name":"deadline","type":"uint256"},{"internalType":"uint256","name":"amountIn","type":"uint256"},{"internalType":"uint256","name":"amountOutMinimum","type":"uint256"},{"internalType":"uint160","name":"sqrtPriceLimitX96","type":"uint160"}],"internalType":"struct ISwapRouter.ExactInputSingleParams","name":"params","type":"tuple"}],"name":"exactInputSingle","outputs":[{"internalType":"uint256","name":"amountOut","type":"uint256"}],"stateMutability":"payable","type":"function"}]"#
 );
 
+// Uniswap V3 Quoter ABI (pre-trade simulation)
+// quoteExactInputSingle simulates a swap and returns the expected output
+// Note: This is not a view function — it reverts internally after computing. Use .call() only.
+abigen!(
+    IQuoter,
+    r#"[
+        function quoteExactInputSingle(address tokenIn, address tokenOut, uint24 fee, uint256 amountIn, uint160 sqrtPriceLimitX96) external returns (uint256 amountOut)
+    ]"#
+);
+
 // ERC20 ABI for token approvals
 abigen!(
     IERC20,
@@ -45,6 +61,7 @@ abigen!(
         function approve(address spender, uint256 amount) external returns (bool)
         function allowance(address owner, address spender) external view returns (uint256)
         function balanceOf(address account) external view returns (uint256)
+        function decimals() external view returns (uint8)
     ]"#
 );
 
@@ -148,19 +165,55 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
             });
         }
 
+        // Token decimals for correct slippage calculation
+        let t0_dec = opportunity.token0_decimals;
+        let t1_dec = opportunity.token1_decimals;
+
+        // Pre-trade safety: V3 Quoter simulation (buy leg)
+        // Verifies buy pool can fill order before committing capital
+        // Sell leg is Quoter-checked separately after buy succeeds
+        if opportunity.buy_dex.is_v3() {
+            if let Err(e) = self.v3_quoter_check(
+                token0, token1, opportunity.buy_dex, trade_size,
+                self.calculate_min_out(trade_size, opportunity.buy_price, t0_dec, t1_dec),
+            ).await {
+                return Ok(TradeResult {
+                    opportunity: pair_symbol.clone(),
+                    tx_hash: None,
+                    block_number: None,
+                    success: false,
+                    profit_usd: 0.0,
+                    gas_cost_usd: 0.0,
+                    gas_used_native: 0.0,
+                    net_profit_usd: 0.0,
+                    execution_time_ms: start_time.elapsed().as_millis() as u64,
+                    error: Some(format!("V3 Quoter pre-check failed: {}", e)),
+                    amount_in: Some(trade_size.to_string()),
+                    amount_out: None,
+                });
+            }
+        }
+
         // Step 1: Approve tokens for routers (if needed)
         self.ensure_approval(token0, opportunity.buy_dex, trade_size)
             .await?;
 
         // Step 2: Execute buy swap (token0 -> token1 on buy DEX)
-        info!("📈 Buy: {} {} on {:?}", trade_size, pair_symbol, opportunity.buy_dex);
+        // buy_dex has the HIGHER V3 price (more token1 per token0 = better entry)
+        let buy_min_out = self.calculate_min_out(
+            trade_size, opportunity.buy_price, t0_dec, t1_dec,
+        );
+        info!(
+            "📈 Buy: {} token0 on {:?} | min_out: {} token1",
+            trade_size, opportunity.buy_dex, buy_min_out
+        );
         let buy_result = self
             .swap(
                 opportunity.buy_dex,
                 token0,
                 token1,
                 trade_size,
-                self.calculate_min_out(trade_size, opportunity.buy_price),
+                buy_min_out,
             )
             .await;
 
@@ -187,19 +240,58 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
 
         info!("✅ Buy complete: {} | Received: {}", buy_tx_hash, amount_received);
 
+        // Pre-sell safety: V3 Quoter simulation (sell leg)
+        // Buy has executed — we're holding token1. Verify sell pool can return expected token0
+        // before sending the sell tx. If rejected, bot stops (capital committed, manual exit needed).
+        if opportunity.sell_dex.is_v3() {
+            let sell_quote_min = self.calculate_min_out(
+                amount_received, 1.0 / opportunity.sell_price, t1_dec, t0_dec,
+            );
+            if let Err(e) = self.v3_quoter_check(
+                token1, token0, opportunity.sell_dex, amount_received,
+                sell_quote_min,
+            ).await {
+                error!("Sell swap failed: V3 Quoter rejected sell leg: {}", e);
+                return Ok(TradeResult {
+                    opportunity: pair_symbol.clone(),
+                    tx_hash: Some(format!("{:?}", buy_tx_hash)),
+                    block_number: Some(buy_block),
+                    success: false,
+                    profit_usd: 0.0,
+                    gas_cost_usd: 0.0,
+                    gas_used_native: 0.0,
+                    net_profit_usd: 0.0,
+                    execution_time_ms: start_time.elapsed().as_millis() as u64,
+                    error: Some(format!(
+                        "Sell Quoter rejected after buy executed (holding token1, manual sell needed): {}",
+                        e
+                    )),
+                    amount_in: Some(trade_size.to_string()),
+                    amount_out: Some(amount_received.to_string()),
+                });
+            }
+        }
+
         // Step 3: Approve token1 for sell router
         self.ensure_approval(token1, opportunity.sell_dex, amount_received)
             .await?;
 
         // Step 4: Execute sell swap (token1 -> token0 on sell DEX)
-        info!("📉 Sell: {} on {:?}", amount_received, opportunity.sell_dex);
+        // sell_dex has the LOWER V3 price (1/price is higher = more token0 per token1 = better exit)
+        let sell_min_out = self.calculate_min_out(
+            amount_received, 1.0 / opportunity.sell_price, t1_dec, t0_dec,
+        );
+        info!(
+            "📉 Sell: {} token1 on {:?} | min_out: {} token0",
+            amount_received, opportunity.sell_dex, sell_min_out
+        );
         let sell_result = self
             .swap(
                 opportunity.sell_dex,
                 token1,
                 token0,
                 amount_received,
-                self.calculate_min_out(amount_received, 1.0 / opportunity.sell_price),
+                sell_min_out,
             )
             .await;
 
@@ -509,9 +601,15 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
             .map(|bn| bn.as_u64())
             .unwrap_or(0);
 
-        // Parse output amount from logs (simplified - assumes last log has amount)
-        // In production, you'd parse the Swap event properly
-        let amount_out = min_amount_out; // Placeholder - actual amount would come from logs
+        // Parse actual amountOut from ERC20 Transfer events in receipt
+        let amount_out = self
+            .parse_amount_out_from_receipt(&receipt, token_out, wallet_address)
+            .unwrap_or_else(|| {
+                warn!("V2: falling back to min_amount_out as output amount");
+                min_amount_out
+            });
+
+        info!("V2 swap confirmed: block={}, amount_out={}", block_number, amount_out);
 
         Ok((tx_hash, amount_out, block_number))
     }
@@ -588,9 +686,15 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
             .map(|bn| bn.as_u64())
             .unwrap_or(0);
 
-        // Parse output amount from logs (simplified)
-        // In production, parse the V3 Swap event for actual amountOut
-        let amount_out = min_amount_out; // Placeholder - actual amount would come from logs
+        // Parse actual amountOut from ERC20 Transfer events in receipt
+        let amount_out = self
+            .parse_amount_out_from_receipt(&receipt, token_out, wallet_address)
+            .unwrap_or_else(|| {
+                warn!("V3: falling back to min_amount_out as output amount");
+                min_amount_out
+            });
+
+        info!("V3 swap confirmed: block={}, amount_out={}", block_number, amount_out);
 
         Ok((tx_hash, amount_out, block_number))
     }
@@ -654,16 +758,154 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
         }
     }
 
-    /// Calculate minimum output with slippage protection
-    fn calculate_min_out(&self, amount_in: U256, price: f64) -> U256 {
-        // Expected output based on price
-        let expected_out = amount_in.as_u128() as f64 * price;
+    /// Calculate minimum output with slippage protection and decimal conversion.
+    ///
+    /// CRITICAL FIX (2026-01-29 $500 loss incident):
+    ///   Previously: amount_in_raw * price → produced garbage when tokens have different decimals.
+    ///   Example: 500 USDC (500_000_000 at 6 dec) * 0.2056 = 102_789_500
+    ///            In UNI's 18-dec format: 0.0000000001 UNI → zero slippage protection!
+    ///
+    ///   Now: convert raw→human, multiply by price, convert human→raw.
+    ///   Correct: (500_000_000 / 1e6) * 0.2056 * 1e18 = 1.028e20 → ~102.8 UNI ✓
+    ///
+    /// Parameters:
+    ///   amount_in: raw token amount (with input token's decimals)
+    ///   price: expected output per input in human-readable units
+    ///          (e.g., 0.2056 UNI per USDC, or 4.864 USDC per UNI)
+    ///   in_decimals: input token's decimal places (e.g., 6 for USDC)
+    ///   out_decimals: output token's decimal places (e.g., 18 for UNI)
+    fn calculate_min_out(
+        &self,
+        amount_in: U256,
+        price: f64,
+        in_decimals: u8,
+        out_decimals: u8,
+    ) -> U256 {
+        // Step 1: Convert raw input to human-readable
+        let amount_in_human = amount_in.as_u128() as f64 / 10_f64.powi(in_decimals as i32);
 
-        // Apply slippage tolerance
+        // Step 2: Calculate expected output in human-readable units
+        let expected_out_human = amount_in_human * price;
+
+        // Step 3: Apply slippage tolerance
         let slippage_factor = 1.0 - (self.config.max_slippage_percent / 100.0);
-        let min_out = expected_out * slippage_factor;
+        let min_out_human = expected_out_human * slippage_factor;
 
-        U256::from(min_out as u128)
+        // Step 4: Convert back to raw output units
+        let min_out_raw = min_out_human * 10_f64.powi(out_decimals as i32);
+
+        // Safety: ensure min_out is positive and fits in u128
+        if min_out_raw <= 0.0 || !min_out_raw.is_finite() {
+            warn!(
+                "calculate_min_out: invalid result {:.2} (in={}, price={:.6}, dec={}->{})",
+                min_out_raw, amount_in, price, in_decimals, out_decimals
+            );
+            return U256::zero();
+        }
+
+        debug!(
+            "calculate_min_out: {:.6} human_in * {:.6} price * {:.4} slippage = {:.6} human_out → {} raw ({}→{} dec)",
+            amount_in_human, price, slippage_factor, min_out_human, min_out_raw as u128,
+            in_decimals, out_decimals
+        );
+
+        U256::from(min_out_raw as u128)
+    }
+
+    /// V3 Quoter pre-trade simulation.
+    /// Calls quoteExactInputSingle to verify the swap will produce expected output
+    /// BEFORE committing any capital on-chain.
+    ///
+    /// This is a read-only simulation (uses .call()) — no gas spent.
+    async fn v3_quoter_check(
+        &self,
+        token_in: Address,
+        token_out: Address,
+        dex: DexType,
+        amount_in: U256,
+        expected_min_out: U256,
+    ) -> Result<U256> {
+        let quoter_address = self.config.uniswap_v3_quoter
+            .ok_or_else(|| anyhow!("V3 Quoter address not configured (UNISWAP_V3_QUOTER)"))?;
+        let fee = dex.v3_fee_tier()
+            .ok_or_else(|| anyhow!("Not a V3 DEX type: {:?}", dex))?;
+
+        let quoter = IQuoter::new(quoter_address, self.provider.clone());
+
+        // Simulate the swap (read-only .call(), no gas)
+        let quoted_out = quoter
+            .quote_exact_input_single(
+                token_in,
+                token_out,
+                fee,
+                amount_in,
+                U256::zero(), // sqrtPriceLimitX96 = 0 (no limit)
+            )
+            .call()
+            .await
+            .map_err(|e| anyhow!("V3 Quoter simulation failed: {} — pool may lack liquidity", e))?;
+
+        info!(
+            "V3 Quoter: {} in → {} out (expected min: {})",
+            amount_in, quoted_out, expected_min_out
+        );
+
+        // Safety check: quoted output must meet our minimum
+        if quoted_out < expected_min_out {
+            return Err(anyhow!(
+                "V3 Quoter: output {} < min_out {} — pool likely has insufficient liquidity or price moved",
+                quoted_out, expected_min_out
+            ));
+        }
+
+        Ok(quoted_out)
+    }
+
+    /// Parse actual amountOut from transaction receipt logs.
+    ///
+    /// Looks for ERC20 Transfer events where `to = recipient` for the output token.
+    /// Works for both V2 and V3 swaps.
+    ///
+    /// ERC20 Transfer event:
+    ///   event Transfer(address indexed from, address indexed to, uint256 value)
+    ///   topic0 = 0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef
+    fn parse_amount_out_from_receipt(
+        &self,
+        receipt: &TransactionReceipt,
+        token_out: Address,
+        recipient: Address,
+    ) -> Option<U256> {
+        // ERC20 Transfer event topic
+        let transfer_topic: H256 = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+            .parse()
+            .unwrap();
+
+        let recipient_topic = H256::from(recipient);
+
+        // Find Transfer events for the output token to our wallet
+        for log in &receipt.logs {
+            // Must be from the output token contract
+            if log.address != token_out {
+                continue;
+            }
+            // Must have Transfer event signature
+            if log.topics.is_empty() || log.topics[0] != transfer_topic {
+                continue;
+            }
+            // topic[2] = `to` address (indexed)
+            if log.topics.len() < 3 || log.topics[2] != recipient_topic {
+                continue;
+            }
+            // data = uint256 value
+            if log.data.len() >= 32 {
+                let amount = U256::from_big_endian(&log.data[..32]);
+                debug!("Parsed amountOut from Transfer event: {}", amount);
+                return Some(amount);
+            }
+        }
+
+        warn!("Could not parse amountOut from receipt logs — using min_amount_out as fallback");
+        None
     }
 
     /// Convert Wei to USD based on token pair

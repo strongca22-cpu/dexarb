@@ -326,6 +326,7 @@ struct UnifiedPool {
     fee_percent: f64,     // Single swap fee (not round-trip)
     is_v3: bool,
     token0_addr: String,  // For normalization tracking
+    liquidity: u128,      // V3 in-range liquidity (0 for V2 pools)
 }
 
 /// Raw opportunity from a single strategy scan
@@ -387,6 +388,7 @@ fn scan_for_opportunities_detailed(
                         fee_percent: V2_FEE_PERCENT,
                         is_v3: false,
                         token0_addr: pool.token0.clone(),
+                        liquidity: 0, // V2 pools don't have concentrated liquidity metric
                     });
                 }
             }
@@ -401,12 +403,37 @@ fn scan_for_opportunities_detailed(
                 let price = pool.validated_price();
                 if price > 0.0 && price < 1e15 {
                     let fee_percent = pool.fee as f64 / 10000.0;  // 500 -> 0.05%, 3000 -> 0.30%
+
+                    // Filter out 1% fee tier pools (fee=10000) entirely.
+                    // Empirically, ALL 1% pools on Polygon have negligible executable
+                    // liquidity — live Quoter rejects every trade attempt on them.
+                    // Paper trading has no Quoter, so we exclude them here.
+                    if pool.fee >= 10000 {
+                        debug!(
+                            "Paper: skipping {} {} fee={}bp - 1% tier pools excluded (no real liquidity on Polygon)",
+                            pair_symbol, pool.dex, pool.fee
+                        );
+                        continue;
+                    }
+
+                    // Parse V3 liquidity and filter dust pools
+                    // Matches live detector's filter: skip pools with liquidity < 1000
+                    let liquidity: u128 = pool.liquidity.parse().unwrap_or(0);
+                    if liquidity < 1000 {
+                        debug!(
+                            "Paper: skipping {} {} - liquidity too low: {}",
+                            pair_symbol, pool.dex, liquidity
+                        );
+                        continue;
+                    }
+
                     unified_pools.push(UnifiedPool {
                         dex: pool.dex.clone(),
                         price,
                         fee_percent,
                         is_v3: true,
                         token0_addr: pool.token0.clone(),
+                        liquidity,
                     });
                 }
             }
@@ -457,6 +484,24 @@ fn scan_for_opportunities_detailed(
 
                 if estimated_profit < config.min_profit_usd {
                     continue;
+                }
+
+                // V3 liquidity safety check (matches live detector):
+                // Ensure both pools can absorb the trade size.
+                // V3 liquidity is in sqrt(token0 * token1) units — not USD.
+                // A rough minimum: trade_size_usd * 1e6 as a conservative floor.
+                if buy_pool.is_v3 || sell_pool.is_v3 {
+                    let min_liquidity = (config.max_trade_size_usd * 1e6) as u128;
+                    if (buy_pool.is_v3 && buy_pool.liquidity < min_liquidity)
+                        || (sell_pool.is_v3 && sell_pool.liquidity < min_liquidity)
+                    {
+                        debug!(
+                            "Paper: skipping {} {}→{} - pool liquidity too low for ${:.0} trade (buy_liq={}, sell_liq={})",
+                            pair_symbol, buy_pool.dex, sell_pool.dex,
+                            config.max_trade_size_usd, buy_pool.liquidity, sell_pool.liquidity
+                        );
+                        continue;
+                    }
                 }
 
                 // Simulate competition loss

@@ -203,6 +203,12 @@ impl V3PoolState {
 }
 
 /// Arbitrage opportunity detected
+///
+/// Buy/Sell semantics (V3 price = token1/token0, token0 sorted by address):
+///   buy_dex  = pool where we do token0→token1 (higher V3 price = more token1 per token0)
+///   sell_dex = pool where we do token1→token0 (lower V3 price = more token0 per token1)
+///
+/// Execute flow: token0 → token1 on buy_dex, then token1 → token0 on sell_dex.
 #[derive(Debug, Clone)]
 pub struct ArbitrageOpportunity {
     pub pair: TradingPair,
@@ -218,6 +224,12 @@ pub struct ArbitrageOpportunity {
     pub buy_pool_address: Option<Address>,
     /// Pool address where we sell (optional for tax logging)
     pub sell_pool_address: Option<Address>,
+    /// Token0 decimals (for correct min_out calculation)
+    pub token0_decimals: u8,
+    /// Token1 decimals (for correct min_out calculation)
+    pub token1_decimals: u8,
+    /// Pool liquidity at buy pool (V3 only, for safety checks)
+    pub buy_pool_liquidity: Option<u128>,
 }
 
 impl ArbitrageOpportunity {
@@ -229,7 +241,7 @@ impl ArbitrageOpportunity {
         sell_price: f64,
         trade_size: U256,
     ) -> Self {
-        let spread_percent = ((sell_price - buy_price) / buy_price) * 100.0;
+        let spread_percent = ((sell_price - buy_price) / buy_price).abs() * 100.0;
 
         Self {
             pair,
@@ -246,6 +258,9 @@ impl ArbitrageOpportunity {
                 .as_secs(),
             buy_pool_address: None,
             sell_pool_address: None,
+            token0_decimals: 18, // Default to 18, override for specific tokens
+            token1_decimals: 18,
+            buy_pool_liquidity: None,
         }
     }
 

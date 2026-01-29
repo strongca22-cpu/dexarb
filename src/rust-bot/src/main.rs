@@ -1,19 +1,22 @@
-//! Phase 1 DEX Arbitrage Bot (V2 + V3)
+//! Phase 1 DEX Arbitrage Bot (V3-only)
 //!
 //! Main entry point for the arbitrage bot.
-//! Connects to Polygon, syncs pool states, and monitors for opportunities.
-//! Now supports both V2 and V3 pools for cross-fee-tier arbitrage.
+//! Connects to Polygon, syncs V3 pool states, and monitors for opportunities.
+//! V3-only: V2 pools dropped (price inversion bug, wastes 5-8s + 84 RPC calls/cycle).
+//! 1% fee tier excluded (all 1% pools on Polygon have phantom liquidity).
+//! V3 sync parallelized: slot0+liquidity calls run concurrently via join_all.
 //!
 //! Author: AI-Generated
 //! Created: 2026-01-27
 //! Modified: 2026-01-27 - Added opportunity detection (Day 3)
 //! Modified: 2026-01-28 - Added trade execution (Day 4)
 //! Modified: 2026-01-29 - Added V3 pool support for fee tier arbitrage
+//! Modified: 2026-01-29 - V3-only: drop V2, drop 1%, parallelize sync, 3s poll
 
 use anyhow::Result;
 use dexarb_bot::arbitrage::{OpportunityDetector, TradeExecutor};
 use dexarb_bot::config::load_config;
-use dexarb_bot::pool::{PoolStateManager, PoolSyncer, V3PoolSyncer};
+use dexarb_bot::pool::{PoolStateManager, V3PoolSyncer};
 use dexarb_bot::types;
 use ethers::prelude::*;
 use std::sync::Arc;
@@ -28,13 +31,14 @@ async fn main() -> Result<()> {
         .with_target(false)
         .init();
 
-    info!("Phase 1 DEX Arbitrage Bot Starting...");
+    info!("Phase 1 DEX Arbitrage Bot Starting (V3-only, parallel sync)...");
 
     // Load configuration
     let config = load_config()?;
     info!("Configuration loaded");
     info!("RPC URL: {}", &config.rpc_url[..40.min(config.rpc_url.len())]);
     info!("Trading pairs: {}", config.pairs.len());
+    info!("Poll interval: {}ms", config.poll_interval_ms);
 
     // Initialize provider (WebSocket for low latency)
     info!("Connecting to Polygon via WebSocket...");
@@ -49,10 +53,7 @@ async fn main() -> Result<()> {
     let state_manager = PoolStateManager::new();
     info!("Pool state manager initialized");
 
-    // Initialize V2 pool syncer
-    let syncer = PoolSyncer::new(Arc::clone(&provider), config.clone(), state_manager.clone());
-
-    // Initialize V3 pool syncer
+    // Initialize V3 pool syncer (V2 dropped — price inversion bug, wastes 5-8s/cycle)
     let mut v3_syncer = V3PoolSyncer::new(Arc::clone(&provider), config.clone());
     let v3_enabled = config.uniswap_v3_factory.is_some();
     if v3_enabled {
@@ -63,7 +64,7 @@ async fn main() -> Result<()> {
 
     // Initialize opportunity detector
     let detector = OpportunityDetector::new(config.clone(), state_manager.clone());
-    info!("Opportunity detector initialized (V2 + V3)");
+    info!("Opportunity detector initialized (V3-only, 0.05% + 0.30% tiers)");
 
     // Initialize trade executor
     // Parse wallet from private key
@@ -79,7 +80,7 @@ async fn main() -> Result<()> {
     // Set live/dry run mode based on config
     if config.live_mode {
         executor.set_dry_run(false);
-        warn!("⚠️⚠️⚠️ LIVE TRADING MODE ENABLED - REAL MONEY AT RISK! ⚠️⚠️⚠️");
+        warn!("LIVE TRADING MODE ENABLED - REAL MONEY AT RISK!");
     } else {
         info!("Trade executor initialized (DRY RUN mode)");
     }
@@ -96,68 +97,41 @@ async fn main() -> Result<()> {
         warn!("Tax logging DISABLED - trades will NOT be logged for IRS compliance!");
     }
 
-    // Initial V2 pool sync
-    info!("Performing initial V2 pool sync...");
-    syncer.initial_sync().await?;
-
-    // Initial V3 pool sync
+    // Initial V3 pool sync (full discovery: factory lookup, token addresses, decimals)
+    // This is sequential — runs once at startup to discover pool addresses and cache metadata
     if v3_enabled {
-        info!("Performing initial V3 pool sync...");
+        info!("Performing initial V3 pool sync (full discovery, sequential)...");
         match v3_syncer.sync_all_v3_pools().await {
             Ok(v3_pools) => {
                 for pool in v3_pools {
                     state_manager.update_v3_pool(pool);
                 }
-                info!("V3 sync complete: {} pools", state_manager.v3_pool_count());
+                info!("V3 initial sync complete: {} pools (0.05% + 0.30% tiers)", state_manager.v3_pool_count());
             }
             Err(e) => {
-                warn!("V3 sync failed: {} - continuing with V2 only", e);
+                warn!("V3 sync failed: {} - cannot start without V3 pools", e);
+                return Err(e);
             }
         }
     }
 
-    let (v2_count, v3_count, _, _) = state_manager.combined_stats();
-    info!("Synced {} V2 pools + {} V3 pools = {} total", v2_count, v3_count, v2_count + v3_count);
+    let v3_count = state_manager.v3_pool_count();
+    info!("Synced {} V3 pools (V2 dropped, 1% excluded)", v3_count);
 
-    // Display pool states
+    // Display V3 pool states
     for pair_config in &config.pairs {
         info!("--- {} ---", pair_config.symbol);
 
-        if let Some(uni_pool) = state_manager.get_pool(types::DexType::Uniswap, &pair_config.symbol)
-        {
-            info!(
-                "  Uniswap:   price={:.6}, reserves=({}, {})",
-                uni_pool.price(),
-                uni_pool.reserve0,
-                uni_pool.reserve1
-            );
-        }
-
-        if let Some(sushi_pool) =
-            state_manager.get_pool(types::DexType::Sushiswap, &pair_config.symbol)
-        {
-            info!(
-                "  Sushiswap: price={:.6}, reserves=({}, {})",
-                sushi_pool.price(),
-                sushi_pool.reserve0,
-                sushi_pool.reserve1
-            );
-        }
-
-        // Display V3 pools
         if let Some(v3_005) = state_manager.get_v3_pool(types::DexType::UniswapV3_005, &pair_config.symbol) {
-            info!("  V3 0.05%:  price={:.6}, tick={}", v3_005.price(), v3_005.tick);
+            info!("  V3 0.05%:  price={:.6}, tick={}, liq={}", v3_005.price(), v3_005.tick, v3_005.liquidity);
         }
         if let Some(v3_030) = state_manager.get_v3_pool(types::DexType::UniswapV3_030, &pair_config.symbol) {
-            info!("  V3 0.30%:  price={:.6}, tick={}", v3_030.price(), v3_030.tick);
-        }
-        if let Some(v3_100) = state_manager.get_v3_pool(types::DexType::UniswapV3_100, &pair_config.symbol) {
-            info!("  V3 1.00%:  price={:.6}, tick={}", v3_100.price(), v3_100.tick);
+            info!("  V3 0.30%:  price={:.6}, tick={}, liq={}", v3_030.price(), v3_030.tick, v3_030.liquidity);
         }
     }
 
     info!("Bot initialized successfully");
-    info!("Starting opportunity detection loop...");
+    info!("Starting opportunity detection loop (parallel V3 sync)...");
 
     // Statistics tracking
     let mut total_opportunities: u64 = 0;
@@ -171,24 +145,13 @@ async fn main() -> Result<()> {
         iteration += 1;
         total_scans += 1;
 
-        // Re-sync V2 pools
-        if let Err(e) = syncer.initial_sync().await {
-            error!("Failed to sync V2 pools: {}", e);
-            tokio::time::sleep(poll_interval).await;
-            continue;
-        }
-
-        // Re-sync V3 pools (every iteration for now, can stagger later)
+        // Fast parallel V3 sync: slot0 + liquidity on known pools
+        // All pools synced concurrently via join_all (~200ms vs ~5.6s sequential)
         if v3_enabled {
-            match v3_syncer.sync_all_v3_pools().await {
-                Ok(v3_pools) => {
-                    for pool in v3_pools {
-                        state_manager.update_v3_pool(pool);
-                    }
-                }
-                Err(e) => {
-                    warn!("V3 sync failed: {}", e);
-                }
+            let known = state_manager.get_all_v3_pools();
+            let updated = v3_syncer.sync_known_pools_parallel(&known).await;
+            for pool in updated {
+                state_manager.update_v3_pool(pool);
             }
         }
 
@@ -208,17 +171,18 @@ async fn main() -> Result<()> {
                 );
             }
 
-            // Execute best opportunity
-            if let Some(best) = opportunities.first() {
+            // Try opportunities in order (best first, fall through on Quoter rejections)
+            for (rank, opp) in opportunities.iter().enumerate() {
                 info!(
-                    "🎯 BEST: {} - Buy {:?} Sell {:?} - ${:.2}",
-                    best.pair.symbol,
-                    best.buy_dex,
-                    best.sell_dex,
-                    best.estimated_profit
+                    "🎯 TRY #{}: {} - Buy {:?} Sell {:?} - ${:.2}",
+                    rank + 1,
+                    opp.pair.symbol,
+                    opp.buy_dex,
+                    opp.sell_dex,
+                    opp.estimated_profit
                 );
 
-                match executor.execute(best).await {
+                match executor.execute(opp).await {
                     Ok(result) => {
                         if result.success {
                             info!(
@@ -227,16 +191,29 @@ async fn main() -> Result<()> {
                                 result.net_profit_usd,
                                 result.execution_time_ms
                             );
+                            break; // Stop after successful trade
                         } else {
-                            warn!(
-                                "❌ Trade failed: {} | Error: {}",
-                                result.opportunity,
-                                result.error.unwrap_or_else(|| "Unknown".to_string())
-                            );
+                            let error_msg = result.error.unwrap_or_else(|| "Unknown".to_string());
+                            if error_msg.contains("Quoter") {
+                                // Quoter rejection = zero capital risk, try next opportunity
+                                info!(
+                                    "⏭️ Quoter rejected #{} {} ({}), trying next...",
+                                    rank + 1, result.opportunity, error_msg
+                                );
+                                continue;
+                            } else {
+                                // On-chain failure (buy/sell failed) — stop immediately
+                                warn!(
+                                    "❌ Trade failed: {} | Error: {}",
+                                    result.opportunity, error_msg
+                                );
+                                break;
+                            }
                         }
                     }
                     Err(e) => {
                         error!("Execution error: {}", e);
+                        break; // Stop on unexpected errors
                     }
                 }
             }
@@ -244,10 +221,10 @@ async fn main() -> Result<()> {
 
         // Log status periodically
         if iteration % 100 == 0 {
-            let (v2_count, v3_count, min_block, max_block) = state_manager.combined_stats();
+            let (_, v3_count, min_block, max_block) = state_manager.combined_stats();
             info!(
-                "📈 Iteration {} | {} V2 + {} V3 pools | blocks {}-{} | {} opps found / {} scans",
-                iteration, v2_count, v3_count, min_block, max_block, total_opportunities, total_scans
+                "📈 Iteration {} | {} V3 pools | blocks {}-{} | {} opps found / {} scans",
+                iteration, v3_count, min_block, max_block, total_opportunities, total_scans
             );
         }
 
