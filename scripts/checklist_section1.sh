@@ -5,6 +5,7 @@
 # Author: AI-Generated
 # Created: 2026-01-28
 # Modified: 2026-01-30 - V3 shared-data architecture, whitelist, Multicall3
+# Modified: 2026-01-30 - Monolithic architecture (state file checks demoted to RECOMMENDED)
 #
 # Usage:
 #   ./scripts/checklist_section1.sh
@@ -58,7 +59,7 @@ echo ""
 echo "============================================================"
 echo "  PRE-\$100 DEPLOYMENT CHECKLIST"
 echo "  Section 1: Technical Infrastructure"
-echo "  Architecture: V3 shared-data (JSON-based, Multicall3)"
+echo "  Architecture: V3 monolithic (direct RPC sync, Multicall3)"
 echo "============================================================"
 echo ""
 echo "Date: $(date)"
@@ -154,78 +155,77 @@ info "RPC latency: ${LATENCY_MS}ms"
 echo ""
 
 # ============================================================
-# 1.3 State File Health (shared data architecture)
+# 1.3 Whitelist & State File Health
 # ============================================================
 echo "-----------------------------------------------------------"
-echo "1.3 STATE FILE HEALTH (shared data architecture)"
+echo "1.3 WHITELIST & STATE FILE HEALTH"
 echo "-----------------------------------------------------------"
+echo "  (Monolithic bot syncs directly via RPC — state file is"
+echo "   only used by data collector for paper trading/research)"
 
-STATE_FILE="/home/botuser/bots/dexarb/data/pool_state_phase1.json"
-
-# 1.3.1 State file exists
-STATE_SIZE_KB=0
-if [ -f "$STATE_FILE" ]; then
-    STATE_SIZE_KB=$(( $(stat -c%s "$STATE_FILE") / 1024 ))
-    info "State file: ${STATE_SIZE_KB}KB"
-    critical_check 0 "Pool state JSON exists"
-else
-    info "State file: NOT FOUND at $STATE_FILE"
-    critical_check 1 "Pool state JSON exists"
-fi
-
-# 1.3.2 State file accessible
-[ -r "$STATE_FILE" ] && critical_check 0 "State file readable" || critical_check 1 "State file readable"
-
-# 1.3.3 State file recent (<5 min — data collector should be writing)
-if [ -f "$STATE_FILE" ]; then
-    STATE_AGE_SEC=$(( $(date +%s) - $(stat -c%Y "$STATE_FILE") ))
-    STATE_AGE_MIN=$((STATE_AGE_SEC / 60))
-    info "State file age: ${STATE_AGE_MIN} minutes"
-    [ "$STATE_AGE_SEC" -lt 300 ] && critical_check 0 "State data fresh (<5 min)" || critical_check 1 "State data stale (${STATE_AGE_MIN} min old)"
-else
-    critical_check 1 "State data freshness (file missing)"
-fi
-
-# 1.3.4 State file is valid JSON with V3 pools
-if [ -f "$STATE_FILE" ]; then
-    V3_POOL_COUNT=$(python3 -c "
-import json
-with open('$STATE_FILE') as f:
-    data = json.load(f)
-    v3 = data.get('v3_pools', {})
-    print(len(v3))
-" 2>/dev/null || echo "0")
-    info "V3 pools in state: $V3_POOL_COUNT"
-    if [ "$V3_POOL_COUNT" -gt 0 ]; then
-        critical_check 0 "State has V3 pool data ($V3_POOL_COUNT pools)"
-    else
-        critical_check 1 "State has no V3 pool data"
-    fi
-else
-    critical_check 1 "State V3 data (file missing)"
-fi
-
-# 1.3.5 Whitelist file exists
+# 1.3.1 Whitelist file exists and has active pools (CRITICAL — live bot requires it)
 WHITELIST_FILE="/home/botuser/bots/dexarb/config/pools_whitelist.json"
 if [ -f "$WHITELIST_FILE" ]; then
-    WL_POOL_COUNT=$(python3 -c "
+    WL_ACTIVE_COUNT=$(python3 -c "
 import json
 with open('$WHITELIST_FILE') as f:
     data = json.load(f)
     pools = data.get('whitelist', {}).get('pools', [])
-    print(len(pools))
+    active = [p for p in pools if p.get('status') == 'active']
+    print(len(active))
 " 2>/dev/null || echo "0")
-    info "Whitelist pools: $WL_POOL_COUNT"
-    important_check 0 "Whitelist file exists ($WL_POOL_COUNT pools)"
+    info "Whitelist active pools: $WL_ACTIVE_COUNT"
+    if [ "$WL_ACTIVE_COUNT" -gt 0 ]; then
+        critical_check 0 "Whitelist file exists with $WL_ACTIVE_COUNT active pools"
+    else
+        critical_check 1 "Whitelist file has no active pools"
+    fi
 else
-    important_check 1 "Whitelist file missing"
+    critical_check 1 "Whitelist file missing ($WHITELIST_FILE)"
 fi
 
-# 1.3.6 State file reasonable size
-if [ -f "$STATE_FILE" ] && [ "$STATE_SIZE_KB" -lt 10240 ]; then
-    important_check 0 "State file <10MB (${STATE_SIZE_KB}KB)"
+# 1.3.2 Whitelist is valid JSON
+if [ -f "$WHITELIST_FILE" ]; then
+    if python3 -c "import json; json.load(open('$WHITELIST_FILE'))" 2>/dev/null; then
+        critical_check 0 "Whitelist is valid JSON"
+    else
+        critical_check 1 "Whitelist is INVALID JSON"
+    fi
+fi
+
+# 1.3.3 Whitelist enforcement mode is strict
+if [ -f "$WHITELIST_FILE" ]; then
+    ENFORCEMENT=$(python3 -c "
+import json
+with open('$WHITELIST_FILE') as f:
+    data = json.load(f)
+print(data.get('config', {}).get('whitelist_enforcement', 'unknown'))
+" 2>/dev/null || echo "unknown")
+    info "Whitelist enforcement: $ENFORCEMENT"
+    if [ "$ENFORCEMENT" = "strict" ]; then
+        critical_check 0 "Whitelist enforcement = strict"
+    else
+        critical_check 1 "Whitelist enforcement not strict ($ENFORCEMENT)"
+    fi
+fi
+
+# 1.3.4 State file exists (RECOMMENDED — only for paper trading data collector)
+STATE_FILE="/home/botuser/bots/dexarb/data/pool_state_phase1.json"
+STATE_SIZE_KB=0
+if [ -f "$STATE_FILE" ]; then
+    STATE_SIZE_KB=$(( $(stat -c%s "$STATE_FILE") / 1024 ))
+    info "State file: ${STATE_SIZE_KB}KB (paper trading only)"
+    recommended_check 0 "Pool state JSON exists (paper trading)"
 else
-    important_check 1 "State file size check"
+    info "State file: NOT FOUND (ok — live bot syncs directly)"
+    recommended_check 0 "Pool state JSON not required for monolithic bot"
+fi
+
+# 1.3.5 State file reasonable size (if it exists)
+if [ -f "$STATE_FILE" ] && [ "$STATE_SIZE_KB" -lt 10240 ]; then
+    recommended_check 0 "State file <10MB (${STATE_SIZE_KB}KB)"
+elif [ -f "$STATE_FILE" ]; then
+    recommended_check 1 "State file too large (${STATE_SIZE_KB}KB)"
 fi
 
 echo ""

@@ -15,7 +15,7 @@ Purpose:
 
 Author: AI-Generated
 Created: 2026-01-29
-Modified: 2026-01-29
+Modified: 2026-01-30 - Dual-quoter support (V1 for Uniswap, V2 for SushiSwap V3)
 
 Dependencies:
     - python3 (standard library only — no pip packages)
@@ -46,13 +46,17 @@ from datetime import datetime, timezone
 USDC_ADDRESS = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
 V3_FACTORY = "0x1F98431c8aD98523631AE4a59f267346ea31F984"
 V3_QUOTER = "0xb27308f9F90D607463bb33eA1BeBb41C27CE5AB6"
+SUSHI_V3_QUOTER = "0xb1E835Dc2785b52265711e17fCCb0fd018226a6e"
 DEFAULT_RPC = "https://polygon-bor.publicnode.com"
 
 # Function selectors
 SELECTOR_SLOT0 = "0x3850c7bd"          # slot0()
 SELECTOR_LIQUIDITY = "0x1a686502"      # liquidity()
 SELECTOR_FEE = "0xddca3f43"            # fee()
-SELECTOR_QUOTE = "0xf7729d43"          # quoteExactInputSingle(address,address,uint24,uint256,uint160)
+SELECTOR_QUOTE_V1 = "0xf7729d43"       # QuoterV1: quoteExactInputSingle(address,address,uint24,uint256,uint160)
+SELECTOR_QUOTE_V2 = "0xc6a5026a"       # QuoterV2: quoteExactInputSingle((address,address,uint256,uint24,uint160))
+# Backwards compat alias
+SELECTOR_QUOTE = SELECTOR_QUOTE_V1
 
 FEE_TIER_NAMES = {
     100: "0.01%",
@@ -319,8 +323,45 @@ def check_fee(rpc_url: str, address: str, expected_fee: int, verbose: bool = Fal
     return {"pass": True, "detail": FEE_TIER_NAMES.get(fee, str(fee))}
 
 
+def _resolve_quoter(dex: str) -> tuple:
+    """Return (quoter_address, selector, param_order) for the given DEX.
+
+    QuoterV1 (Uniswap): params order = tokenIn, tokenOut, fee, amountIn, sqrtPriceLimitX96
+    QuoterV2 (SushiSwap): params order = tokenIn, tokenOut, amountIn, fee, sqrtPriceLimitX96
+    """
+    if dex and "sushi" in dex.lower():
+        return (SUSHI_V3_QUOTER, SELECTOR_QUOTE_V2, "v2")
+    return (V3_QUOTER, SELECTOR_QUOTE_V1, "v1")
+
+
+def _build_quote_calldata(selector: str, param_order: str,
+                          token_in: str, token_out: str,
+                          fee_tier: int, amount_raw: int) -> str:
+    """Build quoteExactInputSingle calldata for V1 or V2."""
+    if param_order == "v2":
+        # QuoterV2: (tokenIn, tokenOut, amountIn, fee, sqrtPriceLimitX96)
+        return (
+            selector
+            + pad_address(token_in)
+            + pad_address(token_out)
+            + pad_uint(amount_raw)
+            + pad_uint(fee_tier)
+            + pad_uint(0)
+        )
+    else:
+        # QuoterV1: (tokenIn, tokenOut, fee, amountIn, sqrtPriceLimitX96)
+        return (
+            selector
+            + pad_address(token_in)
+            + pad_address(token_out)
+            + pad_uint(fee_tier)
+            + pad_uint(amount_raw)
+            + pad_uint(0)
+        )
+
+
 def check_quote(rpc_url: str, pair: str, fee_tier: int, amount_usdc_raw: int = 1_000_000,
-                verbose: bool = False) -> dict:
+                dex: str = "", verbose: bool = False) -> dict:
     """Check 5: quoteExactInputSingle with small USDC amount returns > 0."""
     token0_sym, token1_sym = parse_pair(pair)
     if not token0_sym or not token1_sym:
@@ -341,18 +382,13 @@ def check_quote(rpc_url: str, pair: str, fee_tier: int, amount_usdc_raw: int = 1
         unknown = token0_sym if not TOKEN_ADDRESSES.get(token0_sym) else token1_sym
         return {"pass": False, "detail": f"Unknown token: {unknown}"}
 
-    # Build quoteExactInputSingle calldata:
-    # quoteExactInputSingle(tokenIn, tokenOut, fee, amountIn, sqrtPriceLimitX96)
-    calldata = (
-        SELECTOR_QUOTE
-        + pad_address(token_in)
-        + pad_address(token_out)
-        + pad_uint(fee_tier)
-        + pad_uint(amount_usdc_raw)
-        + pad_uint(0)  # sqrtPriceLimitX96 = 0 (no limit)
-    )
+    # Route to correct quoter based on DEX type
+    quoter_addr, selector, param_order = _resolve_quoter(dex)
+    calldata = _build_quote_calldata(selector, param_order,
+                                     token_in, token_out,
+                                     fee_tier, amount_usdc_raw)
 
-    resp = eth_call(rpc_url, V3_QUOTER, calldata)
+    resp = eth_call(rpc_url, quoter_addr, calldata)
 
     if not resp or len(resp) < 66:
         if verbose:
@@ -379,7 +415,8 @@ def check_quote(rpc_url: str, pair: str, fee_tier: int, amount_usdc_raw: int = 1
 
 # --- Blacklist Check ---
 
-def _quote_raw(rpc_url: str, pair: str, fee_tier: int, amount_usdc_raw: int) -> int:
+def _quote_raw(rpc_url: str, pair: str, fee_tier: int, amount_usdc_raw: int,
+               dex: str = "") -> int:
     """Get raw quote output (integer) for price impact calculation."""
     token0_sym, token1_sym = parse_pair(pair)
     if not token0_sym or not token1_sym:
@@ -397,16 +434,12 @@ def _quote_raw(rpc_url: str, pair: str, fee_tier: int, amount_usdc_raw: int) -> 
     if not token_in or not token_out:
         return 0
 
-    calldata = (
-        SELECTOR_QUOTE
-        + pad_address(token_in)
-        + pad_address(token_out)
-        + pad_uint(fee_tier)
-        + pad_uint(amount_usdc_raw)
-        + pad_uint(0)
-    )
+    quoter_addr, selector, param_order = _resolve_quoter(dex)
+    calldata = _build_quote_calldata(selector, param_order,
+                                     token_in, token_out,
+                                     fee_tier, amount_usdc_raw)
 
-    resp = eth_call(rpc_url, V3_QUOTER, calldata)
+    resp = eth_call(rpc_url, quoter_addr, calldata)
     if not resp or len(resp) < 66:
         return 0
 
@@ -427,6 +460,7 @@ def check_blacklist_pool(rpc_url: str, pool_entry: dict, verbose: bool = False) 
     pair = pool_entry.get("pair", "")
     fee = pool_entry.get("fee_tier", 0)
     address = pool_entry.get("address", "")
+    dex = pool_entry.get("dex", "")
 
     # Determine output token for formatting
     token0_sym, token1_sym = parse_pair(pair)
@@ -434,10 +468,10 @@ def check_blacklist_pool(rpc_url: str, pool_entry: dict, verbose: bool = False) 
     out_decimals = TOKEN_DECIMALS.get(out_sym, 18)
 
     # Check 1: $1 USDC — basic functionality
-    small_result = check_quote(rpc_url, pair, fee, amount_usdc_raw=1_000_000, verbose=verbose)
+    small_result = check_quote(rpc_url, pair, fee, amount_usdc_raw=1_000_000, dex=dex, verbose=verbose)
 
     # Check 2: $140 USDC — trade-size depth
-    trade_result = check_quote(rpc_url, pair, fee, amount_usdc_raw=140_000_000, verbose=verbose)
+    trade_result = check_quote(rpc_url, pair, fee, amount_usdc_raw=140_000_000, dex=dex, verbose=verbose)
 
     if not small_result["pass"] and not trade_result["pass"]:
         return {
@@ -458,8 +492,8 @@ def check_blacklist_pool(rpc_url: str, pool_entry: dict, verbose: bool = False) 
         }
 
     # Both quotes succeeded — check price impact
-    small_raw = _quote_raw(rpc_url, pair, fee, 1_000_000)
-    trade_raw = _quote_raw(rpc_url, pair, fee, 140_000_000)
+    small_raw = _quote_raw(rpc_url, pair, fee, 1_000_000, dex=dex)
+    trade_raw = _quote_raw(rpc_url, pair, fee, 140_000_000, dex=dex)
 
     if small_raw > 0 and trade_raw > 0:
         # Output per USDC at each size
@@ -513,6 +547,7 @@ def run_quote_matrix(rpc_url: str, pool_entry: dict, label: str = "",
     pair = pool_entry.get("pair", "")
     fee = pool_entry.get("fee_tier", 0)
     address = pool_entry.get("address", "")
+    dex = pool_entry.get("dex", "")
 
     token0_sym, token1_sym = parse_pair(pair)
     out_sym = token0_sym if token1_sym == "USDC" else token1_sym
@@ -522,6 +557,7 @@ def run_quote_matrix(rpc_url: str, pool_entry: dict, label: str = "",
         "address": address,
         "pair": pair,
         "fee_tier": fee,
+        "dex": dex,
         "label": label,
         "quotes": [],
         "impact_pct": None,
@@ -531,7 +567,7 @@ def run_quote_matrix(rpc_url: str, pool_entry: dict, label: str = "",
 
     for size_usd in QUOTE_SIZES_USD:
         amount_raw = size_usd * 1_000_000  # USDC has 6 decimals
-        raw_out = _quote_raw(rpc_url, pair, fee, amount_raw)
+        raw_out = _quote_raw(rpc_url, pair, fee, amount_raw, dex=dex)
 
         passed = raw_out > 0
         human_out = raw_out / (10 ** out_decimals) if raw_out > 0 else 0.0
@@ -611,7 +647,8 @@ def run_all_quote_matrices(rpc_url: str, whitelist_data: dict,
         addr_short = pool.get("address", "")[:8] + ".." + pool.get("address", "")[-4:]
         pair = pool.get("pair", "?")
         fee_name = FEE_TIER_NAMES.get(pool.get("fee_tier", 0), "?")
-        print(f"  [{idx}/{total}] {pair} {fee_name} ({addr_short}) [OB]", flush=True)
+        dex_short = _short_dex(pool.get("dex", ""))
+        print(f"  [{idx}/{total}] {pair} {fee_name} {dex_short} ({addr_short}) [OB]", flush=True)
         r = run_quote_matrix(rpc_url, pool, label="OB", verbose=verbose)
         all_results.append(r)
 
@@ -623,19 +660,54 @@ def _color_pad(text: str, color: str, width: int) -> str:
     return color + text.rjust(width) + RESET
 
 
+def _short_dex(dex: str) -> str:
+    """Short DEX name for matrix display."""
+    if not dex:
+        return "Uni"
+    if "sushi" in dex.lower():
+        return "Sushi"
+    if "uniswap" in dex.lower():
+        return "Uni"
+    return dex[:5]
+
+
+def _format_usd_value(value: float) -> str:
+    """Format a USD value for the matrix display."""
+    if value < 0.01:
+        return "~$0"
+    elif value >= 1000:
+        return f"${int(value)}"
+    elif value >= 100:
+        return f"${value:.0f}"
+    else:
+        return f"${value:.2f}"
+
+
+def _usd_cell(value_est: float, input_usd: int, col_w: int) -> str:
+    """Color-coded USD value cell. Green >= 90% of input, Yellow >= 50%, Red < 50%."""
+    val_s = _format_usd_value(value_est)
+    ratio = value_est / input_usd if input_usd > 0 else 0
+    if ratio >= 0.90:
+        return _color_pad(val_s, GREEN, col_w)
+    elif ratio >= 0.50:
+        return _color_pad(val_s, YELLOW, col_w)
+    else:
+        return _color_pad(val_s, RED, col_w)
+
+
 def print_quote_matrix(matrix_results: list):
-    """Print the quote depth grid."""
-    COL_W = 8  # width per size column
+    """Print unified quote depth grid with dollar return values (color-coded)."""
+    COL_W = 10  # width per size column
 
     print()
-    print("=" * 100)
-    print(f"  {BOLD}QUOTE DEPTH MATRIX — All Pools x [${', $'.join(str(s) for s in QUOTE_SIZES_USD)}]{RESET}")
-    print("=" * 100)
+    print("=" * 120)
+    print(f"  {BOLD}QUOTE DEPTH MATRIX — USD returned per trade size{RESET}")
+    print(f"  {DIM}Green >= 90% | Yellow >= 50% | Red < 50% | FAIL = quote reverted{RESET}")
+    print("=" * 120)
 
-    # --- PASS/FAIL grid ---
     size_headers = "".join(f"{'$'+str(s):>{COL_W}}" for s in QUOTE_SIZES_USD)
-    print(f"\n  {'Pool':<14} {'Pair':<13} {'Fee':<7} {'Tag':<5}{size_headers} {'Impact':>{COL_W}}")
-    sep = "-" * 14 + " " + "-" * 12 + " " + "-" * 6 + " " + "-" * 4
+    print(f"\n  {'Pool':<14} {'Pair':<13} {'Fee':<7} {'DEX':<7} {'Tag':<5}{size_headers} {'Impact':>{COL_W}}")
+    sep = "-" * 14 + " " + "-" * 12 + " " + "-" * 6 + " " + "-" * 6 + " " + "-" * 4
     sep += (" " + "-" * (COL_W - 1)) * len(QUOTE_SIZES_USD)
     sep += " " + "-" * (COL_W - 1)
     print(f"  {sep}")
@@ -644,15 +716,24 @@ def print_quote_matrix(matrix_results: list):
         addr = r["address"][:6] + ".." + r["address"][-4:]
         pair = r["pair"]
         fee = FEE_TIER_NAMES.get(r["fee_tier"], str(r["fee_tier"]))
+        dex = _short_dex(r.get("dex", ""))
         label = f"[{r['label']}]" if r["label"] else ""
 
         cells = ""
-        for q in r["quotes"]:
-            if q["pass"]:
-                cells += _color_pad("PASS", GREEN, COL_W)
-            else:
-                cells += _color_pad("FAIL", RED, COL_W)
+        baseline_q = r["quotes"][0]  # $1 quote for baseline rate
 
+        for q in r["quotes"]:
+            if not q["pass"]:
+                cells += _color_pad("FAIL", RED, COL_W)
+            elif not baseline_q["pass"] or baseline_q["raw_out"] == 0:
+                cells += _color_pad("?", YELLOW, COL_W)
+            else:
+                # Estimate USD value: compare rate at this size vs rate at $1
+                tokens_per_dollar = baseline_q["raw_out"] / 1_000_000
+                value_est = (q["raw_out"] / tokens_per_dollar) / 1_000_000 if tokens_per_dollar > 0 else 0
+                cells += _usd_cell(value_est, q["size_usd"], COL_W)
+
+        # Impact column
         if r["impact_pct"] is not None:
             impact = r["impact_pct"]
             impact_txt = f"{impact:.1f}%"
@@ -665,45 +746,7 @@ def print_quote_matrix(matrix_results: list):
         else:
             impact_s = "--".rjust(COL_W)
 
-        print(f"  {addr:<14} {pair:<13} {fee:<7} {label:<5}{cells} {impact_s}")
-
-    # --- USD value grid ---
-    VAL_W = 10  # width per value column
-
-    print(f"\n  {BOLD}DETAILED OUTPUT VALUES{RESET}")
-    print(f"  (estimated USD received at each trade size)\n")
-
-    size_headers2 = "".join(f"{'$'+str(s):>{VAL_W}}" for s in QUOTE_SIZES_USD)
-    print(f"  {'Pool':<14} {'Pair':<13} {'Fee':<7} {'Tag':<5}{size_headers2}")
-    sep2 = "-" * 14 + " " + "-" * 12 + " " + "-" * 6 + " " + "-" * 4
-    sep2 += (" " + "-" * (VAL_W - 1)) * len(QUOTE_SIZES_USD)
-    print(f"  {sep2}")
-
-    for r in matrix_results:
-        addr = r["address"][:6] + ".." + r["address"][-4:]
-        pair = r["pair"]
-        fee = FEE_TIER_NAMES.get(r["fee_tier"], str(r["fee_tier"]))
-        label = f"[{r['label']}]" if r["label"] else ""
-
-        cells = ""
-        baseline_q = r["quotes"][0]
-        for q in r["quotes"]:
-            if not q["pass"]:
-                cells += f"{'FAIL':>{VAL_W}}"
-            elif not baseline_q["pass"] or baseline_q["raw_out"] == 0:
-                cells += f"{'?':>{VAL_W}}"
-            else:
-                tokens_per_dollar = baseline_q["raw_out"] / 1_000_000
-                value_est = (q["raw_out"] / tokens_per_dollar) / 1_000_000 if tokens_per_dollar > 0 else 0
-                if value_est < 0.01:
-                    val_s = "~$0"
-                elif value_est >= 1000:
-                    val_s = f"${int(value_est)}"
-                else:
-                    val_s = f"${value_est:.2f}"
-                cells += f"{val_s:>{VAL_W}}"
-
-        print(f"  {addr:<14} {pair:<13} {fee:<7} {label:<5}{cells}")
+        print(f"  {addr:<14} {pair:<13} {fee:<7} {dex:<7} {label:<5}{cells} {impact_s}")
 
     print()
 
@@ -746,7 +789,8 @@ def verify_pool(rpc_url: str, pool_entry: dict, verbose: bool = False) -> dict:
     result["checks"]["fee"] = check_fee(rpc_url, address, fee_tier, verbose)
 
     # Check 5: Quote
-    result["checks"]["quote"] = check_quote(rpc_url, pair, fee_tier, verbose=verbose)
+    dex = pool_entry.get("dex", "")
+    result["checks"]["quote"] = check_quote(rpc_url, pair, fee_tier, dex=dex, verbose=verbose)
 
     # Overall = all pass
     result["overall"] = all(c["pass"] for c in result["checks"].values())

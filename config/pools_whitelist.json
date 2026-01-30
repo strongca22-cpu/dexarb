@@ -1,7 +1,7 @@
 {
-  "version": "1.1",
-  "last_updated": "2026-01-29T22:00:00Z",
-  "changelog": "v1.1: Trimmed whitelist from 16 to 10 pools based on quote depth matrix. Moved 6 thin/marginal pools to blacklist. Only sturdiest pools remain.",
+  "version": "1.2",
+  "last_updated": "2026-01-30T06:45:00Z",
+  "changelog": "v1.2: SushiSwap V3 cross-DEX expansion. Promoted 2 deep SushiV3 pools to whitelist (12 total). Classified all 13 observation pools: 9 dead → blacklist, 2 marginal → blacklist, 2 promoted. Added 'category' field (dead/marginal) to blacklist. Observation section cleared.",
   "config": {
     "default_min_liquidity": 1000000000,
     "whitelist_enforcement": "strict",
@@ -21,9 +21,9 @@
         "fee_tier": 500,
         "status": "active",
         "min_liquidity": 5000000000,
-        "notes": "Deep — 0.3% impact@$5K",
+        "notes": "Deep — 0.3% impact@$5K, $4983 returned",
         "added": "2026-01-29",
-        "last_verified": "2026-01-29"
+        "last_verified": "2026-01-30"
       },
       {
         "address": "0x0e44ceb592acfc5d3f09d996302eb4c499ff8c10",
@@ -32,9 +32,9 @@
         "fee_tier": 3000,
         "status": "active",
         "min_liquidity": 3000000000,
-        "notes": "Deep — 1.8% impact@$5K",
+        "notes": "Deep — 1.9% impact@$5K, $4906 returned",
         "added": "2026-01-29",
-        "last_verified": "2026-01-29"
+        "last_verified": "2026-01-30"
       },
       {
         "address": "0xa374094527e1673a86de625aa59517c5de346d32",
@@ -43,9 +43,9 @@
         "fee_tier": 500,
         "status": "active",
         "min_liquidity": 5000000000,
-        "notes": "Deep — 3.8% impact@$5K. Orphan (no 0.30% counterpart)",
+        "notes": "Deep — 3.8% impact@$5K, $4812 returned",
         "added": "2026-01-29",
-        "last_verified": "2026-01-29"
+        "last_verified": "2026-01-30"
       },
       {
         "address": "0xeef1a9507b3d505f0062f2be9453981255b503c8",
@@ -54,9 +54,9 @@
         "fee_tier": 500,
         "status": "active",
         "min_liquidity": 5000000000,
-        "notes": "Deep — 0.1% impact@$5K. Orphan (0.30% counterpart blacklisted)",
+        "notes": "Deep — 0.3% impact@$5K, $4982 returned",
         "added": "2026-01-29",
-        "last_verified": "2026-01-29"
+        "last_verified": "2026-01-30"
       },
       {
         "address": "0x3f5228d0e7d75467366be7de2c31d0d098ba2c23",
@@ -65,9 +65,9 @@
         "fee_tier": 500,
         "status": "active",
         "min_liquidity": 1000000000,
-        "notes": "Very deep stablecoin — 0.1% impact@$5K",
+        "notes": "Very deep stablecoin — 0.1% impact@$5K, $4996 returned",
         "added": "2026-01-29",
-        "last_verified": "2026-01-29"
+        "last_verified": "2026-01-30"
       },
       {
         "address": "0x24555b1e26407b8b56621da41f175c5e2b80f1b8",
@@ -76,9 +76,9 @@
         "fee_tier": 3000,
         "status": "active",
         "min_liquidity": 1000000000,
-        "notes": "Very deep stablecoin — 0.1% impact@$5K",
+        "notes": "Very deep stablecoin — 0.1% impact@$5K, $4993 returned",
         "added": "2026-01-29",
-        "last_verified": "2026-01-29"
+        "last_verified": "2026-01-30"
       },
       {
         "address": "0xdac8a8e6dbf8c690ec6815e0ff03491b2770255d",
@@ -87,9 +87,9 @@
         "fee_tier": 100,
         "status": "active",
         "min_liquidity": 10000000000,
-        "notes": "Very deep stablecoin — 0.0% impact@$5K",
+        "notes": "Very deep stablecoin — 0.0% impact@$5K, $4999 returned",
         "added": "2026-01-29",
-        "last_verified": "2026-01-29"
+        "last_verified": "2026-01-30"
       },
       {
         "address": "0x5f69c2ec01c22843f8273838d570243fd1963014",
@@ -98,9 +98,9 @@
         "fee_tier": 500,
         "status": "active",
         "min_liquidity": 1000000000,
-        "notes": "Very deep stablecoin — 0.0% impact@$5K",
+        "notes": "Very deep stablecoin — 0.0% impact@$5K, $4999 returned",
         "added": "2026-01-29",
-        "last_verified": "2026-01-29"
+        "last_verified": "2026-01-30"
       },
       {
         "address": "0x5645dcb64c059aa11212707fbf4e7f984440a8cf",
@@ -109,9 +109,9 @@
         "fee_tier": 100,
         "status": "active",
         "min_liquidity": 10000000000,
-        "notes": "Very deep stablecoin — 0.0% impact@$5K",
+        "notes": "Very deep stablecoin — 0.0% impact@$5K, $4999 returned",
         "added": "2026-01-29",
-        "last_verified": "2026-01-29"
+        "last_verified": "2026-01-30"
       },
       {
         "address": "0x94ab9e4553ffb839431e37cc79ba8905f45bfbea",
@@ -120,9 +120,31 @@
         "fee_tier": 3000,
         "status": "active",
         "min_liquidity": 3000000000,
-        "notes": "Deep — 0.6% impact@$5K. Orphan (0.05% counterpart blacklisted)",
+        "notes": "Deep — 0.7% impact@$5K, $4967 returned",
         "added": "2026-01-29",
-        "last_verified": "2026-01-29"
+        "last_verified": "2026-01-30"
+      },
+      {
+        "address": "0x8cfaab34f5159abf9c35587ac40d09a05dc94765",
+        "pair": "USDT/USDC",
+        "dex": "SushiswapV3",
+        "fee_tier": 100,
+        "status": "active",
+        "min_liquidity": 10000000000,
+        "notes": "SushiV3 cross-DEX — 0.2% impact@$5K, $4991 returned. Deep stablecoin.",
+        "added": "2026-01-30",
+        "last_verified": "2026-01-30"
+      },
+      {
+        "address": "0x1b0585fc8195fc04a46a365e670024dfb63a960c",
+        "pair": "WETH/USDC",
+        "dex": "SushiswapV3",
+        "fee_tier": 3000,
+        "status": "active",
+        "min_liquidity": 3000000000,
+        "notes": "SushiV3 cross-DEX — 4.4% impact@$5K, $4781 returned. 2.09T liquidity.",
+        "added": "2026-01-30",
+        "last_verified": "2026-01-30"
       }
     ]
   },
@@ -133,8 +155,8 @@
         "pair": "WETH/USDC",
         "dex": "UniswapV3",
         "fee_tier": 100,
-        "reason": "Low liquidity (831B), near-zero executable depth for $140 trades. Caused $3.35 loss on 2026-01-29.",
-        "phantom_spread": "0.78%",
+        "category": "dead",
+        "reason": "Low liquidity (831B), near-zero executable depth. $31@$100, $41@$5K. Caused $3.35 loss on 2026-01-29.",
         "impact_at_5k": "99.2%",
         "date_added": "2026-01-29",
         "discovered_by": "live_incident"
@@ -144,18 +166,9 @@
         "pair": "UNI/USDC",
         "dex": "UniswapV3",
         "fee_tier": 500,
-        "reason": "Dead pool — $10 in returns $1.29 out. 100% impact@$5K.",
+        "category": "dead",
+        "reason": "Dead pool — $10 in returns $1.29 out. $1.33@$100, $1.33@$5K.",
         "impact_at_5k": "100%",
-        "date_added": "2026-01-29",
-        "discovered_by": "depth_matrix"
-      },
-      {
-        "address": "0x74d3c85df4dbd03c7c12f7649faa6457610e7604",
-        "pair": "UNI/USDC",
-        "dex": "UniswapV3",
-        "fee_tier": 3000,
-        "reason": "Marginal — 16.8% impact@$5K. Rapid-fire repeat trades drain spread quickly.",
-        "impact_at_5k": "16.8%",
         "date_added": "2026-01-29",
         "discovered_by": "depth_matrix"
       },
@@ -164,8 +177,121 @@
         "pair": "DAI/USDC",
         "dex": "UniswapV3",
         "fee_tier": 3000,
-        "reason": "Exhausted liquidity at current tick — maxes out at ~$44 regardless of input. 99.1% impact@$5K.",
+        "category": "dead",
+        "reason": "Exhausted liquidity at current tick — maxes out at ~$44 regardless of input. $44@$100, $44@$5K.",
         "impact_at_5k": "99.1%",
+        "date_added": "2026-01-29",
+        "discovered_by": "depth_matrix"
+      },
+      {
+        "address": "0xef69494eea0ecbfbbfa1cfd5386268a562bc875f",
+        "pair": "WETH/USDC",
+        "dex": "SushiswapV3",
+        "fee_tier": 100,
+        "category": "dead",
+        "reason": "SushiV3 — $40@$100, $41@$5K. Near-zero depth beyond $10.",
+        "impact_at_5k": "99.2%",
+        "date_added": "2026-01-30",
+        "discovered_by": "depth_matrix"
+      },
+      {
+        "address": "0xcafdbcaa114315e5508a1cc1275b4e5d88bc218c",
+        "pair": "WETH/USDC",
+        "dex": "SushiswapV3",
+        "fee_tier": 500,
+        "category": "dead",
+        "reason": "SushiV3 — $1.04@$100, $1.04@$5K. Dead pool, nearly zero liquidity at tick.",
+        "impact_at_5k": "100%",
+        "date_added": "2026-01-30",
+        "discovered_by": "depth_matrix"
+      },
+      {
+        "address": "0x0a6c4588b7d8bd22cf120283b1fff953420c45f3",
+        "pair": "WMATIC/USDC",
+        "dex": "UniswapV3",
+        "fee_tier": 100,
+        "category": "dead",
+        "reason": "0.01% non-stablecoin — $59@$100 (59% return), $268@$5K. Not viable even at small size.",
+        "impact_at_5k": "94.6%",
+        "date_added": "2026-01-30",
+        "discovered_by": "depth_matrix"
+      },
+      {
+        "address": "0x934f3f8749164111f0386ece4f4965a687e576d5",
+        "pair": "WMATIC/USDC",
+        "dex": "SushiswapV3",
+        "fee_tier": 100,
+        "category": "dead",
+        "reason": "SushiV3 — $20@$100, $20@$5K. Near-zero depth beyond $1.",
+        "impact_at_5k": "99.6%",
+        "date_added": "2026-01-30",
+        "discovered_by": "depth_matrix"
+      },
+      {
+        "address": "0xcccc583ad4fbeda6e999c66ce066d4f2e16b5cf5",
+        "pair": "WMATIC/USDC",
+        "dex": "SushiswapV3",
+        "fee_tier": 3000,
+        "category": "dead",
+        "reason": "SushiV3 — $15@$100, $16@$5K. Near-zero depth beyond $1.",
+        "impact_at_5k": "99.7%",
+        "date_added": "2026-01-30",
+        "discovered_by": "depth_matrix"
+      },
+      {
+        "address": "0x135a796632229424b10237f8f127898dbf6f793f",
+        "pair": "WBTC/USDC",
+        "dex": "SushiswapV3",
+        "fee_tier": 500,
+        "category": "dead",
+        "reason": "SushiV3 — all quotes FAIL. Zero liquidity at current tick.",
+        "impact_at_5k": "FAIL",
+        "date_added": "2026-01-30",
+        "discovered_by": "depth_matrix"
+      },
+      {
+        "address": "0xf88de8aaa065ecbf9a3c67f7a93b4c82595f6d6f",
+        "pair": "WBTC/USDC",
+        "dex": "SushiswapV3",
+        "fee_tier": 3000,
+        "category": "dead",
+        "reason": "SushiV3 — $2.67@$100, $2.67@$5K. Near-zero depth.",
+        "impact_at_5k": "99.9%",
+        "date_added": "2026-01-30",
+        "discovered_by": "depth_matrix"
+      },
+      {
+        "address": "0xa4f9403c28de0a64cc14a184e3d6d9c6f5fee289",
+        "pair": "USDT/USDC",
+        "dex": "SushiswapV3",
+        "fee_tier": 500,
+        "category": "dead",
+        "reason": "SushiV3 — all quotes FAIL. Zero liquidity at current tick.",
+        "impact_at_5k": "FAIL",
+        "date_added": "2026-01-30",
+        "discovered_by": "depth_matrix"
+      },
+      {
+        "address": "0xf106f85e7e37e0d1441f30ab0f43acfcebd0d7d2",
+        "pair": "USDT/USDC",
+        "dex": "SushiswapV3",
+        "fee_tier": 3000,
+        "category": "dead",
+        "reason": "SushiV3 — all quotes FAIL. Zero liquidity at current tick.",
+        "impact_at_5k": "FAIL",
+        "date_added": "2026-01-30",
+        "discovered_by": "depth_matrix"
+      },
+      {
+        "address": "0x74d3c85df4dbd03c7c12f7649faa6457610e7604",
+        "pair": "UNI/USDC",
+        "dex": "UniswapV3",
+        "fee_tier": 3000,
+        "category": "marginal",
+        "reason": "Marginal — $99@$100 (ok), $4071@$5K (18.6% impact). Works for small trades, dangerous at scale.",
+        "impact_at_5k": "18.6%",
+        "return_at_100": "$99.20",
+        "return_at_5k": "$4071",
         "date_added": "2026-01-29",
         "discovered_by": "depth_matrix"
       },
@@ -174,8 +300,11 @@
         "pair": "LINK/USDC",
         "dex": "UniswapV3",
         "fee_tier": 500,
-        "reason": "Thin — 73.1% impact@$5K. Impact eats spread even at $140.",
+        "category": "marginal",
+        "reason": "Marginal — $97@$100 (ok), $1344@$5K (73.1% impact). Works at $100, collapses at $1K+.",
         "impact_at_5k": "73.1%",
+        "return_at_100": "$96.74",
+        "return_at_5k": "$1344",
         "date_added": "2026-01-29",
         "discovered_by": "depth_matrix"
       },
@@ -184,8 +313,11 @@
         "pair": "WMATIC/USDC",
         "dex": "UniswapV3",
         "fee_tier": 3000,
-        "reason": "Thin — 53.5% impact@$5K, 8%+ loss at $100. Not viable at $140 trade size.",
-        "impact_at_5k": "53.5%",
+        "category": "marginal",
+        "reason": "Marginal — $97@$100 (ok), $3236@$5K (35.3% impact). Works at $100, risky at $1K+.",
+        "impact_at_5k": "35.3%",
+        "return_at_100": "$96.85",
+        "return_at_5k": "$3236",
         "date_added": "2026-01-29",
         "discovered_by": "depth_matrix"
       },
@@ -194,9 +326,38 @@
         "pair": "WBTC/USDC",
         "dex": "UniswapV3",
         "fee_tier": 3000,
-        "reason": "Borderline — 5.5% impact@$5K. Rapid-fire repeat trades risky. Removing to keep only deepest pools.",
-        "impact_at_5k": "5.5%",
+        "category": "marginal",
+        "reason": "Marginal — $100@$100 (ok), $4674@$5K (6.5% impact). Best of the marginals, but not deep enough for strict whitelist.",
+        "impact_at_5k": "6.5%",
+        "return_at_100": "$99.73",
+        "return_at_5k": "$4674",
         "date_added": "2026-01-29",
+        "discovered_by": "depth_matrix"
+      },
+      {
+        "address": "0x21988c9cfd08db3b5793c2c6782271dc94749251",
+        "pair": "WMATIC/USDC",
+        "dex": "SushiswapV3",
+        "fee_tier": 500,
+        "category": "marginal",
+        "reason": "SushiV3 marginal — $94@$100 (ok), $1317@$5K (73.6% impact). Works at $100, collapses at $1K+.",
+        "impact_at_5k": "73.6%",
+        "return_at_100": "$94.21",
+        "return_at_5k": "$1317",
+        "date_added": "2026-01-30",
+        "discovered_by": "depth_matrix"
+      },
+      {
+        "address": "0x4646e8a5e1d14e2da01577822d6346c7883c6890",
+        "pair": "DAI/USDC",
+        "dex": "SushiswapV3",
+        "fee_tier": 100,
+        "category": "marginal",
+        "reason": "SushiV3 marginal — $100@$100 (perfect), $1334@$5K (73.3% impact). Deep at $100-$1K, but collapses at $5K.",
+        "impact_at_5k": "73.3%",
+        "return_at_100": "$100",
+        "return_at_5k": "$1334",
+        "date_added": "2026-01-30",
         "discovered_by": "depth_matrix"
       }
     ],
@@ -212,16 +373,7 @@
     "pairs": []
   },
   "observation": {
-    "comment": "Pools under observation - not blacklisted, but need monitoring before promotion to active",
-    "pools": [
-      {
-        "address": "0x0a6c4588b7d8bd22cf120283b1fff953420c45f3",
-        "pair": "WMATIC/USDC",
-        "fee_tier": 100,
-        "concern": "0.01% non-stablecoin pair. 94.6% impact@$5K but works at $100.",
-        "status": "monitoring",
-        "added": "2026-01-29"
-      }
-    ]
+    "comment": "Pools under observation - not blacklisted, but need monitoring before promotion to active. All v1.1 observation pools classified in v1.2.",
+    "pools": []
   }
 }

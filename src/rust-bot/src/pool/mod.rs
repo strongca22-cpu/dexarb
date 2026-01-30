@@ -15,4 +15,4 @@ pub mod v3_syncer;
 pub use calculator::PriceCalculator;
 pub use state::PoolStateManager;
 pub use syncer::PoolSyncer;
-pub use v3_syncer::{V3PoolSyncer, V3_FEE_TIERS};
+pub use v3_syncer::{V3PoolSyncer, SUSHI_V3_FEE_TIERS, V3_FEE_TIERS};

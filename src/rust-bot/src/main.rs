@@ -1,26 +1,32 @@
-//! Phase 1 DEX Arbitrage Bot (V3-only, shared data architecture)
+//! Phase 1 DEX Arbitrage Bot (V3-only, monolithic architecture)
 //!
 //! Main entry point for the arbitrage bot.
-//! Reads V3 pool state from shared JSON file (written by data collector).
-//! Detects cross-fee-tier arbitrage opportunities and executes via Quoter+swap.
+//! Syncs V3 pool state directly via RPC, detects cross-fee-tier and cross-DEX
+//! arbitrage opportunities, and executes via Quoter+swap — all in one process.
 //!
 //! Architecture:
-//! - Data collector (separate process) syncs pools via RPC, writes JSON
-//! - This bot reads JSON for pool prices (zero RPC for price discovery)
-//! - RPC used ONLY for Quoter pre-checks and trade execution
-//! - Adding new pairs = update data collector config, no rebuild needed here
+//! - Loads whitelist at startup, initial sync via sync_pool_by_address()
+//! - Supports Uniswap V3 + SushiSwap V3 pools (cross-DEX arb)
+//! - Main loop: fetch block → skip if same → sync_known_pools_parallel() → detect → execute
+//! - ~1s cycle latency (vs ~5s with split file-polling architecture)
+//! - Data collector preserved separately for paper trading / research
 //!
 //! Author: AI-Generated
 //! Created: 2026-01-27
 //! Modified: 2026-01-29 - Shared data architecture: read from JSON, eliminate RPC sync
 //! Modified: 2026-01-29 - Fix buy-then-continue bug: halt on committed capital (tx_hash check)
 //! Modified: 2026-01-29 - Multicall3 batch Quoter pre-screening (Phase 2.1)
+//! Modified: 2026-01-30 - Monolithic architecture: direct RPC sync, no data collector dependency
+//! Modified: 2026-01-30 - SushiSwap V3 cross-DEX: dual-quoter, multi-DEX whitelist mapping
+//! Modified: 2026-01-30 - Historical price logging + gas estimate fix ($0.50→$0.05)
 
 use anyhow::Result;
 use dexarb_bot::arbitrage::{MulticallQuoter, OpportunityDetector, TradeExecutor, VerifiedOpportunity};
 use dexarb_bot::config::load_config_from_file;
-use dexarb_bot::data_collector::shared_state::SharedPoolState;
-use dexarb_bot::pool::PoolStateManager;
+use dexarb_bot::filters::WhitelistFilter;
+use dexarb_bot::pool::{PoolStateManager, V3PoolSyncer, SUSHI_V3_FEE_TIERS, V3_FEE_TIERS};
+use dexarb_bot::price_logger::PriceLogger;
+use dexarb_bot::types::V3PoolState;
 use ethers::prelude::*;
 use std::sync::Arc;
 use tracing::{error, info, warn, Level};
@@ -34,7 +40,7 @@ async fn main() -> Result<()> {
         .with_target(false)
         .init();
 
-    info!("Phase 1 DEX Arbitrage Bot Starting (shared data, JSON-based)...");
+    info!("Phase 1 DEX Arbitrage Bot Starting (monolithic, cross-DEX UniV3+SushiV3)...");
 
     // Load configuration from .env.live (separate from dev/paper .env)
     let config = load_config_from_file(".env.live")?;
@@ -43,18 +49,8 @@ async fn main() -> Result<()> {
     info!("Trading pairs: {}", config.pairs.len());
     info!("Poll interval: {}ms", config.poll_interval_ms);
 
-    // Resolve pool state file path
-    let state_file = match &config.pool_state_file {
-        Some(path) => path.clone(),
-        None => {
-            error!("POOL_STATE_FILE not set in .env.live — required for shared data mode");
-            return Err(anyhow::anyhow!("POOL_STATE_FILE not configured"));
-        }
-    };
-    info!("Pool state file: {}", state_file);
-
-    // Initialize provider (WebSocket — needed for Quoter checks and trade execution)
-    info!("Connecting to Polygon via WebSocket (for Quoter + execution only)...");
+    // Initialize provider (WebSocket — used for sync, Quoter, and execution)
+    info!("Connecting to Polygon via WebSocket...");
     let provider = Provider::<Ws>::connect(&config.rpc_url).await?;
     let provider = Arc::new(provider);
 
@@ -62,9 +58,71 @@ async fn main() -> Result<()> {
     let block = provider.get_block_number().await?;
     info!("Connected! Current block: {}", block);
 
-    // Initialize pool state manager (populated from JSON, not RPC)
+    // Load whitelist
+    let whitelist_path = config.whitelist_file.as_deref()
+        .unwrap_or("/home/botuser/bots/dexarb/config/pools_whitelist.json");
+    let whitelist = WhitelistFilter::load(whitelist_path)?;
+    info!("Whitelist loaded: {} active pools from {}", whitelist.active_pool_count(), whitelist_path);
+
+    // Initial V3 sync: discover full state for each whitelisted pool
+    let mut v3_syncer = V3PoolSyncer::new(Arc::clone(&provider), config.clone());
+    info!("Initial V3 sync: discovering {} whitelisted pools...", whitelist.active_pool_count());
+
+    let mut v3_pools: Vec<V3PoolState> = Vec::new();
+    let active_pools: Vec<_> = whitelist.raw.whitelist.pools.iter()
+        .filter(|p| p.status == "active")
+        .collect();
+
+    for wl_pool in &active_pools {
+        // Map (dex, fee_tier) → DexType using the correct fee tier table
+        let dex_type = match wl_pool.dex.as_str() {
+            "UniswapV3" => V3_FEE_TIERS.iter()
+                .find(|(fee, _)| *fee == wl_pool.fee_tier)
+                .map(|(_, dt)| *dt),
+            "SushiswapV3" => SUSHI_V3_FEE_TIERS.iter()
+                .find(|(fee, _)| *fee == wl_pool.fee_tier)
+                .map(|(_, dt)| *dt),
+            other => {
+                warn!("Unknown dex '{}' for {} — skipping", other, wl_pool.pair);
+                continue;
+            }
+        };
+
+        let dex_type = match dex_type {
+            Some(dt) => dt,
+            None => {
+                warn!("Unknown fee tier {} for {} on {} — skipping", wl_pool.fee_tier, wl_pool.pair, wl_pool.dex);
+                continue;
+            }
+        };
+
+        let pool_address: Address = match wl_pool.address.parse() {
+            Ok(addr) => addr,
+            Err(e) => {
+                warn!("Invalid address '{}' for {} — skipping: {}", wl_pool.address, wl_pool.pair, e);
+                continue;
+            }
+        };
+
+        match v3_syncer.sync_pool_by_address(pool_address, dex_type).await {
+            Ok(mut pool_state) => {
+                pool_state.pair.symbol = wl_pool.pair.clone();
+                info!("  Synced: {} @ {}bps fee | liquidity={}", wl_pool.pair, wl_pool.fee_tier, pool_state.liquidity);
+                v3_pools.push(pool_state);
+            }
+            Err(e) => {
+                warn!("  Failed to sync {} ({}): {}", wl_pool.pair, wl_pool.address, e);
+            }
+        }
+    }
+    info!("Initial V3 sync complete: {}/{} pools discovered", v3_pools.len(), active_pools.len());
+
+    // Initialize pool state manager and populate with initial sync data
     let state_manager = PoolStateManager::new();
-    info!("Pool state manager initialized (shared data mode — reads from JSON)");
+    for pool in &v3_pools {
+        state_manager.update_v3_pool(pool.clone());
+    }
+    info!("Pool state manager initialized with {} V3 pools (monolithic mode)", v3_pools.len());
 
     // Initialize opportunity detector
     let detector = OpportunityDetector::new(config.clone(), state_manager.clone());
@@ -104,37 +162,19 @@ async fn main() -> Result<()> {
         warn!("Tax logging DISABLED - trades will NOT be logged for IRS compliance!");
     }
 
-    // Wait for initial JSON file from data collector
-    info!("Waiting for data collector JSON at {}...", state_file);
-    loop {
-        match SharedPoolState::read_from_file(&state_file) {
-            Ok(state) => {
-                let v3_count = state.v3_pools.len();
-                info!("Initial state loaded: {} V3 pools, block {}", v3_count, state.block_number);
+    // Initialize historical price logger (research)
+    let mut price_logger: Option<PriceLogger> = if config.price_log_enabled {
+        let log_dir = config.price_log_dir.clone()
+            .unwrap_or_else(|| "/home/botuser/bots/dexarb/data/price_history".to_string());
+        info!("Price logging enabled: {}", log_dir);
+        Some(PriceLogger::new(&log_dir))
+    } else {
+        info!("Price logging disabled");
+        None
+    };
 
-                // Display pool summary
-                for (key, pool) in &state.v3_pools {
-                    info!("  {} | price={:.6} | tick={} | fee={}bps",
-                        key, pool.validated_price(), pool.tick, pool.fee);
-                }
-
-                // Populate state manager from JSON
-                for pool in state.v3_pools.values() {
-                    if let Ok(p) = pool.to_v3_pool_state() {
-                        state_manager.update_v3_pool(p);
-                    }
-                }
-                break;
-            }
-            Err(_) => {
-                warn!("State file not ready, retrying in 5s... (start data collector first)");
-                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-            }
-        }
-    }
-
-    info!("Bot initialized successfully (shared data mode)");
-    info!("Starting opportunity detection loop (JSON-based, no RPC sync)...");
+    info!("Bot initialized successfully (monolithic mode)");
+    info!("Starting opportunity detection loop (direct RPC sync)...");
 
     // Statistics tracking
     let mut total_opportunities: u64 = 0;
@@ -149,39 +189,50 @@ async fn main() -> Result<()> {
         iteration += 1;
         total_scans += 1;
 
-        // Read shared pool state from JSON (replaces V3 RPC sync)
-        let shared_state = match SharedPoolState::read_from_file(&state_file) {
-            Ok(state) => state,
+        // Fetch current block number (1 RPC call — skip full sync if same block)
+        let current_block = match provider.get_block_number().await {
+            Ok(b) => b.as_u64(),
             Err(e) => {
                 if iteration % 100 == 0 {
-                    warn!("Failed to read state file: {} (data collector down?)", e);
+                    warn!("Failed to get block number: {}", e);
                 }
                 tokio::time::sleep(poll_interval).await;
                 continue;
             }
         };
 
-        // Skip if data hasn't advanced (same block = same opportunities)
-        if shared_state.block_number == last_block {
+        // Log status periodically (BEFORE block-change gate — fires every 100 iterations)
+        if iteration % 100 == 0 {
+            let (_, v3_count, min_block, max_block) = state_manager.combined_stats();
+            info!(
+                "Iteration {} | {} V3 pools | blocks {}-{} | {} opps found / {} scans | block {}",
+                iteration, v3_count, min_block, max_block, total_opportunities, total_scans, current_block
+            );
+        }
+
+        // Skip if same block (no new data — saves ~21 RPC calls per skip)
+        if current_block == last_block {
             tokio::time::sleep(poll_interval).await;
             continue;
         }
-        last_block = shared_state.block_number;
+        last_block = current_block;
 
-        // Check staleness (data collector may be dead)
-        if shared_state.is_stale(60) {
-            if iteration % 100 == 0 {
-                warn!("State file stale (>60s old) — data collector may be down");
+        // Sync all V3 pools concurrently (~21 RPC calls, ~400ms wall-clock)
+        let updated = v3_syncer.sync_known_pools_parallel(&v3_pools).await;
+        if !updated.is_empty() {
+            v3_pools = updated;
+            for pool in &v3_pools {
+                state_manager.update_v3_pool(pool.clone());
             }
+
+            // Log price snapshots (research — no RPC cost, just CSV writes)
+            if let Some(ref mut logger) = price_logger {
+                logger.log_prices(current_block, &v3_pools);
+            }
+        } else {
+            warn!("Parallel V3 sync returned empty — keeping previous state");
             tokio::time::sleep(poll_interval).await;
             continue;
-        }
-
-        // Update state manager from JSON (V3 pools)
-        for pool in shared_state.v3_pools.values() {
-            if let Ok(p) = pool.to_v3_pool_state() {
-                state_manager.update_v3_pool(p);
-            }
         }
 
         // Scan for opportunities
@@ -230,7 +281,7 @@ async fn main() -> Result<()> {
             for (rank, verified_opp) in ranked.iter().enumerate() {
                 let opp = &opportunities[verified_opp.original_index];
                 info!(
-                    "🎯 TRY #{}: {} - Buy {:?} Sell {:?} - ${:.2} (quoted_profit_raw={})",
+                    "TRY #{}: {} - Buy {:?} Sell {:?} - ${:.2} (quoted_profit_raw={})",
                     rank + 1,
                     opp.pair.symbol,
                     opp.buy_dex,
@@ -243,7 +294,7 @@ async fn main() -> Result<()> {
                     Ok(result) => {
                         if result.success {
                             info!(
-                                "✅ Trade complete: {} | Net profit: ${:.2} | Time: {}ms",
+                                "Trade complete: {} | Net profit: ${:.2} | Time: {}ms",
                                 result.opportunity,
                                 result.net_profit_usd,
                                 result.execution_time_ms
@@ -257,25 +308,25 @@ async fn main() -> Result<()> {
                             // This catches: buy succeeded but sell Quoter rejected (holding tokens).
                             if result.tx_hash.is_some() {
                                 error!(
-                                    "🚨 HALT: On-chain tx submitted but trade failed: {} | Error: {} | TX: {}",
+                                    "HALT: On-chain tx submitted but trade failed: {} | Error: {} | TX: {}",
                                     result.opportunity, error_msg,
                                     result.tx_hash.as_deref().unwrap_or("?")
                                 );
-                                error!("🚨 Capital committed — manual recovery needed. Stopping all trading.");
+                                error!("Capital committed — manual recovery needed. Stopping all trading.");
                                 break;
                             }
 
                             // No tx submitted = pre-trade rejection (zero capital risk)
                             if error_msg.contains("Quoter") || error_msg.contains("Gas price") {
                                 info!(
-                                    "⏭️ Quoter rejected #{} {} ({}), trying next...",
+                                    "Quoter rejected #{} {} ({}), trying next...",
                                     rank + 1, result.opportunity, error_msg
                                 );
                                 continue;
                             } else {
                                 // Unknown pre-trade failure — stop for safety
                                 warn!(
-                                    "❌ Trade failed: {} | Error: {}",
+                                    "Trade failed: {} | Error: {}",
                                     result.opportunity, error_msg
                                 );
                                 break;
@@ -288,15 +339,6 @@ async fn main() -> Result<()> {
                     }
                 }
             }
-        }
-
-        // Log status periodically
-        if iteration % 100 == 0 {
-            let (_, v3_count, min_block, max_block) = state_manager.combined_stats();
-            info!(
-                "📈 Iteration {} | {} V3 pools | blocks {}-{} | {} opps found / {} scans",
-                iteration, v3_count, min_block, max_block, total_opportunities, total_scans
-            );
         }
 
         tokio::time::sleep(poll_interval).await;

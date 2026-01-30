@@ -44,7 +44,7 @@ abigen!(
     r#"[{"inputs":[{"components":[{"internalType":"address","name":"tokenIn","type":"address"},{"internalType":"address","name":"tokenOut","type":"address"},{"internalType":"uint24","name":"fee","type":"uint24"},{"internalType":"address","name":"recipient","type":"address"},{"internalType":"uint256","name":"deadline","type":"uint256"},{"internalType":"uint256","name":"amountIn","type":"uint256"},{"internalType":"uint256","name":"amountOutMinimum","type":"uint256"},{"internalType":"uint160","name":"sqrtPriceLimitX96","type":"uint160"}],"internalType":"struct ISwapRouter.ExactInputSingleParams","name":"params","type":"tuple"}],"name":"exactInputSingle","outputs":[{"internalType":"uint256","name":"amountOut","type":"uint256"}],"stateMutability":"payable","type":"function"}]"#
 );
 
-// Uniswap V3 Quoter ABI (pre-trade simulation)
+// Uniswap V3 QuoterV1 ABI (pre-trade simulation)
 // quoteExactInputSingle simulates a swap and returns the expected output
 // Note: This is not a view function — it reverts internally after computing. Use .call() only.
 abigen!(
@@ -52,6 +52,13 @@ abigen!(
     r#"[
         function quoteExactInputSingle(address tokenIn, address tokenOut, uint24 fee, uint256 amountIn, uint160 sqrtPriceLimitX96) external returns (uint256 amountOut)
     ]"#
+);
+
+// SushiSwap V3 QuoterV2 ABI (different function signature from V1)
+// Takes a struct param instead of individual args; returns (amountOut, sqrtPriceX96After, initializedTicksCrossed, gasEstimate)
+abigen!(
+    IQuoterV2,
+    r#"[{"inputs":[{"components":[{"internalType":"address","name":"tokenIn","type":"address"},{"internalType":"address","name":"tokenOut","type":"address"},{"internalType":"uint256","name":"amountIn","type":"uint256"},{"internalType":"uint24","name":"fee","type":"uint24"},{"internalType":"uint160","name":"sqrtPriceLimitX96","type":"uint160"}],"internalType":"struct IQuoterV2.QuoteExactInputSingleParams","name":"params","type":"tuple"}],"name":"quoteExactInputSingle","outputs":[{"internalType":"uint256","name":"amountOut","type":"uint256"},{"internalType":"uint160","name":"sqrtPriceX96After","type":"uint160"},{"internalType":"uint32","name":"initializedTicksCrossed","type":"uint32"},{"internalType":"uint256","name":"gasEstimate","type":"uint256"}],"stateMutability":"nonpayable","type":"function"}]"#
 );
 
 // ERC20 ABI for token approvals
@@ -327,8 +334,9 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
         let profit_usd = self.wei_to_usd(profit_wei, pair_symbol);
 
         // Estimate gas cost (actual cost would require receipt analysis)
-        let gas_used_native = 0.001; // ~200k gas at 5 gwei = 0.001 MATIC
-        let gas_cost_usd = 0.50; // Estimated
+        // Polygon: ~400k gas for two V3 swaps, ~50 gwei avg = 0.02 MATIC = ~$0.01
+        let gas_used_native = 0.02; // ~400k gas at 50 gwei = 0.02 MATIC
+        let gas_cost_usd = 0.01; // ~$0.01 at MATIC ~$0.50
         let net_profit_usd = profit_usd - gas_cost_usd;
 
         let success = net_profit_usd > 0.0;
@@ -751,9 +759,13 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
             DexType::Uniswap | DexType::Quickswap => self.config.uniswap_router,
             DexType::Sushiswap => self.config.sushiswap_router,
             DexType::Apeswap => self.config.apeswap_router.unwrap_or(self.config.uniswap_router),
-            // V3 DEX types - use V3 router
+            // Uniswap V3 DEX types
             DexType::UniswapV3_001 | DexType::UniswapV3_005 | DexType::UniswapV3_030 | DexType::UniswapV3_100 => {
                 self.config.uniswap_v3_router.unwrap_or(self.config.uniswap_router)
+            }
+            // SushiSwap V3 DEX types (same ABI, different router address)
+            DexType::SushiV3_001 | DexType::SushiV3_005 | DexType::SushiV3_030 => {
+                self.config.sushiswap_v3_router.unwrap_or(self.config.sushiswap_router)
             }
         }
     }
@@ -825,29 +837,49 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
         amount_in: U256,
         expected_min_out: U256,
     ) -> Result<U256> {
-        let quoter_address = self.config.uniswap_v3_quoter
-            .ok_or_else(|| anyhow!("V3 Quoter address not configured (UNISWAP_V3_QUOTER)"))?;
         let fee = dex.v3_fee_tier()
             .ok_or_else(|| anyhow!("Not a V3 DEX type: {:?}", dex))?;
 
-        let quoter = IQuoter::new(quoter_address, self.provider.clone());
-
-        // Simulate the swap (read-only .call(), no gas)
-        let quoted_out = quoter
-            .quote_exact_input_single(
+        // Route to correct quoter based on DEX type
+        let quoted_out = if dex.is_sushi_v3() {
+            // SushiSwap V3: use QuoterV2 (struct param, tuple return)
+            let quoter_address = self.config.sushiswap_v3_quoter
+                .ok_or_else(|| anyhow!("SushiSwap V3 Quoter not configured (SUSHISWAP_V3_QUOTER)"))?;
+            let quoter = IQuoterV2::new(quoter_address, self.provider.clone());
+            let params = QuoteExactInputSingleParams {
                 token_in,
                 token_out,
-                fee,
                 amount_in,
-                U256::zero(), // sqrtPriceLimitX96 = 0 (no limit)
-            )
-            .call()
-            .await
-            .map_err(|e| anyhow!("V3 Quoter simulation failed: {} — pool may lack liquidity", e))?;
+                fee: fee.into(),
+                sqrt_price_limit_x96: U256::zero(),
+            };
+            let (amount_out, _, _, _) = quoter
+                .quote_exact_input_single(params)
+                .call()
+                .await
+                .map_err(|e| anyhow!("SushiV3 QuoterV2 simulation failed: {} — pool may lack liquidity", e))?;
+            amount_out
+        } else {
+            // Uniswap V3: use QuoterV1 (flat params, single return)
+            let quoter_address = self.config.uniswap_v3_quoter
+                .ok_or_else(|| anyhow!("V3 Quoter address not configured (UNISWAP_V3_QUOTER)"))?;
+            let quoter = IQuoter::new(quoter_address, self.provider.clone());
+            quoter
+                .quote_exact_input_single(
+                    token_in,
+                    token_out,
+                    fee,
+                    amount_in,
+                    U256::zero(), // sqrtPriceLimitX96 = 0 (no limit)
+                )
+                .call()
+                .await
+                .map_err(|e| anyhow!("V3 Quoter simulation failed: {} — pool may lack liquidity", e))?
+        };
 
         info!(
-            "V3 Quoter: {} in → {} out (expected min: {})",
-            amount_in, quoted_out, expected_min_out
+            "V3 Quoter ({:?}): {} in → {} out (expected min: {})",
+            dex, amount_in, quoted_out, expected_min_out
         );
 
         // Safety check: quoted output must meet our minimum

@@ -22,8 +22,11 @@ use tracing::{debug, info, warn};
 /// Minimum spread percentage to consider (covers fees)
 const MIN_SPREAD_PERCENT: f64 = 0.3;
 
-/// Estimated gas cost in USD for two swaps on Polygon
-const ESTIMATED_GAS_COST_USD: f64 = 0.50;
+/// Estimated gas cost in USD for two V3 swaps on Polygon
+/// Polygon gas: ~30-100 gwei, V3 swap ~200k gas, two swaps ~400k gas
+/// At 100 gwei: 400k * 100 * 1e-9 MATIC * $0.50/MATIC = ~$0.02
+/// Conservative: $0.05 to cover gas spikes
+const ESTIMATED_GAS_COST_USD: f64 = 0.05;
 
 /// V2 DEX fee percentage (Quickswap, Sushiswap, Apeswap)
 const V2_FEE_PERCENT: f64 = 0.30;
@@ -491,6 +494,9 @@ mod tests {
             uniswap_v3_factory: None,
             uniswap_v3_router: None,
             uniswap_v3_quoter: None,
+            sushiswap_v3_factory: None,
+            sushiswap_v3_router: None,
+            sushiswap_v3_quoter: None,
             pairs: vec![],
             poll_interval_ms: 1000,
             max_gas_price_gwei: 100,
@@ -499,6 +505,8 @@ mod tests {
             live_mode: false,
             pool_state_file: None,
             whitelist_file: None,
+            price_log_enabled: false,
+            price_log_dir: None,
         }
     }
 

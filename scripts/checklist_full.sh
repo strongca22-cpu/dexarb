@@ -5,6 +5,7 @@
 # Author: AI-Generated
 # Created: 2026-01-28
 # Modified: 2026-01-30 - V3 shared-data, Multicall3, whitelist, two-wallet architecture
+# Modified: 2026-01-30 - Monolithic architecture (direct RPC sync, no data collector dependency)
 #
 # Usage:
 #   ./scripts/checklist_full.sh
@@ -20,7 +21,7 @@ echo "#                                                              #"
 echo "#   PRE-\$100 DEPLOYMENT CHECKLIST - FULL VALIDATION           #"
 echo "#   Updated: 2026-01-30                                        #"
 echo "#                                                              #"
-echo "#   Architecture: V3 shared-data (JSON-based)                  #"
+echo "#   Architecture: V3 monolithic (direct RPC sync)                #"
 echo "#   Features: Multicall3 batch Quoter, whitelist v1.1,         #"
 echo "#             two-wallet, tax logging, HALT safety             #"
 echo "#   Config: .env.live (live bot), .env (data collector)        #"
@@ -30,8 +31,8 @@ echo ""
 echo "Date: $(date)"
 echo ""
 echo "Bot Architecture:"
-echo "  Data collector -> JSON state file -> Live bot"
-echo "  Multicall3 batch pre-screen -> Executor (Quoter + swap)"
+echo "  Live bot: direct RPC sync -> detect -> Multicall3 verify -> execute"
+echo "  Data collector: preserved for paper trading / research (optional)"
 echo "  Whitelist v1.1 strict enforcement (10 pools, 7 blacklisted)"
 echo ""
 
@@ -95,10 +96,10 @@ echo ""
 
 TOTAL_SECTIONS=$((SECTION1_PASS + SECTION2_PASS + SECTION3_PASS + SECTION4_PASS + SECTION5_10_PASS))
 
-printf "%-52s %s\n" "Section 1 (Infrastructure, state file, binaries):" $([ $SECTION1_PASS -eq 1 ] && echo "PASS" || echo "FAIL")
+printf "%-52s %s\n" "Section 1 (Infrastructure, whitelist, binaries):" $([ $SECTION1_PASS -eq 1 ] && echo "PASS" || echo "FAIL")
 printf "%-52s %s\n" "Section 2 (Contracts, Multicall3, whitelist pools):" $([ $SECTION2_PASS -eq 1 ] && echo "PASS" || echo "FAIL")
-printf "%-52s %s\n" "Section 3 (Config .env.live, V3, shared data):" $([ $SECTION3_PASS -eq 1 ] && echo "PASS" || echo "FAIL")
-printf "%-52s %s\n" "Section 4 (JSON state, whitelist integrity):" $([ $SECTION4_PASS -eq 1 ] && echo "PASS" || echo "FAIL")
+printf "%-52s %s\n" "Section 3 (Config .env.live, V3, monolithic):" $([ $SECTION3_PASS -eq 1 ] && echo "PASS" || echo "FAIL")
+printf "%-52s %s\n" "Section 4 (Whitelist integrity, data dir):" $([ $SECTION4_PASS -eq 1 ] && echo "PASS" || echo "FAIL")
 printf "%-52s %s\n" "Sections 5-10 (Execution, risk, finance, ops):" $([ $SECTION5_10_PASS -eq 1 ] && echo "PASS" || echo "FAIL")
 
 echo ""
@@ -117,7 +118,7 @@ if [ $TOTAL_SECTIONS -eq 5 ]; then
     echo "  System is ready for deployment."
     echo ""
     echo "  Architecture verified:"
-    echo "    - V3 shared-data (JSON pool state)"
+    echo "    - V3 monolithic (direct RPC sync)"
     echo "    - Multicall3 batch Quoter pre-screening"
     echo "    - Whitelist v1.1 strict enforcement"
     echo "    - Two-wallet architecture"

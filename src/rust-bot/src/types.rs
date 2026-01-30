@@ -34,21 +34,32 @@ pub enum DexType {
     UniswapV3_005, // Phase 2 - Uniswap V3 0.05% fee tier
     UniswapV3_030, // Phase 2 - Uniswap V3 0.30% fee tier
     UniswapV3_100, // Phase 2 - Uniswap V3 1.00% fee tier
+    SushiV3_001,   // SushiSwap V3 0.01% fee tier (cross-DEX arb)
+    SushiV3_005,   // SushiSwap V3 0.05% fee tier (cross-DEX arb)
+    SushiV3_030,   // SushiSwap V3 0.30% fee tier (cross-DEX arb)
 }
 
 impl DexType {
-    /// Returns true if this is a V3 DEX
+    /// Returns true if this is a V3 DEX (Uniswap or SushiSwap V3)
     pub fn is_v3(&self) -> bool {
-        matches!(self, DexType::UniswapV3_001 | DexType::UniswapV3_005 | DexType::UniswapV3_030 | DexType::UniswapV3_100)
+        matches!(self,
+            DexType::UniswapV3_001 | DexType::UniswapV3_005 | DexType::UniswapV3_030 | DexType::UniswapV3_100 |
+            DexType::SushiV3_001 | DexType::SushiV3_005 | DexType::SushiV3_030
+        )
+    }
+
+    /// Returns true if this is a SushiSwap V3 DEX (for quoter/router routing)
+    pub fn is_sushi_v3(&self) -> bool {
+        matches!(self, DexType::SushiV3_001 | DexType::SushiV3_005 | DexType::SushiV3_030)
     }
 
     /// Returns the fee in basis points for V3 pools
     pub fn v3_fee_bps(&self) -> Option<u32> {
         match self {
-            DexType::UniswapV3_001 => Some(1),    // 0.01% = 100 / 10000
-            DexType::UniswapV3_005 => Some(5),    // 0.05% = 500 / 10000
-            DexType::UniswapV3_030 => Some(30),   // 0.30% = 3000 / 10000
-            DexType::UniswapV3_100 => Some(100),  // 1.00% = 10000 / 10000
+            DexType::UniswapV3_001 | DexType::SushiV3_001 => Some(1),    // 0.01%
+            DexType::UniswapV3_005 | DexType::SushiV3_005 => Some(5),    // 0.05%
+            DexType::UniswapV3_030 | DexType::SushiV3_030 => Some(30),   // 0.30%
+            DexType::UniswapV3_100 => Some(100),  // 1.00%
             _ => None,
         }
     }
@@ -56,9 +67,9 @@ impl DexType {
     /// Get V3 fee tier (for factory queries)
     pub fn v3_fee_tier(&self) -> Option<u32> {
         match self {
-            DexType::UniswapV3_001 => Some(100),
-            DexType::UniswapV3_005 => Some(500),
-            DexType::UniswapV3_030 => Some(3000),
+            DexType::UniswapV3_001 | DexType::SushiV3_001 => Some(100),
+            DexType::UniswapV3_005 | DexType::SushiV3_005 => Some(500),
+            DexType::UniswapV3_030 | DexType::SushiV3_030 => Some(3000),
             DexType::UniswapV3_100 => Some(10000),
             _ => None,
         }
@@ -76,6 +87,9 @@ impl fmt::Display for DexType {
             DexType::UniswapV3_005 => write!(f, "UniswapV3_0.05%"),
             DexType::UniswapV3_030 => write!(f, "UniswapV3_0.30%"),
             DexType::UniswapV3_100 => write!(f, "UniswapV3_1.00%"),
+            DexType::SushiV3_001 => write!(f, "SushiV3_0.01%"),
+            DexType::SushiV3_005 => write!(f, "SushiV3_0.05%"),
+            DexType::SushiV3_030 => write!(f, "SushiV3_0.30%"),
         }
     }
 }
@@ -347,6 +361,11 @@ pub struct BotConfig {
     pub uniswap_v3_router: Option<Address>,
     pub uniswap_v3_quoter: Option<Address>,
 
+    // SushiSwap V3 addresses (cross-DEX arb - optional)
+    pub sushiswap_v3_factory: Option<Address>,
+    pub sushiswap_v3_router: Option<Address>,
+    pub sushiswap_v3_quoter: Option<Address>,
+
     // Trading pairs to monitor
     pub pairs: Vec<TradingPairConfig>,
 
@@ -368,4 +387,9 @@ pub struct BotConfig {
     // Pool whitelist/blacklist config file (Phase 1.1)
     // If set, only whitelisted pools participate in detection
     pub whitelist_file: Option<String>,
+
+    // Historical price logging (research)
+    // Logs V3 pool prices to CSV per block for offline analysis
+    pub price_log_enabled: bool,
+    pub price_log_dir: Option<String>,
 }

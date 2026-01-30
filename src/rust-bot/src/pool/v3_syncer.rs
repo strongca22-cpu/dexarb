@@ -56,12 +56,19 @@ abigen!(
     ]"#
 );
 
-/// V3 fee tiers to check for each pair
+/// Uniswap V3 fee tiers to check for each pair
 pub const V3_FEE_TIERS: [(u32, DexType); 4] = [
     (100, DexType::UniswapV3_001),   // 0.01% - stablecoin pairs (USDT/USDC, DAI/USDC)
     (500, DexType::UniswapV3_005),   // 0.05% - best for stable/correlated pairs
     (3000, DexType::UniswapV3_030),  // 0.30% - standard tier
     (10000, DexType::UniswapV3_100), // 1.00% - exotic pairs (filtered at sync/detect time)
+];
+
+/// SushiSwap V3 fee tiers (cross-DEX arb — identical ABI, different pools)
+pub const SUSHI_V3_FEE_TIERS: [(u32, DexType); 3] = [
+    (100, DexType::SushiV3_001),   // 0.01% - stablecoin pairs
+    (500, DexType::SushiV3_005),   // 0.05% - stable/correlated pairs
+    (3000, DexType::SushiV3_030),  // 0.30% - standard tier
 ];
 
 /// Syncs V3 pool state from blockchain

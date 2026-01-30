@@ -66,6 +66,17 @@ fn load_config_inner() -> Result<BotConfig> {
         .ok()
         .and_then(|s| Address::from_str(&s).ok());
 
+    // Load optional SushiSwap V3 addresses (cross-DEX arb)
+    let sushiswap_v3_factory = std::env::var("SUSHISWAP_V3_FACTORY")
+        .ok()
+        .and_then(|s| Address::from_str(&s).ok());
+    let sushiswap_v3_router = std::env::var("SUSHISWAP_V3_ROUTER")
+        .ok()
+        .and_then(|s| Address::from_str(&s).ok());
+    let sushiswap_v3_quoter = std::env::var("SUSHISWAP_V3_QUOTER")
+        .ok()
+        .and_then(|s| Address::from_str(&s).ok());
+
     Ok(BotConfig {
         rpc_url: std::env::var("RPC_URL")?,
         chain_id: std::env::var("CHAIN_ID")?.parse()?,
@@ -86,6 +97,10 @@ fn load_config_inner() -> Result<BotConfig> {
         uniswap_v3_factory,
         uniswap_v3_router,
         uniswap_v3_quoter,
+
+        sushiswap_v3_factory,
+        sushiswap_v3_router,
+        sushiswap_v3_quoter,
 
         pairs,
 
@@ -108,5 +123,11 @@ fn load_config_inner() -> Result<BotConfig> {
 
         // Pool whitelist/blacklist config (Phase 1.1)
         whitelist_file: std::env::var("WHITELIST_FILE").ok(),
+
+        // Historical price logging (research)
+        price_log_enabled: std::env::var("PRICE_LOG_ENABLED")
+            .map(|v| v.to_lowercase() == "true")
+            .unwrap_or(false),
+        price_log_dir: std::env::var("PRICE_LOG_DIR").ok(),
     })
 }

@@ -5,6 +5,7 @@
 # Author: AI-Generated
 # Created: 2026-01-28
 # Modified: 2026-01-30 - V3 shared-data, Multicall3, whitelist, two-wallet, no paper trading
+# Modified: 2026-01-30 - Monolithic architecture (data collector check demoted to RECOMMENDED)
 #
 # Usage:
 #   ./scripts/checklist_section5_10.sh
@@ -77,7 +78,7 @@ echo "============================================================"
 echo "  PRE-\$100 DEPLOYMENT CHECKLIST"
 echo "  Sections 5-10: Execution, Risk, Monitoring, Financial,"
 echo "                 Operational, Emergency"
-echo "  V3 shared-data | Multicall3 | Whitelist | Two-wallet"
+echo "  V3 monolithic | Multicall3 | Whitelist | Two-wallet"
 echo "============================================================"
 echo ""
 echo "Date: $(date)"
@@ -158,6 +159,13 @@ if grep -q "tx_hash" "$BOT_DIR/src/rust-bot/src/main.rs" 2>/dev/null; then
     important_check 0 "HALT on committed capital mechanism present"
 else
     important_check 1 "HALT mechanism not found in main.rs"
+fi
+
+# 5.9b Monolithic direct RPC sync in main.rs
+if grep -q "sync_known_pools_parallel" "$BOT_DIR/src/rust-bot/src/main.rs" 2>/dev/null; then
+    critical_check 0 "Monolithic direct RPC sync in main.rs"
+else
+    critical_check 1 "Monolithic sync missing — main.rs may still use JSON file reading"
 fi
 
 # 5.9 Slippage parameters in .env.live
@@ -253,23 +261,22 @@ echo "SECTION 7: MONITORING & ALERTS"
 echo "==========================================================="
 echo ""
 
-# 7.1 Data collector process running
+# 7.1 Data collector process (RECOMMENDED — monolithic bot syncs directly)
+# Data collector is only needed for paper trading / research, not live bot
 if pgrep -f "data-collector" >/dev/null 2>&1 || pgrep -f "data_collector" >/dev/null 2>&1; then
-    critical_check 0 "Data collector running"
+    info "Data collector running (paper trading / research)"
+    recommended_check 0 "Data collector running (optional for monolithic)"
 else
-    # Check tmux
-    if tmux list-panes -a -F "#{pane_current_command}" 2>/dev/null | grep -q "data"; then
-        critical_check 0 "Data collector running in tmux"
-    else
-        critical_check 1 "Data collector not running (state file will go stale)"
-    fi
+    info "Data collector not running (ok — live bot syncs directly via RPC)"
+    recommended_check 0 "Data collector not required for monolithic bot"
 fi
 
-# 7.2 Discord webhook configured
+# 7.2 Discord webhook configured (RECOMMENDED — alerts are nice-to-have)
 if grep -q "DISCORD_WEBHOOK=https://discord.com" "$ENV_LIVE" 2>/dev/null; then
-    important_check 0 "Discord webhook configured in .env.live"
+    recommended_check 0 "Discord webhook configured in .env.live"
 else
-    important_check 1 "Discord webhook not configured"
+    info "Discord webhook not in .env.live (paper trading only, via .env)"
+    recommended_check 0 "Discord webhook optional for live bot"
 fi
 
 # 7.3 Log directory exists

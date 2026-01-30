@@ -5,6 +5,7 @@
 # Author: AI-Generated
 # Created: 2026-01-28
 # Modified: 2026-01-30 - V3 shared-data architecture, whitelist verification, no PostgreSQL
+# Modified: 2026-01-30 - Monolithic architecture (state file checks demoted, whitelist-based pair coverage)
 #
 # Usage:
 #   ./scripts/checklist_section4.sh
@@ -60,47 +61,48 @@ echo ""
 echo "============================================================"
 echo "  PRE-\$100 DEPLOYMENT CHECKLIST"
 echo "  Section 4: Data Integrity"
-echo "  Shared-data architecture: JSON pool state + whitelist"
+echo "  Monolithic architecture: whitelist + data directory health"
 echo "============================================================"
 echo ""
 echo "Date: $(date)"
 echo ""
 
 # ============================================================
-# 4.1 Pool State JSON Integrity
+# 4.1 Pool State JSON (Paper Trading Only)
 # ============================================================
 echo "-----------------------------------------------------------"
-echo "4.1 POOL STATE JSON INTEGRITY"
+echo "4.1 POOL STATE JSON (paper trading / data collector only)"
 echo "-----------------------------------------------------------"
+echo "  (Monolithic live bot syncs directly via RPC — state file"
+echo "   is only used by data collector for paper trading)"
 
-# 4.1.1 State file exists and is valid JSON
+# 4.1.1 State file exists (RECOMMENDED — not needed for live bot)
 if [ -f "$STATE_FILE" ]; then
     STATE_SIZE=$(stat -c%s "$STATE_FILE")
     info "Pool state file: $(($STATE_SIZE/1024))KB"
     if python3 -c "import json; json.load(open('$STATE_FILE'))" 2>/dev/null; then
-        critical_check 0 "Pool state is valid JSON"
+        recommended_check 0 "Pool state is valid JSON (paper trading)"
     else
-        critical_check 1 "Pool state is INVALID JSON"
+        recommended_check 1 "Pool state is INVALID JSON"
     fi
 else
-    info "Pool state file: NOT FOUND"
-    critical_check 1 "Pool state file exists"
+    info "Pool state file: NOT FOUND (ok — live bot syncs directly)"
+    recommended_check 0 "Pool state file not required for monolithic bot"
 fi
 
-# 4.1.2 State file recently updated (data collector writing)
+# 4.1.2 State file freshness (RECOMMENDED — only matters for data collector)
 if [ -f "$STATE_FILE" ]; then
     STATE_AGE=$(( $(date +%s) - $(stat -c%Y "$STATE_FILE") ))
     info "Pool state age: $((STATE_AGE/60)) minutes"
     if [ "$STATE_AGE" -lt 120 ]; then
-        critical_check 0 "Pool state fresh (<2 min, data collector active)"
+        recommended_check 0 "Pool state fresh (<2 min, data collector active)"
     else
-        critical_check 1 "Pool state stale ($((STATE_AGE/60)) min — data collector down?)"
+        info "Pool state stale ($((STATE_AGE/60)) min) — data collector not running (expected for monolithic)"
+        recommended_check 0 "Pool state staleness not relevant for monolithic bot"
     fi
-else
-    critical_check 1 "Pool state freshness (file missing)"
 fi
 
-# 4.1.3 State has V3 pools with prices
+# 4.1.3 State has V3 pools (RECOMMENDED — informational only)
 if [ -f "$STATE_FILE" ]; then
     V3_STATS=$(python3 -c "
 import json
@@ -108,33 +110,12 @@ with open('$STATE_FILE') as f:
     data = json.load(f)
 v3 = data.get('v3_pools', {})
 block = data.get('block_number', 0)
-prices_ok = 0
-for k, p in v3.items():
-    price = p.get('price', 0)
-    if price and price > 0 and price < 1e15:
-        prices_ok += 1
-print(f'{len(v3)}|{prices_ok}|{block}')
-" 2>/dev/null || echo "0|0|0")
+print(f'{len(v3)}|{block}')
+" 2>/dev/null || echo "0|0")
 
     V3_TOTAL=$(echo "$V3_STATS" | cut -d'|' -f1)
-    V3_PRICED=$(echo "$V3_STATS" | cut -d'|' -f2)
-    BLOCK_NUM=$(echo "$V3_STATS" | cut -d'|' -f3)
-    info "V3 pools: $V3_TOTAL total, $V3_PRICED with valid prices"
-    info "Block number: $BLOCK_NUM"
-
-    if [ "$V3_TOTAL" -gt 0 ] && [ "$V3_PRICED" -gt 0 ]; then
-        critical_check 0 "V3 pools have price data ($V3_PRICED/$V3_TOTAL priced)"
-    else
-        critical_check 1 "V3 pools missing price data"
-    fi
-
-    if [ "$BLOCK_NUM" -gt 0 ]; then
-        important_check 0 "Block number tracked ($BLOCK_NUM)"
-    else
-        important_check 1 "Block number missing from state"
-    fi
-else
-    critical_check 1 "V3 pool data (file missing)"
+    BLOCK_NUM=$(echo "$V3_STATS" | cut -d'|' -f2)
+    info "V3 pools in state: $V3_TOTAL, block: $BLOCK_NUM"
 fi
 
 echo ""
@@ -173,41 +154,32 @@ print(data.get('config', {}).get('whitelist_enforcement', 'unknown'))
     fi
 fi
 
-# 4.2.3 Whitelisted pools appear in state file
-if [ -f "$STATE_FILE" ] && [ -f "$WHITELIST_FILE" ]; then
-    WL_IN_STATE=$(python3 -c "
+# 4.2.3 Whitelisted pools have valid addresses
+if [ -f "$WHITELIST_FILE" ]; then
+    WL_ADDR_CHECK=$(python3 -c "
 import json
-with open('$STATE_FILE') as f:
-    state = json.load(f)
 with open('$WHITELIST_FILE') as f:
     wl = json.load(f)
-v3_addrs = set()
-for k, p in state.get('v3_pools', {}).items():
-    addr = p.get('address', '').lower()
-    if addr:
-        v3_addrs.add(addr)
-wl_pools = wl.get('whitelist', {}).get('pools', [])
-found = 0
-total = 0
-for p in wl_pools:
-    addr = p.get('address', '').lower()
-    if addr:
-        total += 1
-        if addr in v3_addrs:
-            found += 1
-print(f'{found}|{total}')
+pools = wl.get('whitelist', {}).get('pools', [])
+active = [p for p in pools if p.get('status') == 'active']
+valid = 0
+for p in active:
+    addr = p.get('address', '')
+    if addr.startswith('0x') and len(addr) == 42:
+        valid += 1
+print(f'{valid}|{len(active)}')
 " 2>/dev/null || echo "0|0")
 
-    WL_FOUND=$(echo "$WL_IN_STATE" | cut -d'|' -f1)
-    WL_TOTAL=$(echo "$WL_IN_STATE" | cut -d'|' -f2)
-    info "Whitelisted pools in state: $WL_FOUND/$WL_TOTAL"
-    if [ "$WL_TOTAL" -gt 0 ] && [ "$WL_FOUND" -gt 0 ]; then
-        important_check 0 "$WL_FOUND/$WL_TOTAL whitelisted pools present in state"
+    WL_VALID=$(echo "$WL_ADDR_CHECK" | cut -d'|' -f1)
+    WL_TOTAL=$(echo "$WL_ADDR_CHECK" | cut -d'|' -f2)
+    info "Whitelisted pools with valid addresses: $WL_VALID/$WL_TOTAL"
+    if [ "$WL_TOTAL" -gt 0 ] && [ "$WL_VALID" -eq "$WL_TOTAL" ]; then
+        important_check 0 "All $WL_VALID whitelisted pools have valid addresses"
     else
-        important_check 1 "No whitelisted pools found in state data"
+        important_check 1 "Some whitelisted pools have invalid addresses ($WL_VALID/$WL_TOTAL)"
     fi
 else
-    important_check 1 "Whitelist-state cross-check (files missing)"
+    important_check 1 "Whitelist address check (file missing)"
 fi
 
 # 4.2.4 Liquidity thresholds configured
@@ -276,30 +248,27 @@ fi
 echo ""
 
 # ============================================================
-# 4.4 Trading Pair Coverage
+# 4.4 Trading Pair Coverage (Whitelist)
 # ============================================================
 echo "-----------------------------------------------------------"
-echo "4.4 TRADING PAIR COVERAGE IN STATE"
+echo "4.4 TRADING PAIR COVERAGE IN WHITELIST"
 echo "-----------------------------------------------------------"
 
-# Check which of the 7 configured pairs have V3 pool data
-if [ -f "$STATE_FILE" ]; then
+# Check which of the 7 configured pairs have active whitelist entries
+if [ -f "$WHITELIST_FILE" ]; then
     PAIR_COVERAGE=$(python3 -c "
 import json
-with open('$STATE_FILE') as f:
-    state = json.load(f)
-v3 = state.get('v3_pools', {})
-# Extract pair symbols from pool keys
-pairs_seen = set()
-for k in v3.keys():
-    # Keys are like 'WETH/USDC_UniV3_0.05%'
-    parts = k.split('_')
-    if parts:
-        pairs_seen.add(parts[0])
+with open('$WHITELIST_FILE') as f:
+    wl = json.load(f)
+pools = wl.get('whitelist', {}).get('pools', [])
+active_pairs = set()
+for p in pools:
+    if p.get('status') == 'active':
+        active_pairs.add(p.get('pair', ''))
 expected = ['WETH/USDC', 'WMATIC/USDC', 'WBTC/USDC', 'USDT/USDC', 'DAI/USDC', 'LINK/USDC', 'UNI/USDC']
 found = 0
 for p in expected:
-    if p in pairs_seen:
+    if p in active_pairs:
         found += 1
         print(f'FOUND: {p}')
     else:
@@ -314,12 +283,12 @@ print(f'TOTAL|{found}|{len(expected)}')
     done
 
     if [ "$FOUND_PAIRS" -ge 5 ]; then
-        important_check 0 "Trading pairs in state ($FOUND_PAIRS/$EXPECTED_PAIRS)"
+        important_check 0 "Trading pairs in whitelist ($FOUND_PAIRS/$EXPECTED_PAIRS)"
     else
-        important_check 1 "Only $FOUND_PAIRS/$EXPECTED_PAIRS pairs in state"
+        important_check 1 "Only $FOUND_PAIRS/$EXPECTED_PAIRS pairs in whitelist"
     fi
 else
-    important_check 1 "Pair coverage check (state file missing)"
+    important_check 1 "Pair coverage check (whitelist file missing)"
 fi
 
 echo ""

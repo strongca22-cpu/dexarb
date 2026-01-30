@@ -12,6 +12,7 @@ pub mod data_collector;
 pub mod filters;
 pub mod paper_trading;
 pub mod pool;
+pub mod price_logger;
 pub mod tax;
 pub mod types;
 

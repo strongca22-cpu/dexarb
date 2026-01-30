@@ -1,14 +1,13 @@
 # Next Steps - DEX Arbitrage Bot
 
-## Current Status: LIVE TEST COMPLETE — Architecture Gap Identified
+## Status: LIVE — Cross-DEX + Price Logging Active
 
 **Date:** 2026-01-30
-**Architecture:** Split process — data collector writes JSON, live bot reads JSON
-**Data collector:** V3-only whitelist sync (10 pools, parallel refresh, ~21 RPC/cycle)
-**Live bot:** Reads JSON, detects cross-fee-tier arb, Multicall3 batch Quoter pre-screen
-**Whitelist v1.1:** 10 active pools, 7 blacklisted, strict enforcement
-**All processes:** STOPPED (2026-01-30)
-**Checklist:** ALL 5 SECTIONS PASS (`scripts/checklist_full.sh`)
+**Live sessions:** `livebot` (3s poll), `botwatch` (auto-kill), `botstatus` (Discord/30min)
+**Pools:** 12 active (10 UniswapV3 + 2 SushiswapV3), cross-DEX scanning enabled
+**Gas estimate:** $0.05 (detector), $0.01 (executor) — Polygon-accurate
+**Price logging:** ON — `data/price_history/prices_YYYYMMDD.csv` (~58 MB/day, ~1.7 GB/month)
+**Build:** 43/43 tests pass, clean release build
 
 ---
 
@@ -23,33 +22,22 @@
 
 ---
 
-## Live Test Results (2026-01-30)
+## Monolithic Architecture (Implemented 2026-01-30)
 
-- Live bot started, connected, loaded 10 V3 pools from JSON
-- Detection loop running (~3s poll), no opportunities detected
-- Zero errors, zero capital spent
-- Bot watch script (`bot_watch.sh`) confirmed functional
-- **Observation:** No exploitable spreads in ~15 min of monitoring — normal for efficient markets
+Previous split architecture (data collector → JSON file → live bot) had ~5s average latency.
+Monolithic bot syncs pools directly via RPC, eliminating file I/O indirection:
 
----
-
-## Architecture Gap: ~5s Average Latency
-
-The split architecture adds unnecessary lag for live trading:
-
-| Step | Split (current) | Monolithic (proposed) |
-|------|-----------------|----------------------|
-| Block produced | 0ms | 0ms |
-| RPC sync | 200ms | 400ms (10 pools concurrent) |
+| Step | Split (old) | Monolithic (current) |
+|------|-------------|---------------------|
+| Fetch block | 0ms | ~50ms |
+| RPC sync | 200ms | 400ms (12 pools concurrent) |
 | File write → read | 0-10s (poll alignment) | 0ms (in-memory) |
-| Detect opportunity | ~0ms | ~0ms |
-| Quoter verify | 400ms | 400ms |
-| Execute trade | 200ms | 200ms |
+| Detect + Quoter + Execute | ~600ms | ~600ms |
 | **Total** | **0.8-10.8s (avg ~5.8s)** | **~1.0s** |
 
-On Polygon's 2s blocks, 5s average lag = 2-3 blocks stale. A monolithic bot that syncs + detects + executes in one process eliminates the file I/O indirection and guarantees ~1s latency every cycle.
+**Main loop:** fetch block → skip if same → `sync_known_pools_parallel()` → price log → detect → Multicall3 verify → execute
 
-**Recommendation:** Merge data collector sync logic into the live bot. The existing `V3PoolSyncer` methods (`sync_pool_by_address`, `sync_known_pools_parallel`) already support this — the live bot just needs to call them directly instead of reading JSON. Data collector remains useful for paper trading and monitoring but is not on the critical trading path.
+**RPC budget:** 1 block call/iteration + 25 sync calls on new block (12 pools × 2 + 1). At 3s poll with ~50% same-block skips: ~6 calls/s avg = ~15M/month (Alchemy free tier: 22.2M).
 
 ---
 
@@ -65,26 +53,111 @@ On Polygon's 2s blocks, 5s average lag = 2-3 blocks stale. A monolithic bot that
 | Phase 2.1 Multicall3 | 2026-01-29 | Batch Quoter pre-screen — verify all opps in 1 RPC call, 7 unit tests |
 | V3-only data collector | 2026-01-30 | Removed V2 syncing, whitelist-driven pool sync, 60% RPC reduction |
 | Deployment checklist | 2026-01-30 | 6 shell scripts (~102 checks), all 5 sections pass |
-| Live test | 2026-01-30 | Bot running, zero errors, zero capital spent |
+| Live test (split) | 2026-01-30 | Bot running, zero errors, zero capital spent |
+| Monolithic live bot | 2026-01-30 | Direct RPC sync, ~1s cycle, observability fix |
+| Checklist + monitoring | 2026-01-30 | Checklist updated for monolithic, Discord status, bot watch |
+| SushiSwap V3 recon | 2026-01-30 | Factory verified on-chain, 12 pools found, 2 promoted to active |
+| SushiSwap V3 integration | 2026-01-30 | Cross-DEX: DexType variants, dual-quoter (V1/V2), executor routing, whitelist v1.2 |
+| Gas estimate fix | 2026-01-30 | Detector $0.50→$0.05, executor $0.50→$0.01 (Polygon-accurate) |
+| Historical price logging | 2026-01-30 | `PriceLogger` module — daily CSV rotation, ~240 rows/min, zero RPC cost |
 
 ---
 
-## Remaining Tasks
+## Active Whitelist (v1.2)
 
-### Priority 1: Monolithic Live Bot
-Merge sync + detect + execute into one process to eliminate ~5s file-polling lag. Reuse existing `V3PoolSyncer` methods. Data collector preserved for monitoring/paper trading.
+12 active pools across 2 DEXes:
 
-### Priority 2: Observability Fix
-Move status log in `main.rs` before the same-block `continue` so it fires every 100 iterations regardless of block state. Currently the `iteration % 100` check is gated behind block-change, causing silent operation for extended periods.
+| DEX | Pair | Fee | Status |
+|-----|------|-----|--------|
+| UniswapV3 | WETH/USDC | 0.05% | active |
+| UniswapV3 | WETH/USDC | 0.30% | active |
+| UniswapV3 | WMATIC/USDC | 0.05% | active |
+| UniswapV3 | WBTC/USDC | 0.05% | active |
+| UniswapV3 | USDT/USDC | 0.05% | active |
+| UniswapV3 | USDT/USDC | 0.30% | active |
+| UniswapV3 | USDT/USDC | 0.01% | active |
+| UniswapV3 | DAI/USDC | 0.05% | active |
+| UniswapV3 | DAI/USDC | 0.01% | active |
+| UniswapV3 | LINK/USDC | 0.30% | active |
+| SushiswapV3 | USDT/USDC | 0.01% | active |
+| SushiswapV3 | WETH/USDC | 0.30% | active |
 
-### Priority 3: Poll Interval Alignment
-If keeping split architecture, set live bot `POLL_INTERVAL_MS` to match data collector (10000ms) to eliminate wasted file reads. Currently live bot polls at 3s but data updates at 10s — 70% of reads are redundant.
+**SushiSwap V3 Contracts (Polygon):**
 
-### Deferred
-- Phase 1.3: Pool quality scoring (dynamic opportunity ranking)
-- Phase 2.2: Adaptive batch sizing (marginal gain with 10-pool whitelist)
-- Quoter architecture Options 2/3 (periodic pre-validation, atomic flash loan arb)
-- V2 price calculation fix (V2 not in use)
+| Contract | Address |
+|----------|---------|
+| Factory | `0x917933899c6a5F8E37F31E19f92CdBFF7e8FF0e2` |
+| SwapRouter | `0x0aF89E1620b96170e2a9D0b68fEebb767eD044c3` |
+| QuoterV2 | `0xb1E835Dc2785b52265711e17fCCb0fd018226a6e` |
+
+---
+
+## Roadmap — Priority Order
+
+### Tier 1: Highest Impact (addresses 0-opportunity problem)
+
+**P1: Atomic Execution via Custom Smart Contract**
+- Execute both swaps in one atomic tx — if second leg fails or profit < threshold, entire tx reverts
+- Eliminates leg risk (the $500 incident class), enables flash loans (borrow → swap → swap → repay)
+- Complexity: High (Solidity contract + deployment + testing)
+
+**P2: V2 ↔ V3 Cross-Protocol Arbitrage**
+- V2 pools (QuickSwap, SushiSwap V2) use constant-product pricing, update differently from V3
+- Price divergence between V2 and V3 likely larger and more frequent than V3↔V3
+- Needs: re-enable V2 pool syncing, fix price format incompatibility (`detector.rs:104`), V2↔V3 comparison
+- V2 0.3% fee → V2↔V3_0.05% round-trip = 0.35%, but divergence should be larger
+- Complexity: Medium — **NOTE:** previously explored, hit issues; may need investigation
+- Impact: Potentially highest — V2/V3 drift is a well-known arb source
+
+**P3: QuickSwap V3 (Algebra Protocol) — Third DEX**
+- QuickSwap uses Algebra V3 on Polygon — dynamic fees (not fixed tiers), different ABI
+- Creates 3-way cross-DEX grid: UniV3 ↔ SushiV3 ↔ QuickV3
+- More DEX pairs = exponentially more comparison combinations
+- Complexity: Medium-High (different ABI, dynamic fee handling)
+
+**P4: Triangular Arbitrage (Multi-Hop Routes)**
+- A→B→C→A across three pools (e.g., USDC→WETH→WMATIC→USDC)
+- Finds circular arb that two-pool scanning misses entirely
+- Complexity: High (route enumeration, multi-leg execution)
+
+### Tier 2: Medium Impact (improve detection quality & speed)
+
+**P5: Dynamic Trade Sizing Based on Liquidity Depth**
+- Currently uses fixed `max_trade_size_usd`
+- Quoter probes at multiple sizes to find optimal trade amount per opportunity
+- Complexity: Medium
+
+**P6: Websocket Block Subscription (Latency Reduction)**
+- Switch from polling at `poll_interval_ms` to `eth_subscribe("newHeads")`
+- Detect new blocks instantly vs up to 3s latency (may miss blocks at 2s Polygon block time)
+- Complexity: Low (ethers-rs supports natively)
+
+**P7: Private Transaction Submission (MEV Protection)**
+- Send via Flashbots Protect or Polygon private mempool (e.g., Marlin)
+- Prevents sandwich attacks on bot's trades
+- Complexity: Low-Medium — defensive only
+
+### Tier 3: Operational Quality
+
+**P8: Automatic Whitelist Refresh**
+- Periodically re-run Quoter depth probes on all pools, auto-promote/demote based on liquidity
+- Complexity: Medium
+
+**P9: Backtesting on Historical Blocks**
+- Replay historical blocks through detector to validate strategy edge
+- Use price logger data to analyze: when do spreads appear? Which pairs? What time of day?
+- Critical diagnostic: if historical analysis shows zero opportunities with perfect execution, the strategy needs fundamental changes
+- Complexity: Medium
+
+### Recommended Priority
+
+| # | Item | Rationale |
+|---|------|-----------|
+| 1 | Analyze price log data (P9) | Data is now accumulating — answer whether opportunities exist at all |
+| 2 | Atomic smart contract (P1) | Eliminates leg risk, enables flash loans, foundational |
+| 3 | V2↔V3 cross-protocol (P2) | Largest untapped divergence source (needs investigation of prior issues) |
+| 4 | QuickSwap V3 (P3) | Third DEX adds many comparison pairs |
+| 5 | Websocket subscription (P6) | Low effort, reduces latency to near-zero |
 
 ---
 
@@ -99,26 +172,33 @@ Both incidents led to architectural improvements (Quoter pre-check, whitelist fi
 
 ---
 
+## Disk Budget (Price Logging)
+
+- ~175 bytes/row, 12 pools, ~20 blocks/min = ~240 rows/min
+- **1 day:** ~58 MB
+- **1 month:** ~1.7 GB
+- **Disk free:** ~20 GB = ~11 months runway
+- Consider 90-day retention or gzip compression if space becomes tight
+
+---
+
 ## Commands
 
 ```bash
 # Build
 source ~/.cargo/env && cd ~/bots/dexarb/src/rust-bot && cargo build --release
 
-# Start data collector
-tmux new-session -d -s datacollector "cd ~/bots/dexarb/src/rust-bot && ./target/release/data-collector"
-
-# Start live bot
+# Start live bot (monolithic — no data collector needed)
 tmux new-session -d -s livebot "cd ~/bots/dexarb/src/rust-bot && RUST_LOG=dexarb_bot=info ./target/release/dexarb-bot > ~/bots/dexarb/data/livebot.log 2>&1"
 
 # Start bot watch (kills livebot on first trade)
 tmux new-session -d -s botwatch "bash ~/bots/dexarb/scripts/bot_watch.sh"
 
-# Pre-deployment checklist
-bash ~/bots/dexarb/scripts/checklist_full.sh
+# Discord status (30 min, 10 min initial delay)
+tmux new-session -d -s botstatus "sleep 600 && bash ~/bots/dexarb/scripts/bot_status_discord.sh --loop"
 
-# Pool verification
-python3 ~/bots/dexarb/scripts/verify_whitelist.py
+# Checklist
+bash ~/bots/dexarb/scripts/checklist_full.sh
 ```
 
 ---
@@ -127,14 +207,19 @@ python3 ~/bots/dexarb/scripts/verify_whitelist.py
 
 | File | Purpose |
 |------|---------|
-| `.env` | Data collector config (V3-only, 10s poll) |
-| `.env.live` | Live bot config (3s poll, LIVE_MODE=true) |
-| `config/pools_whitelist.json` | 10 active + 7 blacklisted V3 pools |
-| `data/pool_state_phase1.json` | Shared state file (data collector → live bot) |
-| `scripts/checklist_full.sh` | Automated deployment checklist (5 sections) |
-| `scripts/bot_watch.sh` | Kill live bot on first trade attempt |
-| `scripts/verify_whitelist.py` | On-chain pool verification + depth matrix |
+| `src/main.rs` | Monolithic live bot (sync + detect + price log + execute) |
+| `src/price_logger.rs` | Historical price CSV logger (daily rotation) |
+| `src/arbitrage/detector.rs` | Opportunity detection, gas estimate ($0.05) |
+| `src/arbitrage/executor.rs` | Trade execution, dual-router (Uni/Sushi), gas logging ($0.01) |
+| `src/arbitrage/multicall_quoter.rs` | Batch Quoter pre-screen, dual-quoter (V1/V2) |
+| `.env.live` | Live bot config (3s poll, LIVE_MODE=true, PRICE_LOG_ENABLED=true) |
+| `config/pools_whitelist.json` | 12 active V3 pools (10 Uni + 2 Sushi), whitelist v1.2 |
+| `scripts/bot_watch.sh` | Auto-kill on first trade |
+| `scripts/bot_status_discord.sh` | Discord status report (30 min loop) |
+| `scripts/checklist_full.sh` | Deployment checklist (5 sections) |
+| `scripts/verify_whitelist.py` | Dollar-value Quoter matrix, dual-quoter support |
+| `data/price_history/` | Price log CSV directory (~58 MB/day) |
 
 ---
 
-*Last updated: 2026-01-30 — Live test complete, architecture gap identified, all processes stopped*
+*Last updated: 2026-01-30 — Live cross-DEX (12 pools), gas fix, price logging active, analyzing data next*

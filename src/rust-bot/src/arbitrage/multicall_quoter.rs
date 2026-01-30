@@ -12,11 +12,15 @@
 //! We decode the first 32 bytes as `uint256 amountOut`. Real failures are
 //! distinguished by empty returnData or the Error(string) selector 0x08c379a2.
 //!
+//! Cross-DEX support: Routes Uniswap V3 legs to QuoterV1 and SushiSwap V3
+//! legs to QuoterV2. Both revert-return amountOut as the first 32 bytes.
+//! Multicall3 aggregate3 supports mixed target addresses per sub-call.
+//!
 //! Author: AI-Generated
 //! Created: 2026-01-29
-//! Modified: 2026-01-29
+//! Modified: 2026-01-30 - Cross-DEX: dual-quoter (V1 for Uni, V2 for Sushi)
 
-use crate::types::{ArbitrageOpportunity, BotConfig};
+use crate::types::{ArbitrageOpportunity, BotConfig, DexType};
 use anyhow::{anyhow, Context, Result};
 use ethers::abi::{self, ParamType, Token};
 use ethers::prelude::*;
@@ -29,7 +33,12 @@ const MULTICALL3_ADDRESS: &str = "0xcA11bde05977b3631167028862bE2a173976CA11";
 
 /// QuoterV1 function selector: quoteExactInputSingle(address,address,uint24,uint256,uint160)
 /// keccak256("quoteExactInputSingle(address,address,uint24,uint256,uint160)")[..4]
-const QUOTER_SELECTOR: [u8; 4] = [0xf7, 0x72, 0x9d, 0x43];
+const QUOTER_V1_SELECTOR: [u8; 4] = [0xf7, 0x72, 0x9d, 0x43];
+
+/// QuoterV2 function selector: quoteExactInputSingle((address,address,uint256,uint24,uint160))
+/// keccak256("quoteExactInputSingle((address,address,uint256,uint24,uint160))")[..4]
+/// Note: V2 wraps params in a tuple struct — different selector and param order from V1.
+const QUOTER_V2_SELECTOR: [u8; 4] = [0xc6, 0xa5, 0x02, 0x6a];
 
 /// Multicall3 aggregate3 function selector: aggregate3((address,bool,bytes)[])
 /// keccak256("aggregate3((address,bool,bytes)[])")[..4]
@@ -76,34 +85,50 @@ impl VerifiedOpportunity {
     }
 }
 
-/// Batch Quoter using Multicall3 for pre-screening opportunities
+/// Batch Quoter using Multicall3 for pre-screening opportunities.
+/// Supports dual-quoter: QuoterV1 for Uniswap V3, QuoterV2 for SushiSwap V3.
 pub struct MulticallQuoter<M: Middleware> {
     provider: Arc<M>,
     multicall_address: Address,
-    quoter_address: Address,
+    uniswap_quoter_address: Address,
+    sushiswap_quoter_address: Option<Address>,
 }
 
 impl<M: Middleware + 'static> MulticallQuoter<M> {
-    /// Create a new MulticallQuoter using the Quoter address from config
+    /// Create a new MulticallQuoter using Quoter addresses from config.
+    /// Uniswap V3 QuoterV1 is required; SushiSwap V3 QuoterV2 is optional.
     pub fn new(provider: Arc<M>, config: &BotConfig) -> Result<Self> {
         let multicall_address: Address = MULTICALL3_ADDRESS
             .parse()
             .context("Invalid Multicall3 address constant")?;
 
-        let quoter_address = config
+        let uniswap_quoter_address = config
             .uniswap_v3_quoter
             .ok_or_else(|| anyhow!("UNISWAP_V3_QUOTER not configured — required for Multicall batch verify"))?;
 
+        let sushiswap_quoter_address = config.sushiswap_v3_quoter;
+
         info!(
-            "MulticallQuoter initialized: Multicall3={:?}, Quoter={:?}",
-            multicall_address, quoter_address
+            "MulticallQuoter initialized: Multicall3={:?}, UniQuoter={:?}, SushiQuoter={:?}",
+            multicall_address, uniswap_quoter_address, sushiswap_quoter_address
         );
 
         Ok(Self {
             provider,
             multicall_address,
-            quoter_address,
+            uniswap_quoter_address,
+            sushiswap_quoter_address,
         })
+    }
+
+    /// Get the correct quoter address for a DexType.
+    /// SushiSwap V3 → SushiSwap QuoterV2; all else → Uniswap QuoterV1.
+    fn quoter_for_dex(&self, dex: DexType) -> Address {
+        if dex.is_sushi_v3() {
+            self.sushiswap_quoter_address.unwrap_or(self.uniswap_quoter_address)
+        } else {
+            self.uniswap_quoter_address
+        }
     }
 
     /// Batch verify all opportunities with a single RPC call.
@@ -111,6 +136,9 @@ impl<M: Middleware + 'static> MulticallQuoter<M> {
     /// For each opportunity, encodes 2 Quoter sub-calls (buy leg + sell leg)
     /// into a Multicall3 `aggregate3` batch. Returns verification results
     /// in the same order as the input opportunities.
+    ///
+    /// Cross-DEX: routes each leg to the correct quoter contract (V1 or V2)
+    /// based on the leg's DexType. Multicall3 supports mixed target addresses.
     ///
     /// The sell leg uses an estimated buy output (conservative 95% haircut)
     /// since we don't know the actual buy output until execution.
@@ -124,7 +152,8 @@ impl<M: Middleware + 'static> MulticallQuoter<M> {
         }
 
         // Build all sub-calls: 2 per opportunity (buy leg + sell leg)
-        let mut sub_calls: Vec<Vec<u8>> = Vec::with_capacity(opportunities.len() * 2);
+        // Each sub-call is (target_address, encoded_calldata)
+        let mut sub_calls: Vec<(Address, Vec<u8>)> = Vec::with_capacity(opportunities.len() * 2);
 
         for opp in opportunities {
             let buy_fee = opp
@@ -137,7 +166,9 @@ impl<M: Middleware + 'static> MulticallQuoter<M> {
                 .ok_or_else(|| anyhow!("Sell DEX {:?} is not V3", opp.sell_dex))?;
 
             // Buy leg: token0 → token1 on buy pool
-            let buy_call = Self::encode_quoter_call(
+            let buy_quoter = self.quoter_for_dex(opp.buy_dex);
+            let buy_call = Self::encode_quoter_for_dex(
+                opp.buy_dex,
                 opp.pair.token0,
                 opp.pair.token1,
                 buy_fee,
@@ -146,16 +177,18 @@ impl<M: Middleware + 'static> MulticallQuoter<M> {
 
             // Sell leg: token1 → token0 on sell pool
             // Use estimated buy output since we don't have actual yet
+            let sell_quoter = self.quoter_for_dex(opp.sell_dex);
             let estimated_buy_out = Self::estimate_buy_output(opp);
-            let sell_call = Self::encode_quoter_call(
+            let sell_call = Self::encode_quoter_for_dex(
+                opp.sell_dex,
                 opp.pair.token1,
                 opp.pair.token0,
                 sell_fee,
                 estimated_buy_out,
             );
 
-            sub_calls.push(buy_call);
-            sub_calls.push(sell_call);
+            sub_calls.push((buy_quoter, buy_call));
+            sub_calls.push((sell_quoter, sell_call));
         }
 
         let num_subcalls = sub_calls.len();
@@ -166,7 +199,7 @@ impl<M: Middleware + 'static> MulticallQuoter<M> {
         );
 
         // Build Multicall3 aggregate3 calldata
-        let calldata = self.build_aggregate3_calldata(&sub_calls);
+        let calldata = Self::build_aggregate3_calldata(&sub_calls);
 
         // Execute single eth_call to Multicall3
         let tx = TransactionRequest::new()
@@ -259,19 +292,35 @@ impl<M: Middleware + 'static> MulticallQuoter<M> {
         Ok(verified)
     }
 
-    /// Encode a QuoterV1 `quoteExactInputSingle` call.
+    /// Route to the correct quoter encoding based on DexType.
+    /// SushiSwap V3 → QuoterV2 (tuple struct param), all else → QuoterV1 (flat params).
+    fn encode_quoter_for_dex(
+        dex: DexType,
+        token_in: Address,
+        token_out: Address,
+        fee: u32,
+        amount_in: U256,
+    ) -> Vec<u8> {
+        if dex.is_sushi_v3() {
+            Self::encode_quoter_v2_call(token_in, token_out, fee, amount_in)
+        } else {
+            Self::encode_quoter_v1_call(token_in, token_out, fee, amount_in)
+        }
+    }
+
+    /// Encode a QuoterV1 `quoteExactInputSingle` call (Uniswap V3).
     ///
     /// Selector: 0xf7729d43
     /// Params: (address tokenIn, address tokenOut, uint24 fee, uint256 amountIn, uint160 sqrtPriceLimitX96)
     /// sqrtPriceLimitX96 = 0 (no price limit)
-    fn encode_quoter_call(
+    fn encode_quoter_v1_call(
         token_in: Address,
         token_out: Address,
         fee: u32,
         amount_in: U256,
     ) -> Vec<u8> {
         let mut data = Vec::with_capacity(164); // 4 selector + 5×32 params
-        data.extend_from_slice(&QUOTER_SELECTOR);
+        data.extend_from_slice(&QUOTER_V1_SELECTOR);
 
         // ABI-encode 5 parameters as 32-byte words
         let encoded = abi::encode(&[
@@ -286,17 +335,49 @@ impl<M: Middleware + 'static> MulticallQuoter<M> {
         data
     }
 
-    /// Build Multicall3 `aggregate3` calldata from a list of encoded sub-calls.
+    /// Encode a QuoterV2 `quoteExactInputSingle` call (SushiSwap V3).
     ///
-    /// Each sub-call is wrapped as: (target: quoter_address, allowFailure: true, callData: bytes)
+    /// Selector: 0xc6a5026a
+    /// Param: tuple (address tokenIn, address tokenOut, uint256 amountIn, uint24 fee, uint160 sqrtPriceLimitX96)
+    /// Note different param order from V1: amountIn comes before fee in V2.
+    /// sqrtPriceLimitX96 = 0 (no price limit)
+    ///
+    /// Return: (uint256 amountOut, uint160 sqrtPriceX96After, uint32 initializedTicksCrossed, uint256 gasEstimate)
+    /// First 32 bytes of returnData = amountOut (same as V1), so decode_quoter_result works for both.
+    fn encode_quoter_v2_call(
+        token_in: Address,
+        token_out: Address,
+        fee: u32,
+        amount_in: U256,
+    ) -> Vec<u8> {
+        let mut data = Vec::with_capacity(164); // 4 selector + 5×32 params (encoded as tuple)
+        data.extend_from_slice(&QUOTER_V2_SELECTOR);
+
+        // ABI-encode as a single tuple parameter (note: order differs from V1)
+        let encoded = abi::encode(&[Token::Tuple(vec![
+            Token::Address(token_in),
+            Token::Address(token_out),
+            Token::Uint(amount_in),            // amountIn before fee in V2
+            Token::Uint(U256::from(fee)),
+            Token::Uint(U256::zero()),         // sqrtPriceLimitX96 = 0
+        ])]);
+        data.extend_from_slice(&encoded);
+
+        data
+    }
+
+    /// Build Multicall3 `aggregate3` calldata from a list of (target, calldata) pairs.
+    ///
+    /// Each sub-call is wrapped as: (target: address, allowFailure: true, callData: bytes)
     /// The aggregate3 function takes a single parameter: an array of Call3 structs.
-    fn build_aggregate3_calldata(&self, sub_calls: &[Vec<u8>]) -> Bytes {
+    /// Cross-DEX: each sub-call can target a different quoter contract.
+    fn build_aggregate3_calldata(sub_calls: &[(Address, Vec<u8>)]) -> Bytes {
         let calls: Vec<Token> = sub_calls
             .iter()
-            .map(|call_data| {
+            .map(|(target, call_data)| {
                 Token::Tuple(vec![
-                    Token::Address(self.quoter_address),
-                    Token::Bool(true), // allowFailure — required for QuoterV1 revert pattern
+                    Token::Address(*target),
+                    Token::Bool(true), // allowFailure — required for Quoter revert pattern
                     Token::Bytes(call_data.clone()),
                 ])
             })
@@ -432,7 +513,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_encode_quoter_call() {
+    fn test_encode_quoter_v1_call() {
         let token_in: Address = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
             .parse()
             .unwrap(); // USDC
@@ -443,14 +524,37 @@ mod tests {
         let fee = 500u32; // 0.05%
         let amount_in = U256::from(1_000_000u64); // 1 USDC (6 decimals)
 
-        let encoded = MulticallQuoter::<Provider<Ws>>::encode_quoter_call(
+        let encoded = MulticallQuoter::<Provider<Ws>>::encode_quoter_v1_call(
             token_in, token_out, fee, amount_in,
         );
 
         // Should be 4 (selector) + 5*32 (params) = 164 bytes
         assert_eq!(encoded.len(), 164);
         // First 4 bytes = QuoterV1 selector
-        assert_eq!(&encoded[..4], &QUOTER_SELECTOR);
+        assert_eq!(&encoded[..4], &QUOTER_V1_SELECTOR);
+    }
+
+    #[test]
+    fn test_encode_quoter_v2_call() {
+        let token_in: Address = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+            .parse()
+            .unwrap(); // USDC
+        let token_out: Address = "0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619"
+            .parse()
+            .unwrap(); // WETH on Polygon
+
+        let fee = 500u32; // 0.05%
+        let amount_in = U256::from(1_000_000u64); // 1 USDC (6 decimals)
+
+        let encoded = MulticallQuoter::<Provider<Ws>>::encode_quoter_v2_call(
+            token_in, token_out, fee, amount_in,
+        );
+
+        // First 4 bytes = QuoterV2 selector
+        assert_eq!(&encoded[..4], &QUOTER_V2_SELECTOR);
+        // V2 encodes params as a tuple — different from V1 flat params
+        // but still produces valid ABI-encoded calldata
+        assert!(encoded.len() > 4);
     }
 
     #[test]
