@@ -1,7 +1,7 @@
 {
-  "version": "1.3",
-  "last_updated": "2026-01-30T08:30:00Z",
-  "changelog": "v1.3: QuickSwap V3 (Algebra) integration. Added 5 QuickSwap pools to whitelist (17 total). LINK/USDC blacklisted (98% impact). fee_tier=0 is Algebra sentinel (dynamic fees, single pool per pair). ArbExecutorV2 deployed with Algebra routing support.",
+  "version": "1.4",
+  "last_updated": "2026-01-30T21:51:00Z",
+  "changelog": "v1.4: V2 pool assessment for V2↔V3 cross-protocol arb. 7 V2 pools whitelisted (v2_ready), 2 marginal V2 pools in observation, 3 dead V2 pools blacklisted. Verified on-chain via verify_v2_pools.py (block 82344927). Total: 16 active V3 + 7 v2_ready + 2 v2_observation.",
   "config": {
     "default_min_liquidity": 1000000000,
     "whitelist_enforcement": "strict",
@@ -198,6 +198,83 @@
         "status": "active",
         "min_liquidity": 1000000000,
         "notes": "QuickSwap V3 (Algebra) — 0.02% impact@$5K, score=100. Dynamic fee ~0.001%. Round-trip 0.01% with UniV3 0.01%.",
+        "added": "2026-01-30",
+        "last_verified": "2026-01-30"
+      },
+      {
+        "address": "0x853ee4b2a13f8a742d64c8f088be7ba2131f670d",
+        "pair": "WETH/USDC",
+        "dex": "QuickSwapV2",
+        "fee_tier": 3000,
+        "status": "v2_ready",
+        "min_liquidity": 0,
+        "notes": "V2 constant-product. TVL=$2.59M, 0.43% impact@$5K, score=100. Best V2↔V3: 0.35% RT with UniV3 0.05%.",
+        "added": "2026-01-30",
+        "last_verified": "2026-01-30"
+      },
+      {
+        "address": "0x34965ba0ac2451a34a0471f04cca3f990b8dea27",
+        "pair": "WETH/USDC",
+        "dex": "SushiSwapV2",
+        "fee_tier": 3000,
+        "status": "v2_ready",
+        "min_liquidity": 0,
+        "notes": "V2 constant-product. TVL=$493K, 2.20% impact@$5K, score=90. Best V2↔V3: 0.35% RT with UniV3 0.05%.",
+        "added": "2026-01-30",
+        "last_verified": "2026-01-30"
+      },
+      {
+        "address": "0x6e7a5fafcec6bb1e78bae2a1f0b612012bf14827",
+        "pair": "WMATIC/USDC",
+        "dex": "QuickSwapV2",
+        "fee_tier": 3000,
+        "status": "v2_ready",
+        "min_liquidity": 0,
+        "notes": "V2 constant-product. TVL=$1.69M, 1.58% impact@$5K, score=100. Best V2↔V3: 0.35% RT with UniV3 0.05%.",
+        "added": "2026-01-30",
+        "last_verified": "2026-01-30"
+      },
+      {
+        "address": "0x2cf7252e74036d1da831d11089d326296e64a728",
+        "pair": "USDT/USDC",
+        "dex": "QuickSwapV2",
+        "fee_tier": 3000,
+        "status": "v2_ready",
+        "min_liquidity": 0,
+        "notes": "V2 constant-product. TVL=$628K, 1.56% impact@$5K, score=100. Best V2↔V3: 0.31% RT with UniV3 0.01%.",
+        "added": "2026-01-30",
+        "last_verified": "2026-01-30"
+      },
+      {
+        "address": "0x4b1f1e2435a9c96f7330faea190ef6a7c8d70001",
+        "pair": "USDT/USDC",
+        "dex": "SushiSwapV2",
+        "fee_tier": 3000,
+        "status": "v2_ready",
+        "min_liquidity": 0,
+        "notes": "V2 constant-product. TVL=$351K, 2.77% impact@$5K, score=90. Best V2↔V3: 0.31% RT with UniV3 0.01%.",
+        "added": "2026-01-30",
+        "last_verified": "2026-01-30"
+      },
+      {
+        "address": "0xf04adbf75cdfc5ed26eea4bbbb991db002036bdd",
+        "pair": "DAI/USDC",
+        "dex": "QuickSwapV2",
+        "fee_tier": 3000,
+        "status": "v2_ready",
+        "min_liquidity": 0,
+        "notes": "V2 constant-product. TVL=$301K, 3.21% impact@$5K, score=90. Best V2↔V3: 0.31% RT with UniV3 0.01%.",
+        "added": "2026-01-30",
+        "last_verified": "2026-01-30"
+      },
+      {
+        "address": "0xcd578f016888b57f1b1e3f887f392f0159e26747",
+        "pair": "DAI/USDC",
+        "dex": "SushiSwapV2",
+        "fee_tier": 3000,
+        "status": "v2_ready",
+        "min_liquidity": 0,
+        "notes": "V2 constant-product. TVL=$197K, 4.82% impact@$5K, score=90. Best V2↔V3: 0.31% RT with UniV3 0.01%.",
         "added": "2026-01-30",
         "last_verified": "2026-01-30"
       }
@@ -425,6 +502,39 @@
         "impact_at_5k": "98.18%",
         "date_added": "2026-01-30",
         "discovered_by": "verify_quickswap_pools.py"
+      },
+      {
+        "address": "0xd02b870c556480491c70aaf98c297fddd93f6f5c",
+        "pair": "WBTC/USDC",
+        "dex": "SushiSwapV2",
+        "fee_tier": 3000,
+        "category": "dead",
+        "reason": "V2 dead pool — TVL=$508, 37% impact@$140, 95% impact@$5K. Reserves: 230 USDC + 0.003 WBTC.",
+        "impact_at_5k": "95.55%",
+        "date_added": "2026-01-30",
+        "discovered_by": "verify_v2_pools.py"
+      },
+      {
+        "address": "0x70cee55c98f6da2685807611f115ea737d4a248e",
+        "pair": "LINK/USDC",
+        "dex": "QuickSwapV2",
+        "fee_tier": 3000,
+        "category": "dead",
+        "reason": "V2 dead pool — TVL=$16, 60% impact@$10, 96% impact@$140. Reserves: $5 USDC + 0.45 LINK.",
+        "impact_at_5k": "99.88%",
+        "date_added": "2026-01-30",
+        "discovered_by": "verify_v2_pools.py"
+      },
+      {
+        "address": "0x8bc8e9f621ee8babda8dc0e6fc991aaf9bf8510b",
+        "pair": "LINK/USDC",
+        "dex": "SushiSwapV2",
+        "fee_tier": 3000,
+        "category": "dead",
+        "reason": "V2 dead pool — TVL=$136, 18% impact@$10, 77% impact@$140. Reserves: $41 USDC + 3.8 LINK.",
+        "impact_at_5k": "99.17%",
+        "date_added": "2026-01-30",
+        "discovered_by": "verify_v2_pools.py"
       }
     ],
     "fee_tiers": [
@@ -439,7 +549,30 @@
     "pairs": []
   },
   "observation": {
-    "comment": "Pools under observation - not blacklisted, but need monitoring before promotion to active. All v1.1 observation pools classified in v1.2.",
-    "pools": []
+    "comment": "Pools under observation — marginal V2 pools usable at $140 trade size but degrade at $5K. Re-evaluate when trade size scales beyond $500.",
+    "pools": [
+      {
+        "address": "0xcd353f79d9fade311fc3119b841e1f456b54e858",
+        "pair": "WMATIC/USDC",
+        "dex": "SushiSwapV2",
+        "fee_tier": 3000,
+        "status": "v2_observation",
+        "notes": "V2 marginal — TVL=$255K, 0.30% impact@$140 (OK), 9.66% impact@$5K (too high). Usable at $140 trade size.",
+        "added": "2026-01-30",
+        "last_verified": "2026-01-30",
+        "concern": "High impact at $5K. Promote to v2_ready when trade size capped at $500 or less."
+      },
+      {
+        "address": "0xf6a637525402643b0654a54bead2cb9a83c8b498",
+        "pair": "WBTC/USDC",
+        "dex": "QuickSwapV2",
+        "fee_tier": 3000,
+        "status": "v2_observation",
+        "notes": "V2 marginal — TVL=$184K, 0.14% impact@$140 (OK), 5.58% impact@$5K (high). Usable at $140 trade size.",
+        "added": "2026-01-30",
+        "last_verified": "2026-01-30",
+        "concern": "Only V2 pool for WBTC/USDC. Moderate impact at $1K (1.15%). Consider including for diversity."
+      }
+    ]
   }
 }

@@ -73,12 +73,15 @@ Monolithic bot syncs pools directly via RPC, eliminating file I/O indirection:
 | Midmarket spread fix | 2026-01-30 | SELL_ESTIMATE_FACTOR 0.95→1.0, token ordering fix, slippage 10%→1% |
 | WS block subscription | 2026-01-30 | `subscribe_blocks()` replaces 3s polling, dual-provider (RPC + subscription), ~100ms block notification |
 | Discord + botwatch fixes | 2026-01-30 | Correct log path, separate attempts/completed/HALTs, clock-aligned 30min, botwatch kill monitor |
+| V2 pool assessment | 2026-01-30 | verify_v2_pools.py: 12 V2 pools assessed, 7 whitelist, 2 marginal, 3 dead. Whitelist v1.4. |
 
 ---
 
-## Active Whitelist (v1.3)
+## Active Whitelist (v1.4)
 
-16 active pools across 3 DEXes (1 monitoring):
+16 active V3 + 7 v2_ready + 2 v2_observation (1 V3 monitoring):
+
+**V3 Pools (16 active):**
 
 | DEX | Pair | Fee | Status |
 |-----|------|-----|--------|
@@ -86,21 +89,34 @@ Monolithic bot syncs pools directly via RPC, eliminating file I/O indirection:
 | UniswapV3 | WETH/USDC | 0.30% | active |
 | UniswapV3 | WMATIC/USDC | 0.05% | active |
 | UniswapV3 | WBTC/USDC | 0.05% | active |
-| UniswapV3 | USDT/USDC | 0.05% | active |
-| UniswapV3 | USDT/USDC | 0.30% | active |
-| UniswapV3 | USDT/USDC | 0.01% | active |
-| UniswapV3 | DAI/USDC | 0.05% | active |
-| UniswapV3 | DAI/USDC | 0.01% | active |
-| UniswapV3 | LINK/USDC | 0.30% | **monitoring** (sole pool) |
+| UniswapV3 | USDT/USDC (×3) | 0.01/0.05/0.30% | active |
+| UniswapV3 | DAI/USDC (×2) | 0.01/0.05% | active |
+| UniswapV3 | LINK/USDC | 0.30% | **monitoring** |
 | SushiswapV3 | USDT/USDC | 0.01% | active |
 | SushiswapV3 | WETH/USDC | 0.30% | active |
-| QuickSwapV3 | WETH/USDC | dynamic (~0.09%) | active |
-| QuickSwapV3 | WMATIC/USDC | dynamic (~0.09%) | active |
-| QuickSwapV3 | WBTC/USDC | dynamic (~0.09%) | active |
-| QuickSwapV3 | USDT/USDC | dynamic (~0.001%) | active |
-| QuickSwapV3 | DAI/USDC | dynamic (~0.001%) | active |
+| QuickSwapV3 | WETH/WMATIC/WBTC/USDT/DAI | dynamic | active (5) |
 
-**Blacklisted:** QuickSwap LINK/USDC (`0xEFdC...4C`) — 98% price impact, no liquidity.
+**V2 Pools (7 v2_ready — pending Rust implementation):**
+
+| DEX | Pair | TVL | Impact @$140 | Impact @$5K | Score |
+|-----|------|-----|-------------|-------------|-------|
+| QuickSwapV2 | WETH/USDC | $2.59M | 0.01% | 0.43% | 100 |
+| SushiSwapV2 | WETH/USDC | $493K | 0.06% | 2.20% | 90 |
+| QuickSwapV2 | WMATIC/USDC | $1.69M | 0.04% | 1.58% | 100 |
+| QuickSwapV2 | USDT/USDC | $628K | 0.04% | 1.56% | 100 |
+| SushiSwapV2 | USDT/USDC | $351K | 0.08% | 2.77% | 90 |
+| QuickSwapV2 | DAI/USDC | $301K | 0.09% | 3.21% | 90 |
+| SushiSwapV2 | DAI/USDC | $197K | 0.14% | 4.82% | 90 |
+
+**V2 Observation (2 marginal — usable at $140, degrade at $5K):**
+
+| DEX | Pair | TVL | Impact @$140 | Impact @$5K |
+|-----|------|-----|-------------|-------------|
+| SushiSwapV2 | WMATIC/USDC | $255K | 0.30% | 9.66% |
+| QuickSwapV2 | WBTC/USDC | $184K | 0.14% | 5.58% |
+
+**V2 Blacklisted (3 dead):** WBTC/SushiV2 ($508), LINK/QSV2 ($16), LINK/SushiV2 ($136).
+**V3 Blacklisted:** 19 pools (12 dead, 7 marginal V3). QS LINK ($0 depth). 1% fee tier banned.
 
 **SushiSwap V3 Contracts (Polygon):**
 
@@ -256,7 +272,8 @@ bash ~/bots/dexarb/scripts/checklist_full.sh
 | `contracts/src/ArbExecutor.sol` | Atomic arb contract V2 (Polygon: `0x1126...c570`) — Algebra + standard V3 |
 | `contracts/test/ArbExecutor.t.sol` | Foundry tests (4 unit + 2 fork) |
 | `.env.live` | Live bot config (WS mode, LIVE_MODE=true, ARB_EXECUTOR_ADDRESS set) |
-| `config/pools_whitelist.json` | 16 active V3 pools (9 Uni + 2 Sushi + 5 QS) + 1 monitoring, whitelist v1.4 |
+| `config/pools_whitelist.json` | v1.4: 16 active V3 + 7 v2_ready + 2 v2_observation + 22 blacklisted |
+| `scripts/verify_v2_pools.py` | V2 pool assessment (getReserves, constant-product math, depth matrix) |
 | `scripts/analyze_price_log.py` | Cross-DEX spread analysis, per-pool stats, profitability |
 | `scripts/analyze_trade_sizes.py` | Trade size profitability estimates ($100-$5000) |
 | `scripts/verify_quickswap_pools.py` | Algebra pool assessment (dynamic fees, $1-$5000 quotes) |
@@ -312,25 +329,25 @@ Midmarket ceiling estimates (no slippage). Realistic yield ~30-50% after slippag
 
 **Solution:** V2↔V3 cross-protocol. V2 constant-product pools lag V3 during volatility (only update on trades). Divergence reaches 0.5-2%+, well above 0.35% V2↔V3 round-trip fee.
 
-## V2 Pool Liquidity (Verified On-Chain 2026-01-30)
+## V2 Pool Assessment (Verified On-Chain 2026-01-30, block 82344927)
 
-9 viable V2 pools found:
+**Script:** `scripts/verify_v2_pools.py` — getReserves() + constant-product math, $1-$5K depth matrix.
 
-| Pair | DEX | TVL |
-|---|---|---|
-| WETH/USDC | QuickSwapV2 | $2.59M |
-| WETH/USDC | SushiSwapV2 | $494K |
-| WMATIC/USDC | QuickSwapV2 | $1.69M |
-| WMATIC/USDC | SushiSwapV2 | $255K |
-| WBTC/USDC | QuickSwapV2 | $184K |
-| USDT/USDC | QuickSwapV2 | $628K |
-| USDT/USDC | SushiSwapV2 | $351K |
-| DAI/USDC | QuickSwapV2 | $301K |
-| DAI/USDC | SushiSwapV2 | $197K |
+9 V2 pools viable (7 whitelist + 2 marginal). All handle $140 trade size with <0.30% impact.
 
-Dead: WBTC/SushiV2 ($508), LINK/both V2 ($12-$98).
+**Best V2↔V3 round-trip fees:**
 
-V2 factory addresses already in `.env.live`: QuickSwapV2 (`0x5757...`), SushiSwapV2 (`0xc35D...`).
+| V2 Pool | V3 Counterpart | RT Fee |
+|---------|---------------|--------|
+| USDT/DAI V2 (any) | QS V3 (~0.001%) | **0.30%** |
+| USDT/DAI V2 (any) | UniV3 0.01% | **0.31%** |
+| WETH/WMATIC V2 (any) | UniV3 0.05% | **0.35%** |
+| WETH/WMATIC V2 (any) | QS V3 (~0.09%) | 0.39% |
+
+V2 factory addresses in `.env.live`: QuickSwapV2 (`0x5757...`), SushiSwapV2 (`0xc35D...`).
+V2 router addresses needed for Rust: QuickSwapV2 Router, SushiSwapV2 Router (standard UniV2 fork ABI).
+
+Dead V2: WBTC/SushiV2 ($508 TVL), LINK/QSV2 ($16), LINK/SushiV2 ($136).
 
 ---
 
@@ -345,4 +362,4 @@ The contract (`0x1126...c570`) does **not** hold funds. It uses `transferFrom(ca
 
 ---
 
-*Last updated: 2026-01-30 session 3 — Live: WS block sub + tri-DEX (16 V3 pools). 4 real opps found (gas-gated). V3↔V3 structurally tight. Next: V2↔V3 cross-protocol (9 deep V2 pools) + gas limit tuning*
+*Last updated: 2026-01-30 session 4 — V2 pool assessment complete: 7 whitelist + 2 marginal V2 pools verified on-chain (whitelist v1.4). Next: Rust V2↔V3 implementation (V2 syncer, V2 DexType, V2 router, detector cross-protocol comparison)*

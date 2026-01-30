@@ -193,29 +193,9 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
         // Legacy two-tx execution (fallback — has leg risk)
         info!("Using legacy two-tx execution (no atomic contract configured)");
 
-        // Check gas price before executing
-        let gas_price = self.provider.get_gas_price().await?;
-        let max_gas_gwei = U256::from(self.config.max_gas_price_gwei) * U256::from(1_000_000_000u64);
-        if gas_price > max_gas_gwei {
-            return Ok(TradeResult {
-                opportunity: pair_symbol.clone(),
-                tx_hash: None,
-                block_number: None,
-                success: false,
-                profit_usd: 0.0,
-                gas_cost_usd: 0.0,
-                gas_used_native: 0.0,
-                net_profit_usd: 0.0,
-                execution_time_ms: start_time.elapsed().as_millis() as u64,
-                error: Some(format!(
-                    "Gas price too high: {} gwei > {} gwei max",
-                    gas_price / U256::from(1_000_000_000u64),
-                    self.config.max_gas_price_gwei
-                )),
-                amount_in: None,
-                amount_out: None,
-            });
-        }
+        // Gas cap removed: on Polygon, gas costs fractions of a penny even at
+        // high gwei values. Profitability is already gated by the detector
+        // (ESTIMATED_GAS_COST_USD) and the post-trade net profit check.
 
         // Token decimals for correct slippage calculation
         let t0_dec = opportunity.token0_decimals;
@@ -443,29 +423,10 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
             pair_symbol, opportunity.buy_dex, opportunity.sell_dex, arb_address
         );
 
-        // Check gas price
+        // Gas cap removed: on Polygon, gas costs fractions of a penny even at
+        // high gwei values. The atomic contract reverts unprofitable trades,
+        // and the detector already filters by profit-after-gas.
         let gas_price = self.provider.get_gas_price().await?;
-        let max_gas_gwei = U256::from(self.config.max_gas_price_gwei) * U256::from(1_000_000_000u64);
-        if gas_price > max_gas_gwei {
-            return Ok(TradeResult {
-                opportunity: pair_symbol.clone(),
-                tx_hash: None,
-                block_number: None,
-                success: false,
-                profit_usd: 0.0,
-                gas_cost_usd: 0.0,
-                gas_used_native: 0.0,
-                net_profit_usd: 0.0,
-                execution_time_ms: start_time.elapsed().as_millis() as u64,
-                error: Some(format!(
-                    "Gas price too high: {} gwei > {} gwei max",
-                    gas_price / U256::from(1_000_000_000u64),
-                    self.config.max_gas_price_gwei
-                )),
-                amount_in: None,
-                amount_out: None,
-            });
-        }
 
         // ArbExecutor.sol token0 = "base token" (start & end) = USDC (quote token)
         // ArbExecutor.sol token1 = "intermediate token" (bought & sold)

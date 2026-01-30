@@ -120,7 +120,11 @@ fn load_config_inner() -> Result<BotConfig> {
         pairs,
 
         poll_interval_ms: std::env::var("POLL_INTERVAL_MS")?.parse()?,
-        max_gas_price_gwei: std::env::var("MAX_GAS_PRICE_GWEI")?.parse()?,
+        // Gas cap no longer enforced in executor — kept for config compatibility
+        max_gas_price_gwei: std::env::var("MAX_GAS_PRICE_GWEI")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0),
 
         // Tax logging configuration
         tax_log_dir: std::env::var("TAX_LOG_DIR").ok(),
