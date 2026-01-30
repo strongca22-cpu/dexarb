@@ -129,5 +129,10 @@ fn load_config_inner() -> Result<BotConfig> {
             .map(|v| v.to_lowercase() == "true")
             .unwrap_or(false),
         price_log_dir: std::env::var("PRICE_LOG_DIR").ok(),
+
+        // Atomic arbitrage executor contract
+        arb_executor_address: std::env::var("ARB_EXECUTOR_ADDRESS")
+            .ok()
+            .and_then(|s| Address::from_str(&s).ok()),
     })
 }

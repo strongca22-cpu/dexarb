@@ -507,6 +507,7 @@ mod tests {
             whitelist_file: None,
             price_log_enabled: false,
             price_log_dir: None,
+            arb_executor_address: None,
         }
     }
 

@@ -3,8 +3,13 @@
 //! Executes arbitrage trades across DEXs using Uniswap V2 and V3 Router interfaces.
 //! V2: swapExactTokensForTokens (Quickswap, Sushiswap, Apeswap)
 //! V3: exactInputSingle (Uniswap V3 fee tiers: 0.05%, 0.30%, 1.00%)
-//! Phase 1 implementation with two separate transactions (has leg risk).
 //! Includes IRS-compliant tax logging for all executed trades.
+//!
+//! Execution modes:
+//!   - Atomic (preferred): Single tx via ArbExecutor.sol contract. Both swaps
+//!     execute atomically — reverts on loss. Zero leg risk.
+//!   - Legacy two-tx: Separate buy + sell transactions (has leg risk).
+//!     Used as fallback if ARB_EXECUTOR_ADDRESS is not configured.
 //!
 //! Post-incident fixes (2026-01-29 $500 loss):
 //!   1. calculate_min_out now handles token decimal conversion (6 vs 18 dec)
@@ -16,6 +21,7 @@
 //! Modified: 2026-01-28 (Phase 5: Tax logging integration)
 //! Modified: 2026-01-29 (V3 SwapRouter support: exactInputSingle)
 //! Modified: 2026-01-29 (Post-incident: decimal fix, quoter, event parsing)
+//! Modified: 2026-01-30 (Atomic execution via ArbExecutor.sol contract)
 
 use crate::tax::{TaxLogger, TaxRecordBuilder};
 use crate::types::{ArbitrageOpportunity, BotConfig, DexType, TradeResult};
@@ -69,6 +75,15 @@ abigen!(
         function allowance(address owner, address spender) external view returns (uint256)
         function balanceOf(address account) external view returns (uint256)
         function decimals() external view returns (uint8)
+    ]"#
+);
+
+// ArbExecutor contract ABI (atomic two-leg arbitrage)
+// Executes both V3 swaps in a single transaction. Reverts if profit < minProfit.
+abigen!(
+    IArbExecutor,
+    r#"[
+        function executeArb(address token0, address token1, address routerBuy, address routerSell, uint24 feeBuy, uint24 feeSell, uint256 amountIn, uint256 minProfit) external returns (uint256 profit)
     ]"#
 );
 
@@ -147,6 +162,14 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
         if self.dry_run {
             return self.simulate_execution(opportunity, start_time).await;
         }
+
+        // Route to atomic execution if ArbExecutor contract is configured
+        if self.config.arb_executor_address.is_some() && opportunity.buy_dex.is_v3() && opportunity.sell_dex.is_v3() {
+            return self.execute_atomic(opportunity, start_time).await;
+        }
+
+        // Legacy two-tx execution (fallback — has leg risk)
+        info!("Using legacy two-tx execution (no atomic contract configured)");
 
         // Check gas price before executing
         let gas_price = self.provider.get_gas_price().await?;
@@ -376,6 +399,217 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
             error: None,
             amount_in: Some(trade_size.to_string()),
             amount_out: Some(final_amount.to_string()),
+        })
+    }
+
+    /// Execute an atomic arbitrage via the ArbExecutor contract.
+    ///
+    /// Both swap legs execute in a single transaction. If the second leg fails
+    /// or net profit < minProfit, the entire tx reverts — zero risk.
+    ///
+    /// Token flow: wallet → contract → routerBuy(token0→token1) → routerSell(token1→token0) → wallet
+    async fn execute_atomic(
+        &mut self,
+        opportunity: &ArbitrageOpportunity,
+        start_time: Instant,
+    ) -> Result<TradeResult> {
+        let pair_symbol = &opportunity.pair.symbol;
+        let arb_address = self.config.arb_executor_address.unwrap();
+
+        info!(
+            "⚡ ATOMIC execution: {} | Buy {:?} → Sell {:?} via ArbExecutor {:?}",
+            pair_symbol, opportunity.buy_dex, opportunity.sell_dex, arb_address
+        );
+
+        // Check gas price
+        let gas_price = self.provider.get_gas_price().await?;
+        let max_gas_gwei = U256::from(self.config.max_gas_price_gwei) * U256::from(1_000_000_000u64);
+        if gas_price > max_gas_gwei {
+            return Ok(TradeResult {
+                opportunity: pair_symbol.clone(),
+                tx_hash: None,
+                block_number: None,
+                success: false,
+                profit_usd: 0.0,
+                gas_cost_usd: 0.0,
+                gas_used_native: 0.0,
+                net_profit_usd: 0.0,
+                execution_time_ms: start_time.elapsed().as_millis() as u64,
+                error: Some(format!(
+                    "Gas price too high: {} gwei > {} gwei max",
+                    gas_price / U256::from(1_000_000_000u64),
+                    self.config.max_gas_price_gwei
+                )),
+                amount_in: None,
+                amount_out: None,
+            });
+        }
+
+        let token0 = opportunity.pair.token0;
+        let token1 = opportunity.pair.token1;
+        let trade_size = opportunity.trade_size;
+
+        // Get router addresses and fee tiers
+        let router_buy = self.get_router_address(opportunity.buy_dex);
+        let router_sell = self.get_router_address(opportunity.sell_dex);
+        let fee_buy = opportunity.buy_dex.v3_fee_tier()
+            .ok_or_else(|| anyhow!("Buy DEX {:?} is not V3", opportunity.buy_dex))?;
+        let fee_sell = opportunity.sell_dex.v3_fee_tier()
+            .ok_or_else(|| anyhow!("Sell DEX {:?} is not V3", opportunity.sell_dex))?;
+
+        // minProfit in token0 raw units
+        // Convert min_profit_usd to token0 units (USDC = 6 dec, 1 USDC = 1e6)
+        // For non-stablecoin base tokens this would need a price oracle
+        let min_profit_raw = U256::from((self.config.min_profit_usd * 1e6) as u64);
+
+        info!(
+            "  routerBuy={:?} feeBuy={} | routerSell={:?} feeSell={} | amountIn={} | minProfit={}",
+            router_buy, fee_buy, router_sell, fee_sell, trade_size, min_profit_raw
+        );
+
+        // Create signer client
+        let client = SignerMiddleware::new(
+            self.provider.clone(),
+            self.wallet.clone().with_chain_id(self.config.chain_id),
+        );
+        let client = Arc::new(client);
+
+        // Call ArbExecutor.executeArb()
+        let arb_contract = IArbExecutor::new(arb_address, client.clone());
+        let tx = arb_contract.execute_arb(
+            token0,
+            token1,
+            router_buy,
+            router_sell,
+            fee_buy.into(),  // u32 → u32, but abigen expects the right type
+            fee_sell.into(),
+            trade_size,
+            min_profit_raw,
+        );
+
+        let pending_tx = match tx.send().await {
+            Ok(pt) => pt,
+            Err(e) => {
+                let err_msg = format!("Atomic tx send failed: {}", e);
+                // Check if this is an InsufficientProfit revert
+                if err_msg.contains("InsufficientProfit") || err_msg.contains("execution reverted") {
+                    info!("Atomic arb reverted (expected: insufficient profit or pool conditions changed)");
+                } else {
+                    error!("{}", err_msg);
+                }
+                return Ok(TradeResult {
+                    opportunity: pair_symbol.clone(),
+                    tx_hash: None,
+                    block_number: None,
+                    success: false,
+                    profit_usd: 0.0,
+                    gas_cost_usd: 0.0,
+                    gas_used_native: 0.0,
+                    net_profit_usd: 0.0,
+                    execution_time_ms: start_time.elapsed().as_millis() as u64,
+                    error: Some(err_msg),
+                    amount_in: Some(trade_size.to_string()),
+                    amount_out: None,
+                });
+            }
+        };
+
+        let tx_hash = pending_tx.tx_hash();
+        info!("⚡ Atomic arb tx submitted: {:?}", tx_hash);
+
+        // Wait for confirmation
+        let receipt = pending_tx
+            .await
+            .map_err(|e| anyhow!("Atomic tx confirmation failed: {}", e))?
+            .ok_or_else(|| anyhow!("No receipt returned for atomic tx"))?;
+
+        let block_number = receipt.block_number.map(|bn| bn.as_u64()).unwrap_or(0);
+
+        if receipt.status != Some(U64::from(1)) {
+            warn!("Atomic arb tx reverted on-chain (tx confirmed but failed)");
+            return Ok(TradeResult {
+                opportunity: pair_symbol.clone(),
+                tx_hash: Some(format!("{:?}", tx_hash)),
+                block_number: Some(block_number),
+                success: false,
+                profit_usd: 0.0,
+                gas_cost_usd: 0.0,
+                gas_used_native: 0.0,
+                net_profit_usd: 0.0,
+                execution_time_ms: start_time.elapsed().as_millis() as u64,
+                error: Some("Atomic tx reverted on-chain".to_string()),
+                amount_in: Some(trade_size.to_string()),
+                amount_out: None,
+            });
+        }
+
+        // Parse profit from ArbExecuted event
+        // event ArbExecuted(token0, token1, amountIn, amountOut, profit, routerBuy, routerSell)
+        // topic0 = keccak256("ArbExecuted(address,address,uint256,uint256,uint256,address,address)")
+        let mut profit_raw = U256::zero();
+        let mut amount_out = trade_size; // fallback
+        let arb_executed_topic: H256 = ethers::utils::keccak256(
+            b"ArbExecuted(address,address,uint256,uint256,uint256,address,address)"
+        ).into();
+
+        for log in &receipt.logs {
+            if log.address == arb_address && !log.topics.is_empty() && log.topics[0] == arb_executed_topic {
+                // data layout: amountIn (32) | amountOut (32) | profit (32) | routerBuy (32) | routerSell (32)
+                if log.data.len() >= 96 {
+                    amount_out = U256::from_big_endian(&log.data[32..64]);
+                    profit_raw = U256::from_big_endian(&log.data[64..96]);
+                    debug!("Parsed ArbExecuted: amountOut={}, profit={}", amount_out, profit_raw);
+                }
+                break;
+            }
+        }
+
+        let profit_usd = self.wei_to_usd(profit_raw, pair_symbol);
+        // Actual gas from receipt
+        let gas_used = receipt.gas_used.unwrap_or(U256::from(400_000u64));
+        let effective_gas_price = receipt.effective_gas_price.unwrap_or(gas_price);
+        let gas_cost_wei = gas_used * effective_gas_price;
+        let gas_used_native = gas_cost_wei.as_u128() as f64 / 1e18;
+        let gas_cost_usd = gas_used_native * 0.50; // MATIC ~$0.50
+        let net_profit_usd = profit_usd - gas_cost_usd;
+
+        let success = net_profit_usd > 0.0;
+
+        if success {
+            info!(
+                "🎉 ATOMIC PROFIT: ${:.4} (gross: ${:.4}, gas: ${:.4}) | tx: {:?}",
+                net_profit_usd, profit_usd, gas_cost_usd, tx_hash
+            );
+        } else {
+            warn!(
+                "📉 ATOMIC LOSS: ${:.4} (gross: ${:.4}, gas: ${:.4}) | tx: {:?}",
+                net_profit_usd, profit_usd, gas_cost_usd, tx_hash
+            );
+        }
+
+        // Log tax record
+        self.log_tax_record_if_enabled(
+            opportunity,
+            &format!("{:?}", tx_hash),
+            block_number,
+            trade_size,
+            amount_out,
+            gas_used_native,
+        );
+
+        Ok(TradeResult {
+            opportunity: pair_symbol.clone(),
+            tx_hash: Some(format!("{:?}", tx_hash)),
+            block_number: Some(block_number),
+            success,
+            profit_usd,
+            gas_cost_usd,
+            gas_used_native,
+            net_profit_usd,
+            execution_time_ms: start_time.elapsed().as_millis() as u64,
+            error: None,
+            amount_in: Some(trade_size.to_string()),
+            amount_out: Some(amount_out.to_string()),
         })
     }
 

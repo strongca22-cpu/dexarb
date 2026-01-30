@@ -392,4 +392,9 @@ pub struct BotConfig {
     // Logs V3 pool prices to CSV per block for offline analysis
     pub price_log_enabled: bool,
     pub price_log_dir: Option<String>,
+
+    // Atomic arbitrage executor contract (Phase: Atomic Execution)
+    // When set, the bot executes both swap legs in a single atomic transaction
+    // via the deployed ArbExecutor.sol contract. Reverts on loss.
+    pub arb_executor_address: Option<Address>,
 }

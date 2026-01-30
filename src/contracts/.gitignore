@@ -1,0 +1,9 @@
+# Foundry build artifacts
+/out/
+/cache/
+
+# Broadcast files (contain tx details and sensitive data)
+/broadcast/
+
+# forge-std library (fetched via forge install)
+/lib/

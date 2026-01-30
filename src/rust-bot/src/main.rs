@@ -173,6 +173,13 @@ async fn main() -> Result<()> {
         None
     };
 
+    // Log atomic executor status
+    if let Some(addr) = config.arb_executor_address {
+        info!("⚡ Atomic executor ENABLED: {:?}", addr);
+    } else {
+        info!("Atomic executor disabled (legacy two-tx mode)");
+    }
+
     info!("Bot initialized successfully (monolithic mode)");
     info!("Starting opportunity detection loop (direct RPC sync)...");
 
