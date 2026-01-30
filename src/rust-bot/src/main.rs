@@ -14,9 +14,10 @@
 //! Created: 2026-01-27
 //! Modified: 2026-01-29 - Shared data architecture: read from JSON, eliminate RPC sync
 //! Modified: 2026-01-29 - Fix buy-then-continue bug: halt on committed capital (tx_hash check)
+//! Modified: 2026-01-29 - Multicall3 batch Quoter pre-screening (Phase 2.1)
 
 use anyhow::Result;
-use dexarb_bot::arbitrage::{OpportunityDetector, TradeExecutor};
+use dexarb_bot::arbitrage::{MulticallQuoter, OpportunityDetector, TradeExecutor, VerifiedOpportunity};
 use dexarb_bot::config::load_config_from_file;
 use dexarb_bot::data_collector::shared_state::SharedPoolState;
 use dexarb_bot::pool::PoolStateManager;
@@ -85,6 +86,11 @@ async fn main() -> Result<()> {
     } else {
         info!("Trade executor initialized (DRY RUN mode)");
     }
+
+    // Initialize Multicall3 batch Quoter pre-screener (Phase 2.1)
+    // Batch-verifies all detected opportunities in 1 RPC call before execution.
+    // Falls back to unfiltered execution if Multicall fails.
+    let multicall_quoter = MulticallQuoter::new(Arc::clone(&provider), &config)?;
 
     // Enable tax logging for IRS compliance
     if config.tax_log_enabled {
@@ -194,15 +200,43 @@ async fn main() -> Result<()> {
                 );
             }
 
-            // Try opportunities in order (best first, fall through on Quoter rejections)
-            for (rank, opp) in opportunities.iter().enumerate() {
+            // Multicall3 batch pre-screen: verify all opportunities in 1 RPC call
+            let verified = match multicall_quoter.batch_verify(&opportunities, &config).await {
+                Ok(v) => v,
+                Err(e) => {
+                    warn!("Multicall batch verify failed: {} — falling back to unfiltered", e);
+                    // Fallback: pass all opps through (executor's own Quoter checks still apply)
+                    opportunities.iter().enumerate()
+                        .map(|(i, _)| VerifiedOpportunity::passthrough(i))
+                        .collect()
+                }
+            };
+
+            // Filter to verified-only, rank by quoted profit
+            let mut ranked: Vec<&VerifiedOpportunity> = verified.iter()
+                .filter(|v| v.both_legs_valid)
+                .collect();
+            ranked.sort_by(|a, b| b.quoted_profit_raw.cmp(&a.quoted_profit_raw));
+
+            let filtered_count = opportunities.len() - ranked.len();
+            if filtered_count > 0 {
                 info!(
-                    "🎯 TRY #{}: {} - Buy {:?} Sell {:?} - ${:.2}",
+                    "Multicall pre-screen: {}/{} verified, {} filtered out",
+                    ranked.len(), opportunities.len(), filtered_count
+                );
+            }
+
+            // Try verified opportunities (best quoted profit first, fall through on Quoter rejections)
+            for (rank, verified_opp) in ranked.iter().enumerate() {
+                let opp = &opportunities[verified_opp.original_index];
+                info!(
+                    "🎯 TRY #{}: {} - Buy {:?} Sell {:?} - ${:.2} (quoted_profit_raw={})",
                     rank + 1,
                     opp.pair.symbol,
                     opp.buy_dex,
                     opp.sell_dex,
-                    opp.estimated_profit
+                    opp.estimated_profit,
+                    verified_opp.quoted_profit_raw
                 );
 
                 match executor.execute(opp).await {

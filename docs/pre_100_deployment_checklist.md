@@ -1,1504 +1,903 @@
 # Pre-$100 Deployment Comprehensive Checklist
+
 ## Complete System Validation Before Live Trading
 
-**Purpose**: Systematic validation of all systems before committing real capital  
-**Capital at Risk**: $100 (test amount)  
-**Time Required**: 2-3 hours  
-**Confidence Target**: >90% before proceeding  
+**Purpose**: Systematic validation of all systems before committing real capital
+**Capital at Risk**: $100 (test amount)
+**Confidence Target**: >90% before proceeding
+
+**Architecture**: V3 shared-data (JSON-based)
+**Features**: Multicall3 batch Quoter, whitelist v1.1, two-wallet, tax logging, HALT safety
+**Config**: `.env.live` (live bot), `.env` (data collector)
 
 ---
 
-## 📋 CHECKLIST OVERVIEW
+## CHECKLIST OVERVIEW
 
-### **Categories (10 Total)**
-
-```
-1. Technical Infrastructure ......... 15 checks
-2. Smart Contract Verification ...... 15 checks  (↑3 for 0.30% pool)
-3. Bot Configuration ................ 18 checks
-4. Data Integrity ................... 14 checks  (↑4 for dual-route)
-5. Execution Path Validation ........ 18 checks  (↑4 for Route 2)
-6. Risk Management .................. 12 checks
-7. Monitoring & Alerts .............. 10 checks
-8. Financial Controls ............... 22 checks  (↑10 for tax logging)
-9. Operational Procedures ........... 9 checks
-10. Emergency Protocols ............. 7 checks
-
-TOTAL: 140 checks (updated for tax logging validation)
-CRITICAL: 46 checks (must pass ALL, +4 tax)
-IMPORTANT: 59 checks (must pass 90%, +4 tax)
-RECOMMENDED: 35 checks (should pass 80%, +2 tax)
-```
-
-### **Dual-Route Discovery Summary**
+### Categories (10 Total)
 
 ```
-Route 1: V3 1.00% → V3 0.05%
-├─ Spread: 2.24% midmarket, ~1.19% executable
-├─ Profit: ~$10.25 per $1000 trade
-└─ Frequency: ~209 detections/hour
+1. Technical Infrastructure ......... 19 checks
+2. Smart Contract Verification ...... 12 checks
+3. Bot Configuration (.env.live) .... 21 checks
+4. Data Integrity (JSON state) ...... 12 checks
+5. Execution Path Validation ........ 9 checks
+6. Risk Management .................. 6 checks
+7. Monitoring & Alerts .............. 4 checks
+8. Financial Controls ............... 10 checks
+9. Operational Procedures ........... 5 checks
+10. Emergency Protocols ............. 4 checks
 
-Route 2: V3 0.30% → V3 0.05%
-├─ Spread: 1.43% midmarket, ~0.68% executable
-├─ Profit: ~$9.22 per $1000 trade
-└─ Frequency: ~215 detections/hour
-
-Combined: 424 opportunities/hour, $10.28 avg profit
-Discovery Mode most profitable: 168 opps, $1,635.48 (paper)
+TOTAL: ~102 checks
+CRITICAL: ~52 checks (must pass ALL)
+IMPORTANT: ~40 checks (must pass 90%)
+RECOMMENDED: ~10 checks (should pass 80%)
 ```
 
----
+### Architecture Summary
 
-## 1️⃣ TECHNICAL INFRASTRUCTURE (15 checks)
+```
+Data collector (separate binary, runs continuously)
+    → Writes JSON state file: data/pool_state_phase1.json
+    → Contains V3 pool prices, block number, timestamps
 
-### **1.1 VPS/Server Health**
+Live bot (main binary, reads JSON + executes trades)
+    → Reads JSON state file (0 RPC for price discovery)
+    → Multicall3 batch Quoter pre-screening (1 RPC for all quotes)
+    → Executor: sequential Quoter + swap per leg (safety gate)
+    → Whitelist v1.1 strict enforcement (10 pools, 7 blacklisted)
+    → HALT on committed capital (stops if tx_hash detected)
+
+Two wallets:
+    Live:   0xa532eb528aE17eFC881FCe6894a08B5b70fF21e2
+    Backup: 0x8e843e351c284dd96F8E458c10B39164b2Aeb7Fb
+
+7 Trading pairs (all /USDC): WETH, WMATIC, WBTC, USDT, DAI, LINK, UNI
+```
+
+### Running Automated Checks
+
+All checks are automated via shell scripts:
 
 ```bash
-# Check 1.1.1: Server uptime and load
-uptime
-# Expected: >24 hours uptime, load <2.0
+# Run all sections (recommended)
+./scripts/checklist_full.sh
 
-# Check 1.1.2: Available disk space
-df -h
-# Required: >50GB free on /home
+# Run individual sections
+./scripts/checklist_section1.sh    # Infrastructure
+./scripts/checklist_section2.sh    # Smart contracts
+./scripts/checklist_section3.sh    # Bot config (.env.live)
+./scripts/checklist_section4.sh    # Data integrity
+./scripts/checklist_section5_10.sh # Execution, risk, monitoring, finance, ops, emergency
 
-# Check 1.1.3: Available memory
-free -h
-# Required: >2GB available RAM
-
-# Check 1.1.4: CPU usage
-top -b -n 1 | head -20
-# Required: <80% average CPU usage
-```
-
-**Server Health Checklist**:
-```
-[ ] CRITICAL: Uptime >24 hours
-[ ] CRITICAL: Disk space >50GB
-[ ] CRITICAL: RAM >2GB available
-[ ] IMPORTANT: CPU <80% usage
-[ ] IMPORTANT: No high I/O wait
+# Detail logs saved to:
+# /tmp/s1.log through /tmp/s5_10.log
 ```
 
 ---
 
-### **1.2 Network Connectivity**
+## 1. TECHNICAL INFRASTRUCTURE (19 checks)
+
+### 1.1 Server Health
+
+```bash
+# Check 1.1.1: Uptime >24 hours
+awk '{print int($1/3600)}' /proc/uptime
+
+# Check 1.1.2: Disk space >5GB free
+df -h /
+
+# Check 1.1.3: Memory >200MB available
+free -m
+
+# Check 1.1.4: CPU load <2.0
+cat /proc/loadavg
+
+# Check 1.1.5: I/O wait <20%
+cat /proc/stat | head -1
+```
+
+```
+[ ] CRITICAL: Uptime >24 hours
+[ ] CRITICAL: Disk space >5GB free
+[ ] CRITICAL: Memory >200MB available
+[ ] IMPORTANT: CPU load <2.0
+[ ] IMPORTANT: No high I/O wait (<20%)
+```
+
+---
+
+### 1.2 Network Connectivity
 
 ```bash
 # Check 1.2.1: Internet connectivity
-ping -c 4 8.8.8.8
+ping -c 1 -W 3 8.8.8.8
 
-# Check 1.2.2: Polygon RPC reachability
-curl -X POST https://polygon-rpc.com \
+# Check 1.2.2: Primary RPC reachable (Alchemy HTTPS)
+curl -s --max-time 5 -X POST "$RPC_URL" \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}'
 
-# Check 1.2.3: Alchemy RPC (if using)
-curl -X POST $ALCHEMY_URL \
-  -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}'
-
-# Check 1.2.4: Latency test
-time curl -X POST https://polygon-rpc.com \
-  -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}'
-# Required: <2 seconds response time
+# Check 1.2.3: RPC response time <2s
+time curl -s --max-time 5 -X POST "$RPC_URL" ...
 ```
 
-**Network Checklist**:
 ```
+[ ] CRITICAL: Internet connectivity
 [ ] CRITICAL: Primary RPC reachable
-[ ] CRITICAL: Backup RPC reachable
-[ ] IMPORTANT: Response time <2s
-[ ] RECOMMENDED: Multi-RPC configured
+[ ] IMPORTANT: RPC response time <2 seconds
 ```
 
 ---
 
-### **1.3 Database Health**
+### 1.3 State File Health (Shared Data Architecture)
+
+The V3 shared-data architecture uses a JSON state file written by the data collector
+and read by the live bot. No PostgreSQL database is used.
+
+**State file**: `/home/botuser/bots/dexarb/data/pool_state_phase1.json`
+**Whitelist file**: `/home/botuser/bots/dexarb/config/pools_whitelist.json`
 
 ```bash
-# Check 1.3.1: PostgreSQL running
-systemctl status postgresql
+# Check 1.3.1: Pool state JSON file exists
+ls -la data/pool_state_phase1.json
 
-# Check 1.3.2: Database size
-psql -d dexarb_db -c "
-SELECT 
-    pg_size_pretty(pg_database_size('dexarb_db')) as db_size,
-    (SELECT count(*) FROM opportunities) as opp_count,
-    (SELECT count(*) FROM executed_trades) as trade_count;"
+# Check 1.3.2: State file is readable
+test -r data/pool_state_phase1.json
 
-# Check 1.3.3: Database performance
-psql -d dexarb_db -c "
-SELECT 
-    schemaname,
-    tablename,
-    pg_size_pretty(pg_total_relation_size(schemaname||'.'||tablename)) AS size
-FROM pg_tables
-WHERE schemaname = 'public'
-ORDER BY pg_total_relation_size(schemaname||'.'||tablename) DESC
-LIMIT 5;"
+# Check 1.3.3: State data fresh (<5 min — data collector should be writing)
+stat -c%Y data/pool_state_phase1.json
 
-# Check 1.3.4: Recent data
-psql -d dexarb_db -c "
-SELECT MAX(timestamp) as last_opportunity
-FROM opportunities;"
-# Required: <5 minutes ago
+# Check 1.3.4: State has V3 pool data
+python3 -c "
+import json
+with open('data/pool_state_phase1.json') as f:
+    data = json.load(f)
+    v3 = data.get('v3_pools', {})
+    print(f'V3 pools: {len(v3)}')
+"
+
+# Check 1.3.5: Whitelist file exists
+ls -la config/pools_whitelist.json
+
+# Check 1.3.6: State file <10MB
+stat -c%s data/pool_state_phase1.json
 ```
 
-**Database Checklist**:
 ```
-[ ] CRITICAL: PostgreSQL running
-[ ] CRITICAL: Database accessible
-[ ] CRITICAL: Recent data (<5 min)
-[ ] IMPORTANT: Reasonable size (<10GB)
-[ ] IMPORTANT: No lock contention
+[ ] CRITICAL: Pool state JSON file exists
+[ ] CRITICAL: State file is readable
+[ ] CRITICAL: State data fresh (<5 minutes)
+[ ] CRITICAL: State has V3 pool data (>0 pools)
+[ ] IMPORTANT: Whitelist file exists
+[ ] IMPORTANT: State file <10MB
 ```
 
 ---
 
-### **1.4 Bot Service Health**
+### 1.4 Bot Service Health
 
 ```bash
-# Check 1.4.1: Bot processes running
-ps aux | grep dexarb
+# Check 1.4.1: Live bot binary exists (release build)
+ls -la src/rust-bot/target/release/dexarb-bot
 
-# Check 1.4.2: Service status
-systemctl status dexarb-phase1
+# Check 1.4.2: Data collector binary exists (release build)
+ls -la src/rust-bot/target/release/data-collector
 
-# Check 1.4.3: Recent log activity
-journalctl -u dexarb-phase1 -n 50 --no-pager
+# Check 1.4.3: .env.live config exists
+ls -la src/rust-bot/.env.live
 
-# Check 1.4.4: No critical errors
-journalctl -u dexarb-phase1 --since "1 hour ago" | grep -i "error\|critical\|fatal"
-# Expected: No critical errors
+# Check 1.4.4: Unit tests pass
+cargo test --manifest-path src/rust-bot/Cargo.toml
+
+# Check 1.4.5: Binary up-to-date with source
+# Binary should be newer than most recent .rs file
 ```
 
-**Service Checklist**:
 ```
-[ ] CRITICAL: Bot service active
-[ ] CRITICAL: No critical errors in logs
-[ ] IMPORTANT: Recent log activity (<1 min)
-[ ] IMPORTANT: Both collector and paper-trading running
+[ ] CRITICAL: Live bot binary exists (release)
+[ ] CRITICAL: Data collector binary exists (release)
+[ ] CRITICAL: Live config .env.live exists
+[ ] IMPORTANT: Unit tests pass (42/42)
+[ ] RECOMMENDED: Binary up-to-date with source
 ```
 
 ---
 
-## 2️⃣ SMART CONTRACT VERIFICATION (12 checks)
+## 2. SMART CONTRACT VERIFICATION (12 checks)
 
-### **2.1 Router Addresses**
+### 2.1 Core Contract Addresses
+
+All addresses verified on-chain (Polygon mainnet, chain ID 137).
+
+```
+V3 SwapRouter:  0xE592427A0AEce92De3Edee1F18E0157C05861564
+V3 QuoterV1:    0xb27308f9F90D607463bb33eA1BeBb41C27CE5AB6
+V3 Factory:     0x1F98431c8aD98523631AE4a59f267346ea31F984
+Multicall3:     0xcA11bde05977b3631167028862bE2a173976CA11
+```
 
 ```bash
-# Polygon Mainnet addresses to verify
+# Check 2.1.1-2.1.3: Verify contracts have code
+# (automated in checklist_section2.sh via eth_getCode)
 
-# Check 2.1.1: Uniswap V2 Router (Quickswap)
-QUICKSWAP_ROUTER="0xa5E0829CaCEd8fFDD4De3c43696c57F7D7A678ff"
-cast code $QUICKSWAP_ROUTER --rpc-url https://polygon-rpc.com | wc -c
-# Expected: >1000 (contract has code)
-
-# Check 2.1.2: Uniswap V3 Router
-V3_ROUTER="0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45"
-cast code $V3_ROUTER --rpc-url https://polygon-rpc.com | wc -c
-# Expected: >1000
-
-# Check 2.1.3: Uniswap V3 Quoter
-V3_QUOTER="0xb27308f9F90D607463bb33eA1BeBb41C27CE5AB6"
-cast code $V3_QUOTER --rpc-url https://polygon-rpc.com | wc -c
-# Expected: >1000
+# Check 2.1.4: V3 Factory has code
+# Check 2.1.5: Addresses match .env.live config
+grep "UNISWAP_V3" src/rust-bot/.env.live
 ```
 
-**Router Verification Checklist**:
 ```
-[ ] CRITICAL: V2 router has code
-[ ] CRITICAL: V3 router has code
-[ ] CRITICAL: V3 quoter has code
-[ ] CRITICAL: Addresses match documentation
-```
-
-**Router Addresses to Verify**:
-```
-Quickswap (V2): 0xa5E0829CaCEd8fFDD4De3c43696c57F7D7A678ff
-V3 SwapRouter02: 0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45
-V3 Quoter V2: 0xb27308f9F90D607463bb33eA1BeBb41C27CE5AB6
+[ ] CRITICAL: V3 Router has code (SwapRouter)
+[ ] CRITICAL: V3 QuoterV1 has code
+[ ] CRITICAL: Multicall3 has code (batch Quoter)
+[ ] IMPORTANT: V3 Factory has code
+[ ] CRITICAL: Contract addresses match .env.live
 ```
 
 ---
 
-### **2.2 Token Addresses**
+### 2.2 Token Addresses
+
+```
+USDC.e (bridged): 0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174 (6 decimals)
+WETH:             0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619 (18 decimals)
+WMATIC:           0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270 (18 decimals)
+```
+
+```
+[ ] CRITICAL: USDC.e address correct, 6 decimals
+[ ] IMPORTANT: WETH address correct, 18 decimals
+[ ] IMPORTANT: WMATIC address correct, 18 decimals
+```
+
+---
+
+### 2.3 Whitelist Pool Verification
+
+The checklist dynamically iterates all pools from `config/pools_whitelist.json` and
+verifies each has code on-chain via `eth_getCode`.
+
+**Whitelist v1.1**: 10 whitelisted pools, 7 blacklisted (thin/phantom pools)
 
 ```bash
-# Check 2.2.1: UNI token
-UNI="0xb33EaAd8d922B1083446DC23f610c2567fB5180f"
-cast call $UNI "symbol()(string)" --rpc-url https://polygon-rpc.com
-# Expected: "UNI"
-
-cast call $UNI "decimals()(uint8)" --rpc-url https://polygon-rpc.com
-# Expected: 18
-
-# Check 2.2.2: USDC token
-USDC="0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
-cast call $USDC "symbol()(string)" --rpc-url https://polygon-rpc.com
-# Expected: "USDC"
-
-cast call $USDC "decimals()(uint8)" --rpc-url https://polygon-rpc.com
-# Expected: 6
-
-# Check 2.2.3: WMATIC token
-WMATIC="0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270"
-cast call $WMATIC "symbol()(string)" --rpc-url https://polygon-rpc.com
-# Expected: "WMATIC"
+# Automated: each whitelisted pool address verified on-chain
+# See checklist_section2.sh for full verification loop
 ```
 
-**Token Verification Checklist**:
 ```
-[ ] CRITICAL: UNI address correct, 18 decimals
-[ ] CRITICAL: USDC address correct, 6 decimals
-[ ] IMPORTANT: All tokens have code
-[ ] IMPORTANT: Symbols match expected
+[ ] CRITICAL: All whitelisted pools verified on-chain
+[ ] IMPORTANT: Blacklist entries configured (>0)
 ```
 
 ---
 
-### **2.3 Pool Addresses & TVL**
-
-**NOTE: Two profitable routes discovered - all THREE fee tier pools required**
+### 2.4 Approval Status
 
 ```bash
-# Check 2.3.1: Find UNI/USDC V3 pools
-# Visit Uniswap V3 info or compute addresses
-
-# UNI/USDC 0.05% pool (DESTINATION for both routes)
-POOL_005="0x________________"  # Fill in
-
-# Check pool exists
-cast call $POOL_005 "liquidity()(uint128)" --rpc-url https://polygon-rpc.com
-
-# Check 2.3.2: UNI/USDC 0.30% pool (SOURCE for Route 2)
-POOL_030="0x________________"  # Fill in
-
-cast call $POOL_030 "liquidity()(uint128)" --rpc-url https://polygon-rpc.com
-
-# Check 2.3.3: UNI/USDC 1.00% pool (SOURCE for Route 1)
-POOL_100="0x________________"  # Fill in
-
-cast call $POOL_100 "liquidity()(uint128)" --rpc-url https://polygon-rpc.com
-
-# Check 2.3.4: Verify on Uniswap Info
-open "https://info.uniswap.org/#/polygon/pools"
-# Search for UNI/USDC pools, verify TVL for ALL THREE
+# Check allowance: USDC.e → V3 Router (live wallet)
+# Uses: allowance(address,address) on USDC.e contract
 ```
 
-**Pool Verification Checklist**:
 ```
-[ ] CRITICAL: 0.05% pool address verified (destination pool)
-[ ] CRITICAL: 0.30% pool address verified (Route 2 source)
-[ ] CRITICAL: 1.00% pool address verified (Route 1 source)
-[ ] CRITICAL: 0.05% pool TVL >$10M
-[ ] CRITICAL: 0.30% pool TVL >$5M
-[ ] CRITICAL: 1.00% pool TVL >$2M
-[ ] IMPORTANT: 24h volume >$1M on all three pools
-```
-
-**Record Pool Addresses**:
-```
-Route 1: V3 1.00% → V3 0.05% (2.24% spread, ~$10.25/trade)
-Route 2: V3 0.30% → V3 0.05% (1.43% spread, ~$9.22/trade)
-
-UNI/USDC 0.05%: 0x_______________________
-├─ TVL: $_____________
-├─ 24h Volume: $_____________
-└─ Role: DESTINATION (both routes)
-
-UNI/USDC 0.30%: 0x_______________________
-├─ TVL: $_____________
-├─ 24h Volume: $_____________
-└─ Role: SOURCE (Route 2)
-
-UNI/USDC 1.00%: 0x_______________________
-├─ TVL: $_____________
-├─ 24h Volume: $_____________
-└─ Role: SOURCE (Route 1)
+[ ] CRITICAL: USDC.e approved for V3 Router (live wallet)
+[ ] RECOMMENDED: Approval not unlimited (security best practice)
 ```
 
 ---
 
-### **2.4 Approval Status**
+## 3. BOT CONFIGURATION (.env.live) (21 checks)
+
+The live bot reads from `src/rust-bot/.env.live` (separate from data collector `.env`).
+
+### 3.1 Core Configuration
 
 ```bash
-# Check 2.4.1: Current USDC approval for V3 router
-cast call $USDC \
-  "allowance(address,address)(uint256)" \
-  $YOUR_WALLET \
-  $V3_ROUTER \
-  --rpc-url https://polygon-rpc.com
+# Check 3.1.1: RPC URL configured (must be wss:// for live bot)
+grep "RPC_URL=" src/rust-bot/.env.live
+# Expected: wss://polygon-mainnet.g.alchemy.com/...
 
-# Check 2.4.2: Current UNI approval for V3 router
-cast call $UNI \
-  "allowance(address,address)(uint256)" \
-  $YOUR_WALLET \
-  $V3_ROUTER \
-  --rpc-url https://polygon-rpc.com
+# Check 3.1.2: Chain ID = 137
+grep "CHAIN_ID=" src/rust-bot/.env.live
+# Expected: 137
+
+# Check 3.1.3: Private key configured (64+ chars)
+grep "PRIVATE_KEY=" src/rust-bot/.env.live | wc -c
+# Expected: >64 characters
+
+# Check 3.1.4: Poll interval configured (>=1000ms)
+grep "POLL_INTERVAL_MS=" src/rust-bot/.env.live
+
+# Check 3.1.5: LIVE_MODE=true
+grep "LIVE_MODE=" src/rust-bot/.env.live
+# Expected: true
 ```
 
-**Approval Checklist**:
 ```
-[ ] CRITICAL: USDC approved for V3 router
-[ ] CRITICAL: UNI approved for V3 router
-[ ] RECOMMENDED: Approvals not unlimited (use exact amounts)
-[ ] RECOMMENDED: Revoke approvals after testing
+[ ] CRITICAL: RPC URL configured
+[ ] IMPORTANT: RPC is WebSocket (wss://)
+[ ] CRITICAL: Chain ID = 137 (Polygon)
+[ ] CRITICAL: Private key configured
+[ ] IMPORTANT: Poll interval configured (>=1000ms)
+[ ] CRITICAL: LIVE_MODE=true
 ```
 
 ---
 
-## 3️⃣ BOT CONFIGURATION (18 checks)
-
-### **3.1 Core Configuration**
+### 3.2 Shared Data Architecture
 
 ```bash
-# Check 3.1.1: Review main config
-cat config/paper_trading.toml
+# Check 3.2.1: POOL_STATE_FILE configured + file exists
+grep "POOL_STATE_FILE=" src/rust-bot/.env.live
 
-# Verify critical settings:
+# Check 3.2.2: WHITELIST_FILE configured + file exists
+grep "WHITELIST_FILE=" src/rust-bot/.env.live
 ```
 
-**Configuration Checklist**:
 ```
-[ ] CRITICAL: RPC URL configured correctly
-[ ] CRITICAL: Network = "polygon" (not "mainnet")
-[ ] CRITICAL: Chain ID = 137
-[ ] CRITICAL: Poll interval = 10000ms
-[ ] IMPORTANT: Pool sync enabled
-[ ] IMPORTANT: V3 integration enabled
-```
-
-**Record Configuration**:
-```toml
-[network]
-name = "_____________"
-chain_id = _____________
-rpc_url = "_____________"
-
-[collection]
-poll_interval_ms = _____________
-v2_pools_enabled = _____________
-v3_pools_enabled = _____________
-
-[filtering]
-min_tvl_v2 = _____________
-min_tvl_v3 = _____________
+[ ] CRITICAL: POOL_STATE_FILE configured
+[ ] IMPORTANT: Pool state file exists at configured path
+[ ] CRITICAL: WHITELIST_FILE configured
+[ ] IMPORTANT: Whitelist file exists at configured path
 ```
 
 ---
 
-### **3.2 Pool Configuration**
+### 3.3 DEX Configuration (V3)
+
+```
+V3 Factory:  0x1F98431c8aD98523631AE4a59f267346ea31F984
+V3 Router:   0xE592427A0AEce92De3Edee1F18E0157C05861564
+V3 QuoterV1: 0xb27308f9F90D607463bb33eA1BeBb41C27CE5AB6
+```
+
+```
+[ ] CRITICAL: Uniswap V3 Factory address correct
+[ ] CRITICAL: Uniswap V3 Router address correct
+[ ] CRITICAL: Uniswap V3 QuoterV1 address correct
+```
+
+---
+
+### 3.4 Trading Parameters
 
 ```bash
-# Check 3.2.1: Review pools.toml
-cat config/pools.toml
-
-# Check 3.2.2: Count configured pools
-cat config/pools.toml | grep -c "\\[\\[pools\\]\\]"
+# Check values in .env.live
+grep "MIN_PROFIT_USD=" src/rust-bot/.env.live        # $0.05-100
+grep "MAX_TRADE_SIZE_USD=" src/rust-bot/.env.live     # $10-10000
+grep "MAX_SLIPPAGE_PERCENT=" src/rust-bot/.env.live   # 0.1-5%
+grep "MAX_GAS_PRICE_GWEI=" src/rust-bot/.env.live     # >=10
 ```
 
-**Pool Config Checklist**:
 ```
-[ ] CRITICAL: UNI/USDC V3 0.05% configured
-[ ] CRITICAL: UNI/USDC V3 1.00% configured
-[ ] IMPORTANT: Pool addresses correct
-[ ] IMPORTANT: Fee tiers correct (500, 10000)
-[ ] RECOMMENDED: Only high-TVL pools enabled
-```
-
-**Record Configured Pools**:
-```
-V2 Pools: _____________
-V3 Pools: _____________
-Total: _____________
-Active pairs: _____________
+[ ] IMPORTANT: Min profit threshold reasonable ($0.05-100)
+[ ] IMPORTANT: Max trade size reasonable ($10-10,000)
+[ ] IMPORTANT: Max slippage reasonable (0.1-5%)
+[ ] IMPORTANT: Max gas price configured (>=10 gwei)
 ```
 
 ---
 
-### **3.3 Strategy Configuration**
+### 3.5 Trading Pairs
 
 ```bash
-# Check 3.3.1: Review strategies
-cat config/strategies.toml
+# Check TRADING_PAIRS configured (comma-separated list)
+grep "TRADING_PAIRS=" src/rust-bot/.env.live
 ```
 
-**Strategy Checklist**:
-```
-[ ] IMPORTANT: Multiple strategies configured
-[ ] IMPORTANT: Thresholds reasonable (>0.50%)
-[ ] IMPORTANT: Trade sizes appropriate
-[ ] RECOMMENDED: Discovery Mode threshold >0.20%
-```
+7 expected pairs: WETH/USDC, WMATIC/USDC, WBTC/USDC, USDT/USDC, DAI/USDC, LINK/USDC, UNI/USDC
 
-**Record Active Strategies**:
 ```
-Strategy Name          | Min Spread | Trade Size
------------------------|------------|------------
-Aggressive            | _______%   | $_______
-Altcoin Hunter        | _______%   | $_______
-Diversifier           | _______%   | $_______
-Discovery Mode        | _______%   | $_______
+[ ] CRITICAL: Trading pairs configured
 ```
 
 ---
 
-### **3.4 Execution Configuration**
+### 3.6 Tax Logging (IRS Compliance)
 
 ```bash
-# Check 3.4.1: Review execution.toml
-cat config/execution.toml
+grep "TAX_LOG_ENABLED=" src/rust-bot/.env.live   # Expected: true
+grep "TAX_LOG_DIR=" src/rust-bot/.env.live        # Expected: data/tax path
+grep "RUST_LOG=" src/rust-bot/.env.live           # Logging level
 ```
 
-**Execution Config Checklist**:
 ```
-[ ] CRITICAL: Mode = "paper" initially (NOT "live" yet!)
-[ ] CRITICAL: Test mode available
-[ ] IMPORTANT: Gas price limits configured
-[ ] IMPORTANT: Slippage tolerance configured
-[ ] RECOMMENDED: Max per trade = $50-100
-```
-
-**Record Execution Settings**:
-```toml
-[execution]
-mode = "_____________"  # Should be "paper" for now
-test_mode = _____________
-
-[limits]
-max_per_trade = $_____________
-max_daily_trades = _____________
-gas_price_limit_gwei = _____________
-
-[slippage]
-max_slippage_pct = _____________%
+[ ] CRITICAL: TAX_LOG_ENABLED=true
+[ ] IMPORTANT: TAX_LOG_DIR configured
+[ ] RECOMMENDED: Rust logging configured (RUST_LOG)
 ```
 
 ---
 
-## 4️⃣ DATA INTEGRITY (10 checks)
+## 4. DATA INTEGRITY (12 checks)
 
-### **4.1 Opportunity Detection**
+### 4.1 Pool State JSON Integrity
 
-**NOTE: Two profitable routes discovered - verify BOTH are being detected**
-
-```sql
--- Check 4.1.1: Recent opportunities detected
-SELECT COUNT(*) as recent_opps
-FROM opportunities
-WHERE timestamp > NOW() - INTERVAL '10 minutes';
--- Expected: >200 opportunities (both routes combined)
-
--- Check 4.1.2: Opportunity distribution by route
-SELECT
-    pair,
-    dex_from,
-    dex_to,
-    COUNT(*) as count,
-    AVG(spread_pct) as avg_spread,
-    AVG(expected_profit) as avg_profit,
-    MAX(timestamp) as last_seen
-FROM opportunities
-WHERE timestamp > NOW() - INTERVAL '1 hour'
-GROUP BY pair, dex_from, dex_to
-ORDER BY count DESC;
-
--- Check 4.1.3: Verify BOTH routes detected
--- Route 1: V3 1.00% → V3 0.05% (expect ~209 detections/hour, 2.24% avg spread)
--- Route 2: V3 0.30% → V3 0.05% (expect ~215 detections/hour, 1.43% avg spread)
-
--- Check 4.1.4: Spread value distribution
-SELECT
-    FLOOR(spread_pct) as spread_bucket,
-    COUNT(*) as count
-FROM opportunities
-WHERE timestamp > NOW() - INTERVAL '1 hour'
-GROUP BY FLOOR(spread_pct)
-ORDER BY spread_bucket;
--- Expected: Buckets at 1% and 2% (corresponding to both routes)
-```
-
-**Data Integrity Checklist**:
-```
-[ ] CRITICAL: Recent opportunities detected (<10 min)
-[ ] CRITICAL: Spread values varying (not constant)
-[ ] CRITICAL: Route 1 (1.00%→0.05%) actively detected
-[ ] CRITICAL: Route 2 (0.30%→0.05%) actively detected
-[ ] IMPORTANT: Route 1 avg spread ~2.24%
-[ ] IMPORTANT: Route 2 avg spread ~1.43%
-[ ] IMPORTANT: Combined >400 detections/hour
-[ ] IMPORTANT: Timestamps updating continuously
-[ ] RECOMMENDED: Avg profit >$9 per opportunity
-```
-
-**Expected Detection Metrics**:
-```
-Route 1 (V3 1.00% → V3 0.05%):
-├─ Spread: ~2.24%
-├─ Profit/trade: ~$10.25
-└─ Detections/hour: ~209
-
-Route 2 (V3 0.30% → V3 0.05%):
-├─ Spread: ~1.43%
-├─ Profit/trade: ~$9.22
-└─ Detections/hour: ~215
-
-Combined: ~424 detections/hour, $10.28 avg profit
-```
-
----
-
-### **4.2 Pool Sync Status**
-
-```sql
--- Check 4.2.1: Pool sync freshness
-SELECT 
-    pair,
-    dex,
-    last_sync,
-    NOW() - last_sync as time_since_sync,
-    block_number
-FROM pool_state
-ORDER BY last_sync DESC
-LIMIT 20;
--- Expected: All synced within last 30 seconds
-
--- Check 4.2.2: V2 vs V3 sync status
-SELECT 
-    CASE WHEN dex LIKE '%V3%' THEN 'V3' ELSE 'V2' END as pool_type,
-    COUNT(*) as pool_count,
-    AVG(EXTRACT(EPOCH FROM (NOW() - last_sync))) as avg_seconds_since_sync
-FROM pool_state
-GROUP BY CASE WHEN dex LIKE '%V3%' THEN 'V3' ELSE 'V2' END;
-```
-
-**Pool Sync Checklist**:
-```
-[ ] CRITICAL: All pools synced <60s ago
-[ ] CRITICAL: Block numbers progressing
-[ ] IMPORTANT: V3 pools syncing regularly
-[ ] IMPORTANT: No stale pools (>5 min)
-```
-
----
-
-### **4.3 Spread Calculation Validation**
-
-```sql
--- Check 4.3.1: Spread calculation sanity check
-SELECT 
-    pair,
-    dex_from,
-    dex_to,
-    MIN(spread_pct) as min_spread,
-    MAX(spread_pct) as max_spread,
-    AVG(spread_pct) as avg_spread,
-    STDDEV(spread_pct) as spread_stddev
-FROM opportunities
-WHERE timestamp > NOW() - INTERVAL '1 hour'
-GROUP BY pair, dex_from, dex_to
-HAVING COUNT(*) > 10;
--- Expected: Reasonable variance (stddev > 0.1)
-```
-
-**Spread Validation Checklist**:
-```
-[ ] CRITICAL: Spreads are varying (not constant)
-[ ] CRITICAL: Spreads in reasonable range (0.5-5%)
-[ ] IMPORTANT: Standard deviation >0.1%
-[ ] IMPORTANT: No negative spreads
-```
-
----
-
-## 5️⃣ EXECUTION PATH VALIDATION (14 checks)
-
-### **5.1 Dry Run Test**
-
-**NOTE: Test BOTH profitable routes separately**
+The V3 shared-data architecture stores all pool prices in a JSON state file
+written by the data collector. The live bot reads this file instead of making
+RPC calls for price discovery.
 
 ```bash
-# Check 5.1.1: Simulate Route 1 execution (no real transaction)
-./target/release/dexarb-bot \
-  --dry-run \
-  --pair UNI/USDC \
-  --route "V3_1.00%->V3_0.05%" \
-  --amount 50
+# Check 4.1.1: State file is valid JSON
+python3 -c "import json; json.load(open('data/pool_state_phase1.json'))"
 
-# Expected output for Route 1:
-# - Spread: ~2.24%
-# - Est. Profit: ~$10.25 per $1000 trade
-# - Gas: <$1
+# Check 4.1.2: State file recently updated (<2 min)
+# Data collector should be writing every ~10-30 seconds
+stat -c%Y data/pool_state_phase1.json
 
-# Check 5.1.2: Simulate Route 2 execution (no real transaction)
-./target/release/dexarb-bot \
-  --dry-run \
-  --pair UNI/USDC \
-  --route "V3_0.30%->V3_0.05%" \
-  --amount 50
-
-# Expected output for Route 2:
-# - Spread: ~1.43%
-# - Est. Profit: ~$9.22 per $1000 trade
-# - Gas: <$1
-
-# Check 5.1.3: Compare routes side-by-side
-./target/release/dexarb-bot \
-  --dry-run \
-  --pair UNI/USDC \
-  --all-routes \
-  --amount 50
+# Check 4.1.3: V3 pools have valid prices
+python3 -c "
+import json
+with open('data/pool_state_phase1.json') as f:
+    data = json.load(f)
+v3 = data.get('v3_pools', {})
+block = data.get('block_number', 0)
+prices_ok = sum(1 for p in v3.values() if 0 < p.get('price',0) < 1e15)
+print(f'V3 pools: {len(v3)}, with prices: {prices_ok}, block: {block}')
+"
 ```
 
-**Dry Run Checklist**:
 ```
-[ ] CRITICAL: Route 1 dry run completes without errors
-[ ] CRITICAL: Route 2 dry run completes without errors
-[ ] CRITICAL: Route 1 calculation correct (~2.24% spread)
-[ ] CRITICAL: Route 2 calculation correct (~1.43% spread)
-[ ] CRITICAL: Gas estimation reasonable (<$1) for both
-[ ] IMPORTANT: Route 1 profit ~$10.25/trade matches expected
-[ ] IMPORTANT: Route 2 profit ~$9.22/trade matches expected
-[ ] IMPORTANT: Slippage estimation realistic (1-5%) for both
-```
-
-**Recommended Test Trade Plan**:
-```
-Test $100 capital allocation:
-├─ Route 1 (1.00%→0.05%): $50 test trade
-└─ Route 2 (0.30%→0.05%): $50 test trade
-
-This validates BOTH routes with minimal risk.
+[ ] CRITICAL: Pool state is valid JSON
+[ ] CRITICAL: Pool state fresh (<2 minutes, data collector active)
+[ ] CRITICAL: V3 pools have valid price data
+[ ] IMPORTANT: Block number tracked in state
 ```
 
 ---
 
-### **5.2 Gas Estimation**
+### 4.2 Whitelist Data Consistency
 
 ```bash
-# Check 5.2.1: Estimate gas for V3 swap
-cast estimate \
-  --from $YOUR_WALLET \
-  $V3_ROUTER \
-  "exactInputSingle((address,address,uint24,address,uint256,uint256,uint256,uint160))" \
-  "($UNI,$USDC,10000,$YOUR_WALLET,1000000000000000000,0,0,0)" \
-  --rpc-url https://polygon-rpc.com
+# Check 4.2.1: Whitelist file is valid JSON
+python3 -c "import json; json.load(open('config/pools_whitelist.json'))"
 
-# Check 5.2.2: Current gas price
-cast gas-price --rpc-url https://polygon-rpc.com
-# Expected: <100 gwei on Polygon
+# Check 4.2.2: Enforcement mode = strict
+python3 -c "
+import json
+with open('config/pools_whitelist.json') as f:
+    data = json.load(f)
+print(data['config']['whitelist_enforcement'])
+"
 
-# Check 5.2.3: Estimated gas cost
-# Gas units × Gas price × MATIC price ÷ 1e9
-# Typical: 200K gas × 30 gwei × $0.60 ÷ 1e9 = $0.36
+# Check 4.2.3: Whitelisted pools appear in state file
+# Cross-references pool addresses between whitelist and state
+
+# Check 4.2.4: Liquidity thresholds configured
 ```
 
-**Gas Estimation Checklist**:
 ```
-[ ] IMPORTANT: Gas estimate <300K units
-[ ] IMPORTANT: Gas price <100 gwei
-[ ] IMPORTANT: Total gas cost <$1 per trade
-[ ] RECOMMENDED: Gas price monitoring working
-```
-
-**Record Gas Estimates**:
-```
-Single V3 swap: _____________ gas units
-Gas price: _____________ gwei
-Cost in MATIC: _____________ MATIC
-Cost in USD: $_____________
+[ ] CRITICAL: Whitelist file is valid JSON
+[ ] CRITICAL: Whitelist enforcement = strict
+[ ] IMPORTANT: Whitelisted pools present in state data
+[ ] IMPORTANT: Liquidity thresholds configured
 ```
 
 ---
 
-### **5.3 Slippage Simulation**
+### 4.3 Data Directory Health
+
+```
+[ ] IMPORTANT: Data directory writable
+[ ] IMPORTANT: Tax directory exists and writable
+[ ] RECOMMENDED: No corrupted JSON data files
+```
+
+---
+
+### 4.4 Trading Pair Coverage
+
+Verifies which of the 7 expected pairs have V3 pool data in the state file.
+
+Expected pairs: WETH/USDC, WMATIC/USDC, WBTC/USDC, USDT/USDC, DAI/USDC, LINK/USDC, UNI/USDC
+
+```
+[ ] IMPORTANT: At least 5/7 trading pairs present in state
+```
+
+---
+
+## 5. EXECUTION PATH VALIDATION (9 checks)
+
+### 5.1 Binary and RPC Readiness
 
 ```bash
-# Check 5.3.1: Test slippage calculation
-# In your code or via test script
+# Check 5.1.1: Live bot binary executable
+test -x src/rust-bot/target/release/dexarb-bot
 
-# Expected behavior:
-# - Calculate price impact for trade size
-# - Compare to pool depth
-# - Estimate slippage percentage
+# Check 5.1.2: Data collector binary executable
+test -x src/rust-bot/target/release/data-collector
+
+# Check 5.1.3: Bot binary is valid ELF executable
+file src/rust-bot/target/release/dexarb-bot
+
+# Check 5.1.4: Gas price reasonable (<500 gwei)
+# Checked via eth_gasPrice RPC call
+
+# Check 5.1.5: RPC eth_call working
+# Checked via eth_blockNumber
 ```
 
-**Slippage Checklist**:
 ```
-[ ] IMPORTANT: Slippage calculation implemented
-[ ] IMPORTANT: Slippage based on pool liquidity
-[ ] IMPORTANT: Max slippage configured (3-5%)
-[ ] RECOMMENDED: Different slippage for V2/V3
-```
-
-**Test Slippage Scenarios**:
-```
-$50 trade in $10M pool:
-└─ Expected: 0.5% slippage
-
-$50 trade in $2M pool:
-└─ Expected: 1-2% slippage
-
-$500 trade in $10M pool:
-└─ Expected: 1-2% slippage
+[ ] CRITICAL: Live bot binary executable
+[ ] CRITICAL: Data collector binary executable
+[ ] IMPORTANT: Bot binary is valid ELF
+[ ] IMPORTANT: Gas price reasonable (<500 gwei)
+[ ] CRITICAL: RPC eth_call working
 ```
 
 ---
 
-### **5.4 Trade Simulation (Paper Trading)**
+### 5.2 V3 Architecture Integration
 
 ```bash
-# Check 5.4.1: Review recent paper trades
-psql -d dexarb_db -c "
-SELECT 
-    timestamp,
-    pair,
-    route,
-    amount_usd,
-    expected_profit,
-    simulated_profit,
-    slippage_pct
-FROM paper_trades
-WHERE timestamp > NOW() - INTERVAL '1 hour'
-ORDER BY timestamp DESC
-LIMIT 10;"
+# Check 5.2.1: Multicall3 batch Quoter module registered
+grep "multicall_quoter" src/rust-bot/src/arbitrage/mod.rs
+
+# Check 5.2.2: Whitelist filter integrated in detector
+grep "whitelist" src/rust-bot/src/arbitrage/detector.rs
+
+# Check 5.2.3: HALT on committed capital mechanism
+grep "tx_hash" src/rust-bot/src/main.rs
+
+# Check 5.2.4: Slippage parameters in .env.live
+grep "SLIPPAGE" src/rust-bot/.env.live
 ```
 
-**Paper Trading Checklist**:
 ```
-[ ] CRITICAL: Paper trades being recorded
-[ ] IMPORTANT: Slippage being simulated
-[ ] IMPORTANT: Profit calculations reasonable
-[ ] IMPORTANT: Success rate >50% in paper trading
+[ ] CRITICAL: Multicall3 batch Quoter module registered
+[ ] IMPORTANT: Whitelist filter integrated in detector
+[ ] IMPORTANT: HALT on committed capital mechanism present
+[ ] IMPORTANT: Slippage parameters configured
 ```
 
 ---
 
-## 6️⃣ RISK MANAGEMENT (12 checks)
+## 6. RISK MANAGEMENT (6 checks)
 
-### **6.1 Capital Controls**
-
-```toml
-# Check 6.1.1: Review risk limits
-[risk_management]
-max_capital_at_risk = 100  # $100 total
-max_per_trade = 50         # $50 per trade
-max_simultaneous_trades = 2
-reserve_for_gas = 10       # $10 reserve
-
-[stop_loss]
-enabled = true
-max_daily_loss = 30        # Stop if lose $30 in one day
-max_consecutive_losses = 5  # Stop after 5 losses in a row
-```
-
-**Capital Controls Checklist**:
-```
-[ ] CRITICAL: Max capital = $100
-[ ] CRITICAL: Max per trade = $50
-[ ] CRITICAL: Stop loss configured
-[ ] IMPORTANT: Gas reserve allocated
-[ ] IMPORTANT: Daily loss limit set
-```
-
----
-
-### **6.2 Trade Limits**
-
-```toml
-[trade_limits]
-max_trades_per_hour = 20
-max_trades_per_day = 100
-min_profit_threshold = 0.10  # $0.10 minimum profit
-
-[cooldown]
-after_loss = 60              # 60s cooldown after loss
-after_error = 300            # 5 min cooldown after error
-```
-
-**Trade Limits Checklist**:
-```
-[ ] IMPORTANT: Hourly trade limit set
-[ ] IMPORTANT: Daily trade limit set
-[ ] IMPORTANT: Minimum profit threshold
-[ ] RECOMMENDED: Cooldown periods configured
-```
-
----
-
-### **6.3 Error Handling**
+### 6.1 Capital Controls
 
 ```bash
-# Check 6.3.1: Review error handling in code
-grep -r "\.unwrap()" src/ | wc -l
-# Should be minimal - use proper error handling
+# Check 6.1.1: Max trade size limited
+grep "MAX_TRADE_SIZE_USD" src/rust-bot/.env.live
 
-# Check 6.3.2: Check for panic handlers
-grep -r "panic!" src/ | wc -l
-# Should be zero in production code
+# Check 6.1.2: Min profit threshold set
+grep "MIN_PROFIT_USD" src/rust-bot/.env.live
 
-# Check 6.3.3: Test error scenarios
+# Check 6.1.3: Max gas price limit
+grep "MAX_GAS_PRICE_GWEI" src/rust-bot/.env.live
 ```
 
-**Error Handling Checklist**:
 ```
-[ ] CRITICAL: No unwrap() in critical paths
-[ ] CRITICAL: No unhandled panics
-[ ] IMPORTANT: Errors logged properly
-[ ] IMPORTANT: Graceful degradation on errors
-[ ] RECOMMENDED: Retry logic for transient errors
+[ ] CRITICAL: Max trade size limit configured
+[ ] CRITICAL: Min profit threshold set
+[ ] IMPORTANT: Max gas price limit configured
 ```
 
 ---
 
-## 7️⃣ MONITORING & ALERTS (10 checks)
-
-### **7.1 Logging Configuration**
+### 6.2 Wallet Balances
 
 ```bash
-# Check 7.1.1: Log files exist and are being written
-ls -lh logs/
-tail -20 logs/dexarb.log
+# Check 6.2.1: Live wallet USDC.e balance ($10-2000)
+# Checked via eth_call to USDC.e balanceOf
 
-# Check 7.1.2: Log rotation configured
-cat /etc/logrotate.d/dexarb
+# Check 6.2.2: Live wallet MATIC for gas (>=1 MATIC)
+# Checked via eth_getBalance
 
-# Check 7.1.3: Log level appropriate
-grep "log_level" config/*.toml
+# Check 6.2.3: Backup wallet has funds
+# Checked via eth_call to USDC.e balanceOf
 ```
 
-**Logging Checklist**:
+Two-wallet architecture:
+- **Live wallet**: Active trading, holds USDC.e + MATIC for gas
+- **Backup wallet**: Reserve funds, separate key for safety
+
 ```
-[ ] CRITICAL: Logs being written
-[ ] CRITICAL: Log rotation configured
-[ ] IMPORTANT: Log level = "info" or "debug"
-[ ] IMPORTANT: Logs include timestamps
-[ ] RECOMMENDED: Separate log files for errors
+[ ] CRITICAL: Live wallet capital reasonable ($10-2000 USDC)
+[ ] CRITICAL: MATIC for gas available (>=1 MATIC)
+[ ] IMPORTANT: Backup wallet has funds
 ```
 
 ---
 
-### **7.2 Monitoring Setup**
+## 7. MONITORING & ALERTS (4 checks)
+
+### 7.1 Runtime Monitoring
 
 ```bash
-# Check 7.2.1: Monitoring script exists
-ls -l scripts/monitor.sh
+# Check 7.1.1: Data collector process running
+pgrep -f "data-collector"
 
-# Check 7.2.2: Metrics being collected
-cat scripts/monitor.sh
-# Should track:
-# - Trade count
-# - Win rate  
-# - P&L
-# - Error rate
-# - Uptime
+# Check 7.1.2: Discord webhook configured
+grep "DISCORD_WEBHOOK" src/rust-bot/.env.live
+
+# Check 7.1.3: Log directory exists
+ls -la logs/
+
+# Check 7.1.4: Tmux sessions available
+tmux list-sessions
 ```
 
-**Monitoring Checklist**:
 ```
-[ ] IMPORTANT: Monitoring script exists
-[ ] IMPORTANT: Metrics being logged
-[ ] RECOMMENDED: Dashboard or visual monitoring
-[ ] RECOMMENDED: Historical data retention
+[ ] CRITICAL: Data collector running (state file will go stale otherwise)
+[ ] IMPORTANT: Discord webhook configured in .env.live
+[ ] RECOMMENDED: Log directory exists
+[ ] RECOMMENDED: Tmux sessions available for management
 ```
 
 ---
 
-### **7.3 Alert Configuration**
+## 8. FINANCIAL CONTROLS (10 checks)
+
+### 8.1 Two-Wallet Architecture
+
+```
+Live wallet:   0xa532eb528aE17eFC881FCe6894a08B5b70fF21e2
+Backup wallet: 0x8e843e351c284dd96F8E458c10B39164b2Aeb7Fb
+```
+
+```
+[ ] CRITICAL: Dedicated trading wallet configured
+[ ] CRITICAL: Live wallet has trading capital
+[ ] CRITICAL: Live wallet has gas funds (MATIC)
+```
+
+---
+
+### 8.2 Tax Logging (IRS Compliance)
+
+All crypto trades are taxable events. Tax logging captures 34+ IRS-required fields
+per trade.
+
+**Tax record fields captured**:
+```
+IDENTIFICATION: trade_id (UUID), timestamp (RFC3339), tax_year
+TRANSACTION:    transaction_type, asset_sent/received, amounts
+USD VALUATIONS: usd_value_sent/received, spot_prices (IRS requires)
+COST BASIS:     cost_basis_usd, proceeds_usd, capital_gain_loss, holding_period
+FEES:           gas_fee_native (MATIC), gas_fee_usd, dex_fee_percent
+BLOCKCHAIN:     chain_id (137), transaction_hash, block_number, wallet
+DEX ROUTING:    dex_buy/sell, pool_address_buy/sell
+```
+
+**Output files**:
+- `data/tax/trades_YYYY.csv` — annual CSV files
+- `data/tax/trades_YYYY.jsonl` — JSON backup (redundant)
+- RP2 export for tax software (https://github.com/eprbell/rp2)
 
 ```bash
-# Check 7.3.1: Alert script exists
-ls -l scripts/alert.sh
+# Check 8.2.1: Tax logging enabled
+grep "TAX_LOG_ENABLED=true" src/rust-bot/.env.live
 
-# Check 7.3.2: Alert conditions configured
-cat scripts/alert.sh
-# Should alert on:
-# - Daily loss >$30
-# - >5 consecutive failures
-# - Critical errors
-# - Bot stopped
+# Check 8.2.2: Tax directory configured
+grep "TAX_LOG_DIR=" src/rust-bot/.env.live
+
+# Check 8.2.3: Tax directory exists and writable
+test -w data/tax/
+
+# Check 8.2.4: Tax module exists in bot source
+ls src/rust-bot/src/tax/mod.rs
+
+# Check 8.2.5: Tax logging integrated in main.rs
+grep "enable_tax_logging" src/rust-bot/src/main.rs
+
+# Check 8.2.6: CSV logger source
+ls src/rust-bot/src/tax/csv_logger.rs
+
+# Check 8.2.7: RP2 export source
+ls src/rust-bot/src/tax/rp2_export.rs
 ```
 
-**Alert Checklist**:
 ```
-[ ] IMPORTANT: Alert mechanism exists
-[ ] IMPORTANT: Alert on stop loss
-[ ] IMPORTANT: Alert on critical errors
-[ ] RECOMMENDED: Alert on unusual activity
-[ ] RECOMMENDED: Multiple alert channels (email, SMS, etc.)
+[ ] CRITICAL: TAX_LOG_ENABLED=true in .env.live
+[ ] CRITICAL: Tax directory configured
+[ ] CRITICAL: Tax directory exists and writable
+[ ] IMPORTANT: Tax module source exists
+[ ] IMPORTANT: Tax logging integrated in bot (main.rs)
+[ ] IMPORTANT: CSV tax logger source ready
+[ ] RECOMMENDED: RP2 export source ready
 ```
 
 ---
 
-## 8️⃣ FINANCIAL CONTROLS (8 checks)
+## 9. OPERATIONAL PROCEDURES (5 checks)
 
-### **8.1 Wallet Setup**
+### 9.1 Documentation and Tools
 
 ```bash
-# Check 8.1.1: Trading wallet created
-echo $TRADING_WALLET
-# Should be dedicated wallet, not main wallet
+# Check 9.1.1: Deployment checklist documented
+ls docs/pre_100_deployment_checklist.md
 
-# Check 8.1.2: Wallet balance
-cast balance $TRADING_WALLET --rpc-url https://polygon-rpc.com
+# Check 9.1.2: Whitelist verification script
+ls scripts/verify_whitelist.py
 
-# Check 8.1.3: USDC balance
-cast call 0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174 \
-  "balanceOf(address)(uint256)" \
-  $TRADING_WALLET \
-  --rpc-url https://polygon-rpc.com
+# Check 9.1.3: Utility scripts available (>=3)
+ls scripts/*.sh scripts/*.py
+
+# Check 9.1.4: Version control active
+git -C . rev-list --count HEAD
+
+# Check 9.1.5: No uncommitted changes to source/config
+git status --porcelain src/rust-bot/src/ config/
 ```
 
-**Wallet Checklist**:
 ```
-[ ] CRITICAL: Dedicated trading wallet
-[ ] CRITICAL: Initial capital loaded ($110 = $100 + gas)
-[ ] CRITICAL: Private key secured
-[ ] IMPORTANT: No unnecessary funds in wallet
-[ ] RECOMMENDED: Hardware wallet or secure key management
-```
-
-**Record Wallet Details**:
-```
-Trading Wallet: 0x_______________________
-MATIC Balance: _____________ MATIC
-USDC Balance: $_____________ USDC
-Total USD Value: $_____________
+[ ] IMPORTANT: Deployment checklist documented
+[ ] IMPORTANT: Whitelist verification script exists
+[ ] RECOMMENDED: Utility scripts available (>=3)
+[ ] IMPORTANT: Version control active (git)
+[ ] RECOMMENDED: No uncommitted changes to source/config
 ```
 
 ---
 
-### **8.2 Tax Logging (IRS Compliance)**
+## 10. EMERGENCY PROTOCOLS (4 checks)
 
-**NOTE: Tax logging is CRITICAL for IRS compliance. All crypto trades are taxable events.**
+### 10.1 Emergency Stop and Recovery
 
 ```bash
-# Check 8.2.1: Tax logging enabled in .env
-grep "TAX_LOG" src/rust-bot/.env
-# Expected:
-#   TAX_LOG_DIR=/home/botuser/bots/dexarb/data/tax
-#   TAX_LOG_ENABLED=true
+# Check 10.1.1: Can stop bot quickly (tmux session or kill)
+tmux list-sessions | grep dexarb
 
-# Check 8.2.2: Tax directory exists and writable
-ls -la data/tax/
-touch data/tax/.test && rm data/tax/.test && echo "Writable: YES"
+# Check 10.1.2: Private key not exposed in logs
+grep -r "PRIVATE_KEY_PREFIX" logs/ | wc -l
 
-# Check 8.2.3: Tax module compiled in bot
-grep -r "enable_tax_logging" src/rust-bot/src/main.rs
-# Expected: Tax logging enabled after executor creation
+# Check 10.1.3: Foundry cast available for emergency approval revokes
+which cast || ls ~/.foundry/bin/cast
 
-# Check 8.2.4: Verify tax record fields (34+ IRS-required fields)
-grep -A50 "pub struct TaxRecord" src/rust-bot/src/tax/mod.rs | head -60
-# Must include: trade_id, timestamp, tax_year, transaction_type,
-#   asset_sent/received, usd_values, cost_basis, gas_fees, tx_hash, etc.
-
-# Check 8.2.5: CSV logger ready
-ls -la src/rust-bot/src/tax/csv_logger.rs
-# Creates: data/tax/trades_YYYY.csv (annual files)
-
-# Check 8.2.6: JSON backup logger ready
-ls -la src/rust-bot/src/tax/json_logger.rs
-# Creates: data/tax/trades_YYYY.jsonl (redundant backup)
-
-# Check 8.2.7: RP2 export available for tax software
-ls -la src/rust-bot/src/tax/rp2_export.rs
-# For: https://github.com/eprbell/rp2 (open-source tax calculator)
-
-# Check 8.2.8: Tax export utility compiled
-ls -la src/rust-bot/target/debug/tax-export 2>/dev/null || \
-  echo "Run: cargo build --bin tax-export"
+# Check 10.1.4: Documentation available (next_steps.md)
+ls docs/next_steps.md
 ```
 
-**Tax Record Fields Captured**:
 ```
-IDENTIFICATION:
-├─ trade_id (UUID)
-├─ timestamp (RFC3339)
-└─ tax_year
-
-TRANSACTION:
-├─ transaction_type (SWAP, BUY, SELL, TRANSFER, FEE)
-├─ asset_sent / amount_sent
-└─ asset_received / amount_received
-
-USD VALUATIONS (IRS requires):
-├─ usd_value_sent (fair market value)
-├─ usd_value_received
-├─ spot_price_sent
-└─ spot_price_received
-
-COST BASIS:
-├─ cost_basis_usd
-├─ proceeds_usd
-├─ capital_gain_loss
-├─ holding_period_days (0 for arbitrage)
-└─ gain_type (SHORT_TERM for all arbitrage)
-
-FEES (deductible):
-├─ gas_fee_native (MATIC)
-├─ gas_fee_usd
-├─ dex_fee_percent
-└─ total_fees_usd
-
-BLOCKCHAIN AUDIT:
-├─ blockchain ("Polygon")
-├─ chain_id (137)
-├─ transaction_hash
-├─ block_number
-└─ wallet_address
-
-DEX ROUTING:
-├─ dex_buy / dex_sell
-└─ pool_address_buy / pool_address_sell
-```
-
-**Tax Logging Checklist**:
-```
-[ ] CRITICAL: TAX_LOG_ENABLED=true in .env
-[ ] CRITICAL: TAX_LOG_DIR configured and writable
-[ ] CRITICAL: Tax module integrated in main.rs
-[ ] CRITICAL: All 34+ IRS fields captured per trade
-[ ] IMPORTANT: CSV annual files created (trades_YYYY.csv)
-[ ] IMPORTANT: JSON backup files created (trades_YYYY.jsonl)
-[ ] IMPORTANT: USD valuations at trade time
-[ ] IMPORTANT: Gas fees tracked for deductions
-[ ] RECOMMENDED: RP2 export configured for tax software
-[ ] RECOMMENDED: Tax export utility compiled
-```
-
-**Post-Trade Tax Verification**:
-```bash
-# After first real trade, verify logging:
-cat data/tax/trades_2026.csv | head -2
-# Should show header + first trade record
-
-cat data/tax/trades_2026.jsonl | head -1 | python3 -m json.tool
-# Should show complete JSON record with all fields
-
-# Generate tax summary:
-./target/debug/tax-export summary 2026
-# Shows total trades, proceeds, cost basis, gains/losses
-```
-
-**Record Tax Configuration**:
-```
-Tax Log Directory: /home/botuser/bots/dexarb/data/tax
-Tax Logging Enabled: [ ] Yes  [ ] No
-CSV Logger Ready: [ ] Yes  [ ] No
-JSON Logger Ready: [ ] Yes  [ ] No
-RP2 Export Ready: [ ] Yes  [ ] No
-
-Cost Basis Method: FIFO (First In, First Out)
-Expected Tax Treatment: Short-term capital gains (held <1 year)
+[ ] CRITICAL: Bot can be stopped quickly (tmux/kill)
+[ ] CRITICAL: Private key not exposed in logs
+[ ] IMPORTANT: Foundry cast available for emergency revokes
+[ ] RECOMMENDED: Operations documentation available
 ```
 
 ---
 
-### **8.3 Accounting Setup**
+## FINAL SCORECARD
 
-```bash
-# Check 8.3.1: P&L tracking implemented
-# Should track:
-# - Realized profit/loss
-# - Unrealized profit/loss
-# - Fees paid
-# - Gas costs
-
-# Check 8.3.2: Daily reconciliation script
-ls -l scripts/reconcile.sh
-```
-
-**Accounting Checklist**:
-```
-[ ] IMPORTANT: P&L tracking implemented
-[ ] IMPORTANT: Fee tracking
-[ ] RECOMMENDED: Daily reconciliation
-[ ] RECOMMENDED: Monthly summary reports
-```
-
----
-
-### **8.4 Profit Projections (Dual Routes)**
-
-**Updated projections based on discovered opportunities (2026-01-28)**
+### Category Summary
 
 ```
-TWO PROFITABLE ROUTES DISCOVERED:
-
-Route 1: V3 1.00% → V3 0.05%
-├─ Midmarket Spread: 2.24%
-├─ Executable Spread: ~1.19% (after fees)
-├─ Profit per $1000 trade: ~$10.25
-└─ Detection frequency: ~209/hour
-
-Route 2: V3 0.30% → V3 0.05%
-├─ Midmarket Spread: 1.43%
-├─ Executable Spread: ~0.68% (after fees)
-├─ Profit per $1000 trade: ~$9.22
-└─ Detection frequency: ~215/hour
-
-Combined: 424 opportunities/hour, $10.28 avg profit
+CATEGORY                        | CHECKS | PASSED | STATUS
+--------------------------------|--------|--------|--------
+1. Technical Infrastructure     | 19     | ___/19 | [ ]
+2. Smart Contracts              | 12     | ___/12 | [ ]
+3. Bot Configuration (.env.live)| 21     | ___/21 | [ ]
+4. Data Integrity (JSON state)  | 12     | ___/12 | [ ]
+5. Execution Path Validation    | 9      | ___/9  | [ ]
+6. Risk Management              | 6      | ___/6  | [ ]
+7. Monitoring & Alerts          | 4      | ___/4  | [ ]
+8. Financial Controls           | 10     | ___/10 | [ ]
+9. Operational Procedures       | 5      | ___/5  | [ ]
+10. Emergency Protocols         | 4      | ___/4  | [ ]
+--------------------------------|--------|--------|--------
+TOTAL                           | ~102   | ___    | [ ]
 ```
 
-**Updated Profit Expectations**:
-```
-Capital Level  | Conservative | Expected   | Optimistic
----------------|--------------|------------|------------
-$100 (test)    | $2-5/day     | $5-15/day  | $15-30/day
-$500           | $10-25/day   | $25-60/day | $60-100/day
-$1,000         | $20-50/day   | $50-120/day| $120-200/day
-$5,000         | $100-250/day | $250-600/day| $600-1000/day
-```
-
-**Risk Diversification**:
-```
-With two independent routes:
-├─ If Route 1 faces competition → Route 2 still profitable
-├─ If Route 2 liquidity drops → Route 1 still available
-└─ Combined ROI potential: 5-10% daily at scale
-```
-
-**Profit Projection Checklist**:
-```
-[ ] IMPORTANT: Both routes show positive expected value
-[ ] IMPORTANT: Diversification reduces single-route risk
-[ ] IMPORTANT: Gas costs factored into projections
-[ ] RECOMMENDED: Start with conservative estimates
-```
-
----
-
-## 9️⃣ OPERATIONAL PROCEDURES (9 checks)
-
-### **9.1 Startup Procedure**
-
-```bash
-# Check 9.1.1: Documented startup procedure
-cat docs/STARTUP.md
-
-# Check 9.1.2: Pre-flight checks script
-ls -l scripts/preflight.sh
-
-# Check 9.1.3: Startup script
-ls -l scripts/start.sh
-```
-
-**Startup Checklist**:
-```
-[ ] IMPORTANT: Startup procedure documented
-[ ] IMPORTANT: Pre-flight checks automated
-[ ] RECOMMENDED: Startup script exists
-[ ] RECOMMENDED: Health check after startup
-```
-
----
-
-### **9.2 Shutdown Procedure**
-
-```bash
-# Check 9.2.1: Documented shutdown procedure
-cat docs/SHUTDOWN.md
-
-# Check 9.2.2: Graceful shutdown implemented
-# Bot should:
-# - Finish current trades
-# - Close positions
-# - Save state
-# - Clean shutdown
-
-# Check 9.2.3: Shutdown script
-ls -l scripts/stop.sh
-```
-
-**Shutdown Checklist**:
-```
-[ ] CRITICAL: Graceful shutdown implemented
-[ ] IMPORTANT: Shutdown procedure documented
-[ ] IMPORTANT: State saved on shutdown
-[ ] RECOMMENDED: Backup before shutdown
-```
-
----
-
-### **9.3 Backup & Recovery**
-
-```bash
-# Check 9.3.1: Backup script exists
-ls -l scripts/backup.sh
-
-# Check 9.3.2: Recent backups exist
-ls -lht backups/ | head
-
-# Check 9.3.3: Recovery procedure documented
-cat docs/RECOVERY.md
-
-# Check 9.3.4: Test restore
-# (Optional but recommended)
-```
-
-**Backup Checklist**:
-```
-[ ] IMPORTANT: Backup script exists
-[ ] IMPORTANT: Recent backups (<24 hours)
-[ ] IMPORTANT: Recovery procedure documented
-[ ] RECOMMENDED: Test restore performed
-[ ] RECOMMENDED: Off-site backup
-```
-
----
-
-## 🔟 EMERGENCY PROTOCOLS (7 checks)
-
-### **10.1 Emergency Stop**
-
-```bash
-# Check 10.1.1: Emergency stop script
-cat scripts/emergency_stop.sh
-
-# Should:
-# - Stop bot immediately
-# - Cancel pending transactions
-# - Alert operator
-# - Log reason
-```
-
-**Emergency Stop Checklist**:
-```
-[ ] CRITICAL: Emergency stop script exists
-[ ] CRITICAL: Can stop bot immediately
-[ ] CRITICAL: Operator can trigger remotely
-[ ] IMPORTANT: Alerts sent on emergency stop
-```
-
----
-
-### **10.2 Position Unwinding**
-
-```bash
-# Check 10.2.1: Unwind positions script
-cat scripts/unwind_positions.sh
-
-# Should:
-# - Close all open positions
-# - Convert tokens back to stable
-# - Minimize loss
-```
-
-**Unwinding Checklist**:
-```
-[ ] IMPORTANT: Unwind script exists
-[ ] IMPORTANT: Can close positions safely
-[ ] RECOMMENDED: Dry-run tested
-```
-
----
-
-### **10.3 Incident Response**
-
-```bash
-# Check 10.3.1: Incident response plan
-cat docs/INCIDENT_RESPONSE.md
-
-# Should cover:
-# - Who to contact
-# - What to do
-# - How to assess damage
-# - How to recover
-```
-
-**Incident Response Checklist**:
-```
-[ ] IMPORTANT: Response plan documented
-[ ] IMPORTANT: Contact information available
-[ ] RECOMMENDED: Escalation procedures
-[ ] RECOMMENDED: Post-mortem template
-```
-
----
-
-## 📊 FINAL SCORECARD
-
-### **Category Summary**
+### Pass Criteria
 
 ```
-CATEGORY                    | CHECKS | PASSED | STATUS
-----------------------------|--------|--------|--------
-1. Technical Infrastructure | 15     | ___/15 | [ ]
-2. Smart Contracts          | 15     | ___/15 | [ ]  (added 3 for 0.30% pool)
-3. Bot Configuration        | 18     | ___/18 | [ ]
-4. Data Integrity           | 14     | ___/14 | [ ]  (added 4 for dual-route)
-5. Execution Path           | 18     | ___/18 | [ ]  (added 4 for Route 2)
-6. Risk Management          | 12     | ___/12 | [ ]
-7. Monitoring & Alerts      | 10     | ___/10 | [ ]
-8. Financial Controls       | 12     | ___/12 | [ ]  (added 4 for projections)
-9. Operational Procedures   | 9      | ___/9  | [ ]
-10. Emergency Protocols     | 7      | ___/7  | [ ]
-----------------------------|--------|--------|--------
-TOTAL                       | 130    | ___/130| [ ]
-```
+CRITICAL CHECKS (~52 total):
+  Must pass: ALL (100%)
+  Status: ___
 
-### **Dual-Route Validation Summary**
+IMPORTANT CHECKS (~40 total):
+  Must pass: 90%+
+  Status: ___
 
-```
-ROUTE VERIFICATION          | STATUS
-----------------------------|--------
-Route 1: V3 1.00% → 0.05%  | [ ] Verified on-chain
-Route 2: V3 0.30% → 0.05%  | [ ] Verified on-chain
-0.05% pool TVL >$10M       | [ ] Confirmed
-0.30% pool TVL >$5M        | [ ] Confirmed
-1.00% pool TVL >$2M        | [ ] Confirmed
-Route 1 dry-run passed     | [ ] Tested
-Route 2 dry-run passed     | [ ] Tested
-Both routes detecting      | [ ] Active
-```
-
----
-
-### **Pass Criteria**
-
-```
-CRITICAL CHECKS (42 total):  (increased for dual-route)
-└─ Must pass: 42/42 (100%)
-└─ Status: ___/42
-
-IMPORTANT CHECKS (55 total):  (increased for dual-route)
-└─ Must pass: 50/55 (90%)
-└─ Status: ___/55
-
-RECOMMENDED CHECKS (33 total):
-└─ Should pass: 26/33 (80%)
-└─ Status: ___/33
-
-DUAL-ROUTE CHECKS (8 total):  (NEW)
-└─ Must pass: 8/8 (100%)
-└─ Status: ___/8
+RECOMMENDED CHECKS (~10 total):
+  Should pass: 80%+
+  Status: ___
 
 OVERALL PASS: [ ] Yes  [ ] No
 
-IF YES → Proceed to $100 deployment (test BOTH routes)
-IF NO → Address failed checks first
+IF YES -> Proceed to $100 deployment
+IF NO  -> Address failed checks first
 ```
 
 ---
 
-## 🎯 DEPLOYMENT DECISION MATRIX
-
-### **Based on Scorecard Results**
+### Deployment Decision Matrix
 
 ```
-SCENARIO A: All Critical + 90%+ Important ✅
-├─ Confidence: VERY HIGH (>95%)
-├─ Decision: DEPLOY $100 immediately
-├─ Expected: High probability of success
-└─ Timeline: Start today
+SCENARIO A: All Critical + 90%+ Important
+  Confidence: VERY HIGH (>95%)
+  Decision: DEPLOY $100 immediately
 
-SCENARIO B: All Critical + 80-90% Important ✅
-├─ Confidence: HIGH (85-95%)
-├─ Decision: DEPLOY $100 with close monitoring
-├─ Expected: Good probability of success
-└─ Timeline: Start today, monitor hourly
+SCENARIO B: All Critical + 80-90% Important
+  Confidence: HIGH (85-95%)
+  Decision: DEPLOY $100 with close monitoring
 
-SCENARIO C: All Critical + 70-80% Important ⚠️
-├─ Confidence: MEDIUM (75-85%)
-├─ Decision: DEPLOY $50 test first
-├─ Expected: Moderate success probability
-└─ Timeline: Start with smaller amount
+SCENARIO C: All Critical + 70-80% Important
+  Confidence: MEDIUM (75-85%)
+  Decision: DEPLOY $50 test first
 
-SCENARIO D: Missing Critical Checks ❌
-├─ Confidence: LOW (<75%)
-├─ Decision: DO NOT DEPLOY
-├─ Action: Fix critical issues first
-└─ Timeline: Reassess after fixes
+SCENARIO D: Missing Critical Checks
+  Confidence: LOW (<75%)
+  Decision: DO NOT DEPLOY - fix critical issues first
 ```
 
 ---
 
-## ✅ PRE-DEPLOYMENT FINAL CHECKLIST
+## PRE-DEPLOYMENT FINAL CHECKLIST
 
 **Before funding wallet with $100**:
 
 ```
-[ ] All 42 critical checks passed
+[ ] All critical checks passed (run ./scripts/checklist_full.sh)
 [ ] 90%+ important checks passed
-[ ] All 8 dual-route checks passed
 [ ] Emergency stop procedures tested
-[ ] Monitoring and alerts configured
-[ ] Stop loss limits configured
-[ ] Wallet secured and funded
-[ ] Backup completed
-[ ] Team/operator notified
+[ ] Data collector running and writing fresh state
+[ ] Whitelist enforcement = strict
+[ ] Tax logging enabled
+[ ] Wallet secured and funded (USDC.e + MATIC)
+[ ] Backup wallet funded
+[ ] Both binaries built (release mode)
+[ ] All 42 unit tests pass
 [ ] Documentation reviewed
 [ ] Ready to monitor first hour closely
 ```
 
-**Dual-Route Validation**:
+**Architecture Verification**:
 ```
-[ ] Route 1 (1.00%→0.05%) verified on-chain
-[ ] Route 2 (0.30%→0.05%) verified on-chain
-[ ] All THREE pool TVLs confirmed sufficient
-[ ] Both routes dry-run tested
-[ ] Both routes actively detecting opportunities
-[ ] Test trades planned: $50 each route
+[ ] V3 shared-data (JSON pool state) working
+[ ] Multicall3 batch Quoter pre-screening integrated
+[ ] Whitelist v1.1 strict enforcement active (10 pools, 7 blacklisted)
+[ ] Two-wallet architecture configured
+[ ] Tax logging (IRS compliance) enabled
+[ ] HALT on committed capital safety mechanism present
 ```
 
 **Deployment Authorization**:
 ```
 Completed by: _____________
 Date: _____________
-Time: _____________
 Confidence: ______%
 Deployment Amount: $_____________
-Test Allocation: Route 1 $___ / Route 2 $___
-Expected Daily: $5-15 (conservative) / $15-30 (optimistic)
 Stop Loss: $_____________
-
-Signature: _____________
 ```
 
 ---
 
-## 🚀 POST-DEPLOYMENT IMMEDIATE ACTIONS
+## POST-DEPLOYMENT IMMEDIATE ACTIONS
 
 **First 10 Minutes**:
 ```
 [ ] Confirm bot started successfully
 [ ] Watch for first opportunity detection
-[ ] Verify BOTH routes detecting opportunities
-[ ] Monitor first trade execution
-[ ] Verify logging working
-[ ] Confirm alerts functional
+[ ] Monitor Multicall3 batch verification in logs
+[ ] Verify whitelist filtering working
+[ ] Confirm data collector writing fresh state
 ```
 
 **First Hour**:
 ```
-[ ] Track P&L per route (Route 1 vs Route 2)
-[ ] Monitor win rate for each route
-[ ] Verify ~200+ detections for each route
-[ ] Watch for errors
-[ ] Verify slippage reasonable
+[ ] Track P&L
+[ ] Verify Quoter pre-screening functioning
+[ ] Watch for errors or rejected opportunities
 [ ] Check gas costs
-[ ] Compare actual vs expected ($10.28 avg profit)
+[ ] Verify tax logging capturing trades
 ```
 
 **First 24 Hours**:
 ```
-[ ] Daily P&L review (expect $5-30)
-[ ] Performance vs expectations per route
-[ ] Route 1: ~$10.25/trade, ~209 detections/hr
-[ ] Route 2: ~$9.22/trade, ~215 detections/hr
+[ ] Daily P&L review
+[ ] Performance vs expectations
 [ ] Any adjustments needed
 [ ] Decision: continue, adjust, or stop
-[ ] If successful: plan $500 scale-up
+[ ] If successful: plan scale-up
 ```
 
 ---
 
-## 💡 FINAL NOTES
+## NOTES
 
-### **This Checklist is Your Safety Net**
+### This Checklist is Your Safety Net
 
 - Don't skip checks to save time
 - If something seems off, investigate
@@ -1507,40 +906,24 @@ Signature: _____________
 - Success = learning + validation
 - Failure = lessons + improvement
 
-### **Success Metrics for $100 Test**
+### Success Metrics for $100 Test
 
 ```
 MINIMUM SUCCESS:
-├─ No critical errors
-├─ No loss >$30
-├─ Both routes execute successfully
-├─ Learn execution patterns
-└─ Validate system works
+  No critical errors
+  No loss >$30
+  Tax logging capturing trades
+  System stable
 
 GOOD SUCCESS:
-├─ Net profit >$0
-├─ Win rate >45%
-├─ Both routes profitable
-├─ System stable
-└─ Ready to scale
+  Net profit >$0
+  Multicall3 reducing RPC calls
+  Whitelist filtering working correctly
+  Ready to scale
 
 EXCELLENT SUCCESS:
-├─ Net profit >$15 (dual-route expectation)
-├─ Win rate >55%
-├─ Both routes performing as expected
-├─ No issues
-└─ Scale to $500 immediately
-
-UPDATED EXPECTATIONS (with dual routes):
-├─ Route 1: ~$10.25 profit per $1000 trade
-├─ Route 2: ~$9.22 profit per $1000 trade
-├─ Combined detection: 424/hour
-└─ Diversified risk across two independent paths
+  Net profit >$10
+  System stable
+  No manual intervention needed
+  Scale to $500
 ```
-
----
-
-**Estimated Completion Time**: 2-3 hours  
-**Worth Every Minute**: Absolutely! 🎯
-
-**Your $100 is safe if you follow this checklist!** 🛡️

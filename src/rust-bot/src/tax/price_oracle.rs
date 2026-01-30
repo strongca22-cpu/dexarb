@@ -150,8 +150,16 @@ impl PriceOracle {
 
     /// Refresh the price cache from pool state
     fn refresh_cache(&self) -> Result<()> {
-        let state = SharedPoolState::read_from_file(&self.state_path)
-            .with_context(|| format!("Failed to read pool state from {:?}", self.state_path))?;
+        let state = match SharedPoolState::read_from_file(&self.state_path) {
+            Ok(s) => s,
+            Err(_) => {
+                // State file missing or unreadable — mark cache as updated (empty)
+                // so get_price_usd() falls through to derive_price() fallbacks
+                let mut cache = self.cache.write().unwrap();
+                cache.last_updated = Some(Instant::now());
+                return Ok(());
+            }
+        };
 
         let mut prices = HashMap::new();
 

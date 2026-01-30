@@ -8,6 +8,8 @@
 
 pub mod detector;
 pub mod executor;
+pub mod multicall_quoter;
 
 pub use detector::OpportunityDetector;
 pub use executor::TradeExecutor;
+pub use multicall_quoter::{MulticallQuoter, VerifiedOpportunity};

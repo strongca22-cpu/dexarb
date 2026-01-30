@@ -4,6 +4,7 @@
 # Purpose: Pre-$100 Deployment Checklist - Section 4: Data Integrity
 # Author: AI-Generated
 # Created: 2026-01-28
+# Modified: 2026-01-30 - V3 shared-data architecture, whitelist verification, no PostgreSQL
 #
 # Usage:
 #   ./scripts/checklist_section4.sh
@@ -17,8 +18,8 @@ RECOMMENDED_PASS=0
 RECOMMENDED_FAIL=0
 
 DATA_DIR="/home/botuser/bots/dexarb/data"
-SPREAD_FILE="$DATA_DIR/spread_history_v2.csv"
 STATE_FILE="$DATA_DIR/pool_state_phase1.json"
+WHITELIST_FILE="/home/botuser/bots/dexarb/config/pools_whitelist.json"
 
 pass() { echo "  [PASS] $1"; }
 fail() { echo "  [FAIL] $1"; }
@@ -58,277 +59,267 @@ recommended_check() {
 echo ""
 echo "============================================================"
 echo "  PRE-\$100 DEPLOYMENT CHECKLIST"
-echo "  Section 4: Data Integrity (14 checks)"
-echo "  NOTE: Includes dual-route detection verification"
+echo "  Section 4: Data Integrity"
+echo "  Shared-data architecture: JSON pool state + whitelist"
 echo "============================================================"
 echo ""
 echo "Date: $(date)"
 echo ""
 
 # ============================================================
-# 4.1 Spread History Data
+# 4.1 Pool State JSON Integrity
 # ============================================================
 echo "-----------------------------------------------------------"
-echo "4.1 SPREAD HISTORY DATA"
+echo "4.1 POOL STATE JSON INTEGRITY"
 echo "-----------------------------------------------------------"
 
-# 4.1.1 Spread file exists
-if [ -f "$SPREAD_FILE" ]; then
-    SPREAD_SIZE=$(stat -c%s "$SPREAD_FILE")
-    SPREAD_LINES=$(wc -l < "$SPREAD_FILE")
-    info "Spread file: $SPREAD_LINES records, $(($SPREAD_SIZE/1024))KB"
-    critical_check 0 "Spread history file exists"
-else
-    info "Spread file: NOT FOUND"
-    critical_check 1 "Spread history file exists"
-    SPREAD_LINES=0
-fi
-
-# 4.1.2 Recent data (within 10 minutes)
-if [ -f "$SPREAD_FILE" ]; then
-    FILE_AGE=$(( $(date +%s) - $(stat -c%Y "$SPREAD_FILE") ))
-    info "Spread file age: $((FILE_AGE/60)) minutes"
-    if [ "$FILE_AGE" -lt 600 ]; then
-        critical_check 0 "Recent spread data (<10 min)"
-    else
-        critical_check 1 "Recent spread data ($((FILE_AGE/60)) min old)"
-    fi
-else
-    critical_check 1 "Recent spread data (file missing)"
-fi
-
-# 4.1.3 Spread values reasonable
-if [ -f "$SPREAD_FILE" ] && [ "$SPREAD_LINES" -gt 1 ]; then
-    # Get last 100 spread values and check they're reasonable
-    SPREAD_STATS=$(tail -100 "$SPREAD_FILE" | python3 -c "
-import sys
-import csv
-spreads = []
-reader = csv.reader(sys.stdin)
-for row in reader:
-    try:
-        # Assume spread is in one of the columns
-        for val in row:
-            try:
-                f = float(val)
-                if -10 < f < 50:  # Reasonable spread range
-                    spreads.append(f)
-            except:
-                pass
-    except:
-        pass
-if spreads:
-    avg = sum(spreads)/len(spreads)
-    print(f'OK:{avg:.4f}:{len(spreads)}')
-else:
-    print('EMPTY')
-" 2>/dev/null)
-
-    if [[ "$SPREAD_STATS" == OK:* ]]; then
-        AVG_SPREAD=$(echo "$SPREAD_STATS" | cut -d: -f2)
-        info "Average spread (recent): ${AVG_SPREAD}%"
-        critical_check 0 "Spread values reasonable"
-    else
-        info "Could not parse spread values"
-        critical_check 1 "Spread values reasonable"
-    fi
-else
-    critical_check 1 "Spread values reasonable (no data)"
-fi
-
-# 4.1.4 Multiple pairs being tracked
-if [ -f "$SPREAD_FILE" ] && [ "$SPREAD_LINES" -gt 1 ]; then
-    # Count unique pairs in recent data
-    UNIQUE_PAIRS=$(tail -1000 "$SPREAD_FILE" | cut -d',' -f2 | sort -u | wc -l)
-    info "Unique pairs tracked: $UNIQUE_PAIRS"
-    if [ "$UNIQUE_PAIRS" -ge 3 ]; then
-        important_check 0 "Multiple pairs being tracked ($UNIQUE_PAIRS)"
-    else
-        important_check 1 "Multiple pairs being tracked (only $UNIQUE_PAIRS)"
-    fi
-else
-    important_check 1 "Multiple pairs being tracked (no data)"
-fi
-
-echo ""
-
-# ============================================================
-# 4.2 Pool State Data
-# ============================================================
-echo "-----------------------------------------------------------"
-echo "4.2 POOL STATE DATA"
-echo "-----------------------------------------------------------"
-
-# 4.2.1 Pool state file exists
+# 4.1.1 State file exists and is valid JSON
 if [ -f "$STATE_FILE" ]; then
     STATE_SIZE=$(stat -c%s "$STATE_FILE")
     info "Pool state file: $(($STATE_SIZE/1024))KB"
-    critical_check 0 "Pool state file exists"
+    if python3 -c "import json; json.load(open('$STATE_FILE'))" 2>/dev/null; then
+        critical_check 0 "Pool state is valid JSON"
+    else
+        critical_check 1 "Pool state is INVALID JSON"
+    fi
 else
     info "Pool state file: NOT FOUND"
     critical_check 1 "Pool state file exists"
 fi
 
-# 4.2.2 Pool state is valid JSON
-if [ -f "$STATE_FILE" ]; then
-    if python3 -c "import json; json.load(open('$STATE_FILE'))" 2>/dev/null; then
-        info "Pool state: valid JSON"
-        critical_check 0 "Pool state is valid JSON"
-    else
-        info "Pool state: INVALID JSON"
-        critical_check 1 "Pool state is valid JSON"
-    fi
-else
-    critical_check 1 "Pool state is valid JSON (file missing)"
-fi
-
-# 4.2.3 Pool state recently updated
+# 4.1.2 State file recently updated (data collector writing)
 if [ -f "$STATE_FILE" ]; then
     STATE_AGE=$(( $(date +%s) - $(stat -c%Y "$STATE_FILE") ))
     info "Pool state age: $((STATE_AGE/60)) minutes"
-    if [ "$STATE_AGE" -lt 300 ]; then
-        important_check 0 "Pool state recent (<5 min)"
+    if [ "$STATE_AGE" -lt 120 ]; then
+        critical_check 0 "Pool state fresh (<2 min, data collector active)"
     else
-        important_check 1 "Pool state recent ($((STATE_AGE/60)) min old)"
+        critical_check 1 "Pool state stale ($((STATE_AGE/60)) min — data collector down?)"
     fi
 else
-    important_check 1 "Pool state recent (file missing)"
+    critical_check 1 "Pool state freshness (file missing)"
+fi
+
+# 4.1.3 State has V3 pools with prices
+if [ -f "$STATE_FILE" ]; then
+    V3_STATS=$(python3 -c "
+import json
+with open('$STATE_FILE') as f:
+    data = json.load(f)
+v3 = data.get('v3_pools', {})
+block = data.get('block_number', 0)
+prices_ok = 0
+for k, p in v3.items():
+    price = p.get('price', 0)
+    if price and price > 0 and price < 1e15:
+        prices_ok += 1
+print(f'{len(v3)}|{prices_ok}|{block}')
+" 2>/dev/null || echo "0|0|0")
+
+    V3_TOTAL=$(echo "$V3_STATS" | cut -d'|' -f1)
+    V3_PRICED=$(echo "$V3_STATS" | cut -d'|' -f2)
+    BLOCK_NUM=$(echo "$V3_STATS" | cut -d'|' -f3)
+    info "V3 pools: $V3_TOTAL total, $V3_PRICED with valid prices"
+    info "Block number: $BLOCK_NUM"
+
+    if [ "$V3_TOTAL" -gt 0 ] && [ "$V3_PRICED" -gt 0 ]; then
+        critical_check 0 "V3 pools have price data ($V3_PRICED/$V3_TOTAL priced)"
+    else
+        critical_check 1 "V3 pools missing price data"
+    fi
+
+    if [ "$BLOCK_NUM" -gt 0 ]; then
+        important_check 0 "Block number tracked ($BLOCK_NUM)"
+    else
+        important_check 1 "Block number missing from state"
+    fi
+else
+    critical_check 1 "V3 pool data (file missing)"
 fi
 
 echo ""
 
 # ============================================================
-# 4.3 Data Consistency
+# 4.2 Whitelist Data Consistency
 # ============================================================
 echo "-----------------------------------------------------------"
-echo "4.3 DATA CONSISTENCY"
+echo "4.2 WHITELIST DATA CONSISTENCY"
 echo "-----------------------------------------------------------"
 
-# 4.3.1 No corrupted files
-CORRUPT_COUNT=0
-for f in "$DATA_DIR"/*.json "$DATA_DIR"/*.csv; do
-    if [ -f "$f" ]; then
-        if [[ "$f" == *.json ]]; then
-            python3 -c "import json; json.load(open('$f'))" 2>/dev/null || ((CORRUPT_COUNT++))
-        fi
+# 4.2.1 Whitelist file is valid JSON
+if [ -f "$WHITELIST_FILE" ]; then
+    if python3 -c "import json; json.load(open('$WHITELIST_FILE'))" 2>/dev/null; then
+        critical_check 0 "Whitelist file is valid JSON"
+    else
+        critical_check 1 "Whitelist file is INVALID JSON"
     fi
-done
-info "Corrupted data files: $CORRUPT_COUNT"
-if [ "$CORRUPT_COUNT" -eq 0 ]; then
-    important_check 0 "No corrupted data files"
 else
-    important_check 1 "Corrupted data files found ($CORRUPT_COUNT)"
+    critical_check 1 "Whitelist file missing"
 fi
 
-# 4.3.2 Data directory writable
+# 4.2.2 Whitelist has enforcement mode set to strict
+if [ -f "$WHITELIST_FILE" ]; then
+    ENFORCEMENT=$(python3 -c "
+import json
+with open('$WHITELIST_FILE') as f:
+    data = json.load(f)
+print(data.get('config', {}).get('whitelist_enforcement', 'unknown'))
+" 2>/dev/null || echo "unknown")
+    info "Whitelist enforcement: $ENFORCEMENT"
+    if [ "$ENFORCEMENT" = "strict" ]; then
+        critical_check 0 "Whitelist enforcement = strict"
+    else
+        critical_check 1 "Whitelist enforcement not strict ($ENFORCEMENT)"
+    fi
+fi
+
+# 4.2.3 Whitelisted pools appear in state file
+if [ -f "$STATE_FILE" ] && [ -f "$WHITELIST_FILE" ]; then
+    WL_IN_STATE=$(python3 -c "
+import json
+with open('$STATE_FILE') as f:
+    state = json.load(f)
+with open('$WHITELIST_FILE') as f:
+    wl = json.load(f)
+v3_addrs = set()
+for k, p in state.get('v3_pools', {}).items():
+    addr = p.get('address', '').lower()
+    if addr:
+        v3_addrs.add(addr)
+wl_pools = wl.get('whitelist', {}).get('pools', [])
+found = 0
+total = 0
+for p in wl_pools:
+    addr = p.get('address', '').lower()
+    if addr:
+        total += 1
+        if addr in v3_addrs:
+            found += 1
+print(f'{found}|{total}')
+" 2>/dev/null || echo "0|0")
+
+    WL_FOUND=$(echo "$WL_IN_STATE" | cut -d'|' -f1)
+    WL_TOTAL=$(echo "$WL_IN_STATE" | cut -d'|' -f2)
+    info "Whitelisted pools in state: $WL_FOUND/$WL_TOTAL"
+    if [ "$WL_TOTAL" -gt 0 ] && [ "$WL_FOUND" -gt 0 ]; then
+        important_check 0 "$WL_FOUND/$WL_TOTAL whitelisted pools present in state"
+    else
+        important_check 1 "No whitelisted pools found in state data"
+    fi
+else
+    important_check 1 "Whitelist-state cross-check (files missing)"
+fi
+
+# 4.2.4 Liquidity thresholds configured
+if [ -f "$WHITELIST_FILE" ]; then
+    THRESHOLDS=$(python3 -c "
+import json
+with open('$WHITELIST_FILE') as f:
+    data = json.load(f)
+t = data.get('config', {}).get('liquidity_thresholds', {})
+if t:
+    parts = [f'{k}={v}' for k,v in t.items()]
+    print('|'.join(parts))
+else:
+    print('NONE')
+" 2>/dev/null || echo "NONE")
+    if [ "$THRESHOLDS" != "NONE" ]; then
+        info "Liquidity thresholds: $THRESHOLDS"
+        important_check 0 "Liquidity thresholds configured"
+    else
+        important_check 1 "Liquidity thresholds not configured"
+    fi
+fi
+
+echo ""
+
+# ============================================================
+# 4.3 Data Directory Health
+# ============================================================
+echo "-----------------------------------------------------------"
+echo "4.3 DATA DIRECTORY HEALTH"
+echo "-----------------------------------------------------------"
+
+# 4.3.1 Data directory writable
 if [ -w "$DATA_DIR" ]; then
     important_check 0 "Data directory writable"
 else
     important_check 1 "Data directory not writable"
 fi
 
-echo ""
-
-# ============================================================
-# 4.4 DUAL-ROUTE DETECTION (NEW)
-# ============================================================
-echo "-----------------------------------------------------------"
-echo "4.4 DUAL-ROUTE DETECTION"
-echo "-----------------------------------------------------------"
-info "Expected routes:"
-info "  Route 1: V3 1.00% -> V3 0.05% (~2.24% spread)"
-info "  Route 2: V3 0.30% -> V3 0.05% (~1.43% spread)"
-echo ""
-
-# Use spread_history_v2.csv which has route information
-SPREAD_V2_FILE="$DATA_DIR/spread_history_v2.csv"
-OPPS_FILE="$DATA_DIR/spread_opportunities.csv"
-
-# 4.4.1 Check Route 1 (1.00% -> 0.05%) detected
-if [ -f "$OPPS_FILE" ]; then
-    ROUTE1_COUNT=$(grep -c "1.00%.*0.05%\|0.05%.*1.00%" "$OPPS_FILE" 2>/dev/null || echo "0")
-    info "Route 1 detections in opportunities: $ROUTE1_COUNT"
-    if [ "$ROUTE1_COUNT" -gt 0 ]; then
-        critical_check 0 "Route 1 (1.00%->0.05%) actively detected ($ROUTE1_COUNT)"
-    else
-        critical_check 1 "Route 1 (1.00%->0.05%) not detected"
-    fi
+# 4.3.2 Tax directory exists and writable
+TAX_DIR="$DATA_DIR/tax"
+if [ -d "$TAX_DIR" ] && [ -w "$TAX_DIR" ]; then
+    important_check 0 "Tax directory exists and writable"
 else
-    # Fall back to checking pool state for UNI V3 pools
-    if [ -f "$STATE_FILE" ]; then
-        UNI_POOLS=$(python3 -c "
+    if mkdir -p "$TAX_DIR" 2>/dev/null; then
+        important_check 0 "Tax directory created"
+    else
+        important_check 1 "Tax directory missing or not writable"
+    fi
+fi
+
+# 4.3.3 No corrupted JSON files
+CORRUPT_COUNT=0
+for f in "$DATA_DIR"/*.json; do
+    if [ -f "$f" ]; then
+        python3 -c "import json; json.load(open('$f'))" 2>/dev/null || ((CORRUPT_COUNT++))
+    fi
+done
+info "Corrupted JSON files: $CORRUPT_COUNT"
+if [ "$CORRUPT_COUNT" -eq 0 ]; then
+    recommended_check 0 "No corrupted data files"
+else
+    recommended_check 1 "Corrupted data files found ($CORRUPT_COUNT)"
+fi
+
+echo ""
+
+# ============================================================
+# 4.4 Trading Pair Coverage
+# ============================================================
+echo "-----------------------------------------------------------"
+echo "4.4 TRADING PAIR COVERAGE IN STATE"
+echo "-----------------------------------------------------------"
+
+# Check which of the 7 configured pairs have V3 pool data
+if [ -f "$STATE_FILE" ]; then
+    PAIR_COVERAGE=$(python3 -c "
 import json
 with open('$STATE_FILE') as f:
-    data = json.load(f)
-    v3 = data.get('v3_pools', {})
-    uni_pools = [k for k in v3.keys() if 'UNI/USDC' in k]
-    print(len(uni_pools))
-" 2>/dev/null || echo "0")
-        if [ "$UNI_POOLS" -ge 2 ]; then
-            critical_check 0 "UNI/USDC V3 pools present ($UNI_POOLS pools)"
-        else
-            critical_check 1 "UNI/USDC V3 pools missing"
-        fi
-    else
-        critical_check 1 "Route 1 detection (no data file)"
-    fi
-fi
+    state = json.load(f)
+v3 = state.get('v3_pools', {})
+# Extract pair symbols from pool keys
+pairs_seen = set()
+for k in v3.keys():
+    # Keys are like 'WETH/USDC_UniV3_0.05%'
+    parts = k.split('_')
+    if parts:
+        pairs_seen.add(parts[0])
+expected = ['WETH/USDC', 'WMATIC/USDC', 'WBTC/USDC', 'USDT/USDC', 'DAI/USDC', 'LINK/USDC', 'UNI/USDC']
+found = 0
+for p in expected:
+    if p in pairs_seen:
+        found += 1
+        print(f'FOUND: {p}')
+    else:
+        print(f'MISSING: {p}')
+print(f'TOTAL|{found}|{len(expected)}')
+" 2>/dev/null)
 
-# 4.4.2 Check Route 2 (0.30% -> 0.05%) detected
-if [ -f "$OPPS_FILE" ]; then
-    ROUTE2_COUNT=$(grep -c "0.30%.*0.05%\|0.05%.*0.30%" "$OPPS_FILE" 2>/dev/null || echo "0")
-    info "Route 2 detections in opportunities: $ROUTE2_COUNT"
-    if [ "$ROUTE2_COUNT" -gt 0 ]; then
-        critical_check 0 "Route 2 (0.30%->0.05%) actively detected ($ROUTE2_COUNT)"
+    FOUND_PAIRS=$(echo "$PAIR_COVERAGE" | grep "^TOTAL|" | cut -d'|' -f2)
+    EXPECTED_PAIRS=$(echo "$PAIR_COVERAGE" | grep "^TOTAL|" | cut -d'|' -f3)
+    echo "$PAIR_COVERAGE" | grep -v "^TOTAL" | while read line; do
+        info "  $line"
+    done
+
+    if [ "$FOUND_PAIRS" -ge 5 ]; then
+        important_check 0 "Trading pairs in state ($FOUND_PAIRS/$EXPECTED_PAIRS)"
     else
-        critical_check 1 "Route 2 (0.30%->0.05%) not detected"
+        important_check 1 "Only $FOUND_PAIRS/$EXPECTED_PAIRS pairs in state"
     fi
 else
-    critical_check 1 "Route 2 detection (no opportunities file)"
-fi
-
-# 4.4.3 Check combined detection rate
-if [ -f "$OPPS_FILE" ]; then
-    TOTAL_OPPS=$(wc -l < "$OPPS_FILE" 2>/dev/null || echo "1")
-    TOTAL_OPPS=$((TOTAL_OPPS - 1))  # Subtract header
-    info "Total opportunities logged: $TOTAL_OPPS"
-    if [ "$TOTAL_OPPS" -ge 10 ]; then
-        important_check 0 "Opportunities being logged ($TOTAL_OPPS)"
-    else
-        important_check 1 "Low opportunity count ($TOTAL_OPPS)"
-    fi
-else
-    important_check 1 "Opportunities file missing"
-fi
-
-# 4.4.4 Check UNI/USDC spread in reasonable range
-if [ -f "$SPREAD_V2_FILE" ]; then
-    UNI_SPREAD=$(tail -500 "$SPREAD_V2_FILE" | grep "UNI/USDC" | python3 -c "
-import sys
-import csv
-spreads = []
-reader = csv.reader(sys.stdin)
-for row in reader:
-    try:
-        spread = float(row[7])  # spread_pct column
-        if 0 < spread < 10:
-            spreads.append(spread)
-    except:
-        pass
-if spreads:
-    avg = sum(spreads)/len(spreads)
-    print(f'{avg:.2f}')
-else:
-    print('0')
-" 2>/dev/null || echo "0")
-    info "UNI/USDC average spread: ${UNI_SPREAD}%"
-    if [ "$UNI_SPREAD" != "0" ]; then
-        recommended_check 0 "UNI/USDC spreads detected (avg ${UNI_SPREAD}%)"
-    else
-        recommended_check 1 "UNI/USDC spread detection"
-    fi
-else
-    recommended_check 1 "Spread V2 file for route analysis"
+    important_check 1 "Pair coverage check (state file missing)"
 fi
 
 echo ""

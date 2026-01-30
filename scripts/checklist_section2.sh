@@ -4,7 +4,7 @@
 # Purpose: Pre-$100 Deployment Checklist - Section 2: Smart Contract Verification
 # Author: AI-Generated
 # Created: 2026-01-28
-# Modified: 2026-01-28
+# Modified: 2026-01-30 - V3 architecture, Multicall3, whitelist pool verification
 #
 # Usage:
 #   ./scripts/checklist_section2.sh
@@ -12,7 +12,6 @@
 # Dependencies:
 #   - curl
 #   - python3
-#   - Foundry cast (optional, falls back to RPC calls)
 #
 
 # Counters
@@ -23,17 +22,18 @@ IMPORTANT_FAIL=0
 RECOMMENDED_PASS=0
 RECOMMENDED_FAIL=0
 
-# RPC URL (using public polygon-rpc.com since Alchemy is rate-limited)
+# RPC URL (Alchemy HTTPS for checklist scripts)
 RPC_URL="https://polygon-mainnet.g.alchemy.com/v2/jwcuVSA1FrZ97ftmb8id8"
 
-# Wallet address (derived from private key in .env)
-WALLET="0xa532eb528aE17eFC881FCe6894a08B5b70fF21e2"
+# Wallet addresses (two-wallet architecture)
+WALLET_LIVE="0xa532eb528aE17eFC881FCe6894a08B5b70fF21e2"
+WALLET_BACKUP="0x8e843e351c284dd96F8E458c10B39164b2Aeb7Fb"
 
 # Contract addresses
-QUICKSWAP_ROUTER="0xa5E0829CaCEd8fFDD4De3c43696c57F7D7A678ff"
 V3_ROUTER="0xE592427A0AEce92De3Edee1F18E0157C05861564"
 V3_QUOTER="0xb27308f9F90D607463bb33eA1BeBb41C27CE5AB6"
 V3_FACTORY="0x1F98431c8aD98523631AE4a59f267346ea31F984"
+MULTICALL3="0xcA11bde05977b3631167028862bE2a173976CA11"
 
 # Token addresses
 USDC_BRIDGED="0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
@@ -107,8 +107,8 @@ decode_uint() {
 echo ""
 echo "============================================================"
 echo "  PRE-\$100 DEPLOYMENT CHECKLIST"
-echo "  Section 2: Smart Contract Verification (15 checks)"
-echo "  NOTE: Includes dual-route pool verification"
+echo "  Section 2: Smart Contract Verification"
+echo "  V3 + Multicall3 + Whitelist Pool Verification"
 echo "============================================================"
 echo ""
 echo "Date: $(date)"
@@ -116,45 +116,61 @@ echo "RPC: Alchemy Polygon Mainnet"
 echo ""
 
 # ============================================================
-# 2.1 Router Addresses
+# 2.1 Core Contract Addresses
 # ============================================================
 echo "-----------------------------------------------------------"
-echo "2.1 ROUTER ADDRESSES"
+echo "2.1 CORE CONTRACT ADDRESSES"
 echo "-----------------------------------------------------------"
 
-# 2.1.1 Quickswap V2 Router has code
-CODE_SIZE=$(get_code_size "$QUICKSWAP_ROUTER")
-info "Quickswap Router code size: ${CODE_SIZE} bytes"
-if [ "$CODE_SIZE" -gt 1000 ]; then
-    critical_check 0 "V2 router has code (Quickswap)"
-else
-    critical_check 1 "V2 router has code (Quickswap) - only ${CODE_SIZE} bytes"
-fi
-
-# 2.1.2 V3 Router has code
+# 2.1.1 V3 Router has code
 CODE_SIZE=$(get_code_size "$V3_ROUTER")
 info "V3 Router code size: ${CODE_SIZE} bytes"
 if [ "$CODE_SIZE" -gt 1000 ]; then
-    critical_check 0 "V3 router has code"
+    critical_check 0 "V3 Router has code (SwapRouter)"
 else
-    critical_check 1 "V3 router has code - only ${CODE_SIZE} bytes"
+    critical_check 1 "V3 Router has code - only ${CODE_SIZE} bytes"
 fi
 
-# 2.1.3 V3 Quoter has code
+# 2.1.2 V3 Quoter has code (QuoterV1 — used for pre-checks)
 CODE_SIZE=$(get_code_size "$V3_QUOTER")
 info "V3 Quoter code size: ${CODE_SIZE} bytes"
 if [ "$CODE_SIZE" -gt 1000 ]; then
-    critical_check 0 "V3 quoter has code"
+    critical_check 0 "V3 QuoterV1 has code"
 else
-    critical_check 1 "V3 quoter has code - only ${CODE_SIZE} bytes"
+    critical_check 1 "V3 QuoterV1 has code - only ${CODE_SIZE} bytes"
 fi
 
-# 2.1.4 Addresses match documentation
-info "Quickswap: $QUICKSWAP_ROUTER"
-info "V3 Router: $V3_ROUTER"
-info "V3 Quoter: $V3_QUOTER"
-# These are the canonical addresses, so this is always a pass if we got here
-critical_check 0 "Router addresses match documentation"
+# 2.1.3 Multicall3 has code (Phase 2.1 batch pre-screening)
+CODE_SIZE=$(get_code_size "$MULTICALL3")
+info "Multicall3 code size: ${CODE_SIZE} bytes"
+if [ "$CODE_SIZE" -gt 100 ]; then
+    critical_check 0 "Multicall3 has code (batch Quoter)"
+else
+    critical_check 1 "Multicall3 has code - only ${CODE_SIZE} bytes"
+fi
+
+# 2.1.4 V3 Factory has code
+CODE_SIZE=$(get_code_size "$V3_FACTORY")
+info "V3 Factory code size: ${CODE_SIZE} bytes"
+if [ "$CODE_SIZE" -gt 1000 ]; then
+    important_check 0 "V3 Factory has code"
+else
+    important_check 1 "V3 Factory has code - only ${CODE_SIZE} bytes"
+fi
+
+# 2.1.5 Addresses match .env.live config
+ENV_LIVE="/home/botuser/bots/dexarb/src/rust-bot/.env.live"
+if [ -f "$ENV_LIVE" ]; then
+    ENV_QUOTER=$(grep "UNISWAP_V3_QUOTER=" "$ENV_LIVE" | cut -d'=' -f2)
+    ENV_ROUTER=$(grep "UNISWAP_V3_ROUTER=" "$ENV_LIVE" | cut -d'=' -f2)
+    if [ "$ENV_QUOTER" = "$V3_QUOTER" ] && [ "$ENV_ROUTER" = "$V3_ROUTER" ]; then
+        critical_check 0 "Contract addresses match .env.live"
+    else
+        critical_check 1 "Contract addresses MISMATCH in .env.live"
+    fi
+else
+    critical_check 1 ".env.live missing for address verification"
+fi
 
 echo ""
 
@@ -165,24 +181,6 @@ echo "-----------------------------------------------------------"
 echo "2.2 TOKEN ADDRESSES"
 echo "-----------------------------------------------------------"
 
-# Helper to get token symbol - calls symbol() = 0x95d89b41
-get_symbol() {
-    local addr=$1
-    local result=$(call_contract "$addr" "0x95d89b41")
-    # Decode string from ABI encoding
-    python3 -c "
-import sys
-hex_str = '$result'
-if len(hex_str) > 130:
-    # ABI encoded string
-    length = int(hex_str[130:194], 16)
-    symbol = bytes.fromhex(hex_str[194:194+length*2]).decode('utf-8', errors='ignore')
-    print(symbol)
-else:
-    print('UNKNOWN')
-" 2>/dev/null || echo "UNKNOWN"
-}
-
 # Helper to get decimals - calls decimals() = 0x313ce567
 get_decimals() {
     local addr=$1
@@ -191,142 +189,108 @@ get_decimals() {
 }
 
 # 2.2.1 USDC.e verification
-USDC_SYMBOL=$(get_symbol "$USDC_BRIDGED")
 USDC_DECIMALS=$(get_decimals "$USDC_BRIDGED")
-info "USDC.e: symbol=$USDC_SYMBOL, decimals=$USDC_DECIMALS"
+info "USDC.e: decimals=$USDC_DECIMALS"
 if [ "$USDC_DECIMALS" = "6" ]; then
     critical_check 0 "USDC.e address correct, 6 decimals"
 else
     critical_check 1 "USDC.e verification failed (decimals=$USDC_DECIMALS)"
 fi
 
-# 2.2.2 WMATIC verification
-WMATIC_SYMBOL=$(get_symbol "$WMATIC")
-WMATIC_DECIMALS=$(get_decimals "$WMATIC")
-info "WMATIC: symbol=$WMATIC_SYMBOL, decimals=$WMATIC_DECIMALS"
-if [ "$WMATIC_DECIMALS" = "18" ]; then
-    important_check 0 "WMATIC address correct, 18 decimals"
-else
-    important_check 1 "WMATIC verification failed (decimals=$WMATIC_DECIMALS)"
-fi
-
-# 2.2.3 WETH verification
-WETH_SYMBOL=$(get_symbol "$WETH")
+# 2.2.2 WETH verification
 WETH_DECIMALS=$(get_decimals "$WETH")
-info "WETH: symbol=$WETH_SYMBOL, decimals=$WETH_DECIMALS"
+info "WETH: decimals=$WETH_DECIMALS"
 if [ "$WETH_DECIMALS" = "18" ]; then
     important_check 0 "WETH address correct, 18 decimals"
 else
     important_check 1 "WETH verification failed (decimals=$WETH_DECIMALS)"
 fi
 
-# 2.2.4 UNI verification (primary arbitrage token)
-UNI_SYMBOL=$(get_symbol "$UNI")
-UNI_DECIMALS=$(get_decimals "$UNI")
-info "UNI: symbol=$UNI_SYMBOL, decimals=$UNI_DECIMALS"
-if [ "$UNI_DECIMALS" = "18" ]; then
-    critical_check 0 "UNI address correct, 18 decimals"
+# 2.2.3 WMATIC verification
+WMATIC_DECIMALS=$(get_decimals "$WMATIC")
+info "WMATIC: decimals=$WMATIC_DECIMALS"
+if [ "$WMATIC_DECIMALS" = "18" ]; then
+    important_check 0 "WMATIC address correct, 18 decimals"
 else
-    critical_check 1 "UNI verification failed (decimals=$UNI_DECIMALS)"
-fi
-
-# 2.2.5 All tokens have code
-USDC_CODE=$(get_code_size "$USDC_BRIDGED")
-WMATIC_CODE=$(get_code_size "$WMATIC")
-WETH_CODE=$(get_code_size "$WETH")
-if [ "$USDC_CODE" -gt 100 ] && [ "$WMATIC_CODE" -gt 100 ] && [ "$WETH_CODE" -gt 100 ]; then
-    important_check 0 "All tokens have contract code"
-else
-    important_check 1 "Some tokens missing code"
+    important_check 1 "WMATIC verification failed (decimals=$WMATIC_DECIMALS)"
 fi
 
 echo ""
 
 # ============================================================
-# 2.3 Pool Verification
+# 2.3 Whitelist Pool Verification
 # ============================================================
 echo "-----------------------------------------------------------"
-echo "2.3 POOL VERIFICATION"
+echo "2.3 WHITELIST POOL VERIFICATION"
 echo "-----------------------------------------------------------"
 
-# Check V3 pool exists by calling factory.getPool()
-# getPool(address,address,uint24) = 0x1698ee82
-check_v3_pool() {
-    local token0=$1
-    local token1=$2
-    local fee=$3
-    local label=$4
+WHITELIST_FILE="/home/botuser/bots/dexarb/config/pools_whitelist.json"
 
-    # Encode the call data - pad addresses to 32 bytes each
-    local t0_padded=$(echo "$token0" | sed 's/0x//' | tr '[:upper:]' '[:lower:]')
-    t0_padded=$(printf "%064s" "$t0_padded" | tr ' ' '0')
-    local t1_padded=$(echo "$token1" | sed 's/0x//' | tr '[:upper:]' '[:lower:]')
-    t1_padded=$(printf "%064s" "$t1_padded" | tr ' ' '0')
-    local fee_hex=$(printf "%064x" $fee)
+if [ -f "$WHITELIST_FILE" ]; then
+    # Verify each whitelisted pool exists on-chain (has code)
+    POOL_RESULTS=$(python3 -c "
+import json, sys
+with open('$WHITELIST_FILE') as f:
+    data = json.load(f)
+pools = data.get('whitelist', {}).get('pools', [])
+for p in pools:
+    addr = p.get('address', '')
+    pair = p.get('pair', '?')
+    fee = p.get('fee_tier', 0)
+    status = p.get('status', 'unknown')
+    print(f'{addr}|{pair}|{fee}|{status}')
+" 2>/dev/null)
 
-    local data="0x1698ee82${t0_padded}${t1_padded}${fee_hex}"
-    local result=$(call_contract "$V3_FACTORY" "$data")
+    TOTAL_WL=0
+    VERIFIED_WL=0
+    while IFS='|' read -r addr pair fee status; do
+        [ -z "$addr" ] && continue
+        TOTAL_WL=$((TOTAL_WL + 1))
+        CODE_SIZE=$(get_code_size "$addr")
+        if [ "$CODE_SIZE" -gt 100 ]; then
+            info "  $pair (fee=$fee): verified on-chain ($CODE_SIZE bytes)"
+            VERIFIED_WL=$((VERIFIED_WL + 1))
+        else
+            info "  $pair (fee=$fee): NO CODE at $addr"
+        fi
+    done <<< "$POOL_RESULTS"
 
-    # Extract address from result (last 40 hex chars)
-    local pool_addr=$(echo "$result" | python3 -c "import sys; r=sys.stdin.read().strip(); print('0x'+r[-40:] if len(r)>=42 else '0x0')" 2>/dev/null)
-
-    if [ "$pool_addr" != "0x0000000000000000000000000000000000000000" ] && [ "$pool_addr" != "0x0" ]; then
-        info "$label pool: $pool_addr"
-        return 0
+    if [ "$TOTAL_WL" -gt 0 ] && [ "$VERIFIED_WL" -eq "$TOTAL_WL" ]; then
+        critical_check 0 "All $TOTAL_WL whitelisted pools verified on-chain"
+    elif [ "$VERIFIED_WL" -gt 0 ]; then
+        critical_check 1 "Only $VERIFIED_WL/$TOTAL_WL whitelisted pools verified"
     else
-        info "$label pool: NOT FOUND"
-        return 1
+        critical_check 1 "No whitelisted pools verified"
     fi
-}
-
-# 2.3.1 WETH/USDC V3 0.05% pool exists
-if check_v3_pool "$WETH" "$USDC_BRIDGED" 500 "WETH/USDC 0.05%"; then
-    critical_check 0 "WETH/USDC V3 0.05% pool exists"
 else
-    critical_check 1 "WETH/USDC V3 0.05% pool exists"
+    critical_check 1 "Whitelist file missing for pool verification"
 fi
 
-# 2.3.2 WETH/USDC V3 0.30% pool exists
-if check_v3_pool "$WETH" "$USDC_BRIDGED" 3000 "WETH/USDC 0.30%"; then
-    critical_check 0 "WETH/USDC V3 0.30% pool exists"
+# 2.3.2 Blacklist entries exist
+if [ -f "$WHITELIST_FILE" ]; then
+    BL_COUNT=$(python3 -c "
+import json
+with open('$WHITELIST_FILE') as f:
+    data = json.load(f)
+bl = data.get('blacklist', {})
+# Count entries across all types
+total = 0
+if isinstance(bl, dict):
+    for k,v in bl.items():
+        if isinstance(v, list): total += len(v)
+        elif isinstance(v, dict): total += len(v)
+elif isinstance(bl, list):
+    total = len(bl)
+print(total)
+" 2>/dev/null || echo "0")
+    info "Blacklisted entries: $BL_COUNT"
+    if [ "$BL_COUNT" -gt 0 ]; then
+        important_check 0 "Blacklist configured ($BL_COUNT entries)"
+    else
+        important_check 1 "Blacklist empty (thin/phantom pools not filtered)"
+    fi
 else
-    critical_check 1 "WETH/USDC V3 0.30% pool exists"
-fi
-
-# 2.3.3 WMATIC/USDC V3 pool exists
-if check_v3_pool "$WMATIC" "$USDC_BRIDGED" 500 "WMATIC/USDC 0.05%"; then
-    important_check 0 "WMATIC/USDC V3 0.05% pool exists"
-else
-    important_check 1 "WMATIC/USDC V3 0.05% pool exists"
-fi
-
-echo ""
-echo "-----------------------------------------------------------"
-echo "2.3.1 UNI/USDC DUAL-ROUTE POOLS (CRITICAL)"
-echo "-----------------------------------------------------------"
-info "Route 1: V3 1.00% -> V3 0.05% (2.24% spread)"
-info "Route 2: V3 0.30% -> V3 0.05% (1.43% spread)"
-echo ""
-
-# 2.3.4 UNI/USDC V3 0.05% pool (DESTINATION for both routes)
-if check_v3_pool "$UNI" "$USDC_BRIDGED" 500 "UNI/USDC 0.05%"; then
-    critical_check 0 "UNI/USDC V3 0.05% pool (destination) verified"
-else
-    critical_check 1 "UNI/USDC V3 0.05% pool (destination)"
-fi
-
-# 2.3.5 UNI/USDC V3 0.30% pool (SOURCE for Route 2)
-if check_v3_pool "$UNI" "$USDC_BRIDGED" 3000 "UNI/USDC 0.30%"; then
-    critical_check 0 "UNI/USDC V3 0.30% pool (Route 2 source) verified"
-else
-    critical_check 1 "UNI/USDC V3 0.30% pool (Route 2 source)"
-fi
-
-# 2.3.6 UNI/USDC V3 1.00% pool (SOURCE for Route 1)
-if check_v3_pool "$UNI" "$USDC_BRIDGED" 10000 "UNI/USDC 1.00%"; then
-    critical_check 0 "UNI/USDC V3 1.00% pool (Route 1 source) verified"
-else
-    critical_check 1 "UNI/USDC V3 1.00% pool (Route 1 source)"
+    important_check 1 "Blacklist check (whitelist file missing)"
 fi
 
 echo ""
@@ -354,10 +318,10 @@ check_allowance() {
     decode_uint "$result"
 }
 
-# 2.4.1 USDC.e approved for V3 router
-USDC_ALLOWANCE=$(check_allowance "$USDC_BRIDGED" "$WALLET" "$V3_ROUTER")
+# 2.4.1 USDC.e approved for V3 router (live wallet)
+USDC_ALLOWANCE=$(check_allowance "$USDC_BRIDGED" "$WALLET_LIVE" "$V3_ROUTER")
 USDC_ALLOWANCE_FORMATTED=$(python3 -c "print(f'{$USDC_ALLOWANCE/1e6:.2f}')" 2>/dev/null || echo "0")
-info "USDC.e allowance for V3 Router: $USDC_ALLOWANCE_FORMATTED USDC"
+info "USDC.e allowance (live wallet -> V3 Router): $USDC_ALLOWANCE_FORMATTED USDC"
 if [ "$USDC_ALLOWANCE" -gt 0 ]; then
     critical_check 0 "USDC.e approved for V3 router ($USDC_ALLOWANCE_FORMATTED)"
 else

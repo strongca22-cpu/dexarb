@@ -6,6 +6,7 @@
 **Config:** Split — live bot reads `.env.live` (7 pairs), data collector reads `.env` (7 pairs)
 **Architecture:** Shared data — live bot reads pool state from JSON (data collector writes)
 **Phase 1.1:** COMPLETED — whitelist filter built, tested (8/8), binary compiled, NOT deployed
+**Phase 2.1:** COMPLETED — Multicall3 batch Quoter pre-screening, 7 unit tests pass, binary compiled
 **Whitelist v1.1:** Trimmed 16→10 pools, 7 blacklisted pools, 1 observation. Only deepest pools remain.
 **LIVE_MODE:** true in `.env.live` (bot stopped — new binary ready but not started)
 **All processes:** STOPPED (all 5 tmux sessions killed 2026-01-29)
@@ -669,12 +670,15 @@ Rewrite to:
 
 ## Phase 1 Optimization — Remaining Tasks
 
-### Phase 1.2: Enhanced Liquidity Thresholds (NOT STARTED)
+### Phase 1.2: Enhanced Liquidity Thresholds — COVERED (2026-01-29)
 
-- Tick-range-aware liquidity analysis (not just global liquidity)
-- Price impact estimation before Quoter call
-- Dynamic min liquidity based on trade size and tick density
-- See `docs/phase_1_2_optimization_plan.md` Section 1.2
+Static per-pool/per-tier liquidity thresholds are implemented via whitelist v1.1:
+- 0.05% tier: min 5B liquidity
+- 0.30% tier: min 3B liquidity
+- Per-pool overrides in `config/pools_whitelist.json`
+- On-chain verification via `scripts/verify_whitelist.py`
+
+Dynamic tick-range-aware analysis deferred — static thresholds sufficient for current pool set.
 
 ### Phase 1.3: Pool Quality Scoring (NOT STARTED)
 
@@ -686,12 +690,21 @@ Rewrite to:
 - Dynamic opportunity ranking
 - See `docs/phase_1_2_optimization_plan.md` Section 1.3
 
-### Phase 2: Multicall Batching (NOT STARTED)
+### Phase 2.1: Multicall3 Batch Quoter — COMPLETED (2026-01-29)
 
-- Batch RPC calls via Multicall3 contract
-- Adaptive batch sizing
-- See `docs/phase_1_2_optimization_plan.md` Sections 2.1-2.2
+Batch-verifies all detected opportunities (buy+sell legs) in a single Multicall3 `aggregate3` RPC call before execution. Filters out opportunities where either leg cannot be filled, ranks survivors by quoted profit.
+
+- **New module**: `src/arbitrage/multicall_quoter.rs` — MulticallQuoter struct, ABI encoding, QuoterV1 revert data decoding
+- **Integration**: `main.rs` — batch verify inserted between `scan_opportunities()` and executor loop
+- **Fallback**: If Multicall3 call fails, all opportunities pass through to executor (existing behavior)
+- **Safety**: Executor's own per-leg Quoter checks NOT removed — batch pre-screen is additive
+- **RPC savings**: From 2N sequential Quoter calls to 1 Multicall batch + 2 executor Quoter calls (for the one executed opportunity). N=5 typical: 10 → 3 calls.
+- **Tests**: 7 unit tests (ABI encoding, QuoterV1 revert decoding, error handling) — all pass
+
+### Phase 2.2: Adaptive Batch Sizing — DEFERRED
+
+With max ~5 opportunity combinations per cycle (whitelist v1.1 trimming), fixed batching is sufficient. Adaptive sizing adds complexity for marginal gain.
 
 ---
 
-*Last updated: 2026-01-29 (RPC audit — paper trader obsolete, all processes stopped, deploy with data collector + live bot only)*
+*Last updated: 2026-01-29 (Phase 2.1 Multicall3 batch Quoter — built, tested, binary compiled)*

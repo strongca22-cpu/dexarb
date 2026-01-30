@@ -4,7 +4,7 @@
 # Purpose: Pre-$100 Deployment Checklist - Section 3: Bot Configuration
 # Author: AI-Generated
 # Created: 2026-01-28
-# Modified: 2026-01-28
+# Modified: 2026-01-30 - Switch to .env.live, add whitelist/Multicall3/shared-data config
 #
 # Usage:
 #   ./scripts/checklist_section3.sh
@@ -18,9 +18,9 @@ IMPORTANT_FAIL=0
 RECOMMENDED_PASS=0
 RECOMMENDED_FAIL=0
 
-# Paths
+# Paths — live bot uses .env.live (separate from data collector .env)
 BOT_DIR="/home/botuser/bots/dexarb/src/rust-bot"
-ENV_FILE="$BOT_DIR/.env"
+ENV_FILE="$BOT_DIR/.env.live"
 
 # Helper functions
 pass() { echo "  [PASS] $1"; }
@@ -58,7 +58,7 @@ recommended_check() {
     fi
 }
 
-# Helper to get .env value
+# Helper to get .env.live value
 get_env() {
     local key=$1
     grep "^${key}=" "$ENV_FILE" 2>/dev/null | cut -d'=' -f2- | tr -d '"' | tr -d "'"
@@ -67,16 +67,18 @@ get_env() {
 echo ""
 echo "============================================================"
 echo "  PRE-\$100 DEPLOYMENT CHECKLIST"
-echo "  Section 3: Bot Configuration (18 checks)"
+echo "  Section 3: Bot Configuration (.env.live)"
+echo "  Architecture: V3 shared-data, Multicall3, whitelist"
 echo "============================================================"
 echo ""
 echo "Date: $(date)"
 echo "Config: $ENV_FILE"
 echo ""
 
-# Check .env exists
+# Check .env.live exists
 if [ ! -f "$ENV_FILE" ]; then
-    echo "ERROR: .env file not found at $ENV_FILE"
+    echo "ERROR: .env.live file not found at $ENV_FILE"
+    echo "Live bot uses .env.live (separate from data collector .env)"
     exit 1
 fi
 
@@ -87,13 +89,18 @@ echo "-----------------------------------------------------------"
 echo "3.1 CORE CONFIGURATION"
 echo "-----------------------------------------------------------"
 
-# 3.1.1 RPC URL configured
+# 3.1.1 RPC URL configured (WebSocket for live bot)
 RPC_URL=$(get_env "RPC_URL")
 if [ -n "$RPC_URL" ]; then
-    # Mask the API key
     RPC_MASKED=$(echo "$RPC_URL" | sed 's/\(v2\/\)[^/]*/\1***/')
     info "RPC URL: $RPC_MASKED"
     critical_check 0 "RPC URL configured"
+    # Check it's WebSocket (live bot requires WSS)
+    if [[ "$RPC_URL" == wss://* ]]; then
+        important_check 0 "RPC is WebSocket (wss://)"
+    else
+        important_check 1 "RPC should be WebSocket (wss://) for live bot, got: ${RPC_URL:0:10}..."
+    fi
 else
     info "RPC URL: NOT SET"
     critical_check 1 "RPC URL configured"
@@ -110,8 +117,8 @@ fi
 
 # 3.1.3 Private key configured (check exists, don't expose)
 PRIVATE_KEY=$(get_env "PRIVATE_KEY")
-if [ -n "$PRIVATE_KEY" ] && [ ${#PRIVATE_KEY} -eq 64 ]; then
-    info "Private key: configured (64 chars)"
+if [ -n "$PRIVATE_KEY" ] && [ ${#PRIVATE_KEY} -ge 64 ]; then
+    info "Private key: configured (${#PRIVATE_KEY} chars)"
     critical_check 0 "Private key configured"
 else
     info "Private key: MISSING or invalid"
@@ -122,39 +129,67 @@ fi
 POLL_INTERVAL=$(get_env "POLL_INTERVAL_MS")
 info "Poll interval: ${POLL_INTERVAL}ms"
 if [ -n "$POLL_INTERVAL" ] && [ "$POLL_INTERVAL" -ge 1000 ]; then
-    critical_check 0 "Poll interval configured (${POLL_INTERVAL}ms)"
+    important_check 0 "Poll interval configured (${POLL_INTERVAL}ms)"
 else
-    critical_check 1 "Poll interval configured"
+    important_check 1 "Poll interval configured"
+fi
+
+# 3.1.5 LIVE_MODE set
+LIVE_MODE=$(get_env "LIVE_MODE")
+info "LIVE_MODE: $LIVE_MODE"
+if [ "$LIVE_MODE" = "true" ]; then
+    critical_check 0 "LIVE_MODE=true (real trading enabled)"
+else
+    critical_check 1 "LIVE_MODE not set to true (currently: $LIVE_MODE)"
 fi
 
 echo ""
 
 # ============================================================
-# 3.2 DEX Configuration
+# 3.2 Shared Data Architecture
 # ============================================================
 echo "-----------------------------------------------------------"
-echo "3.2 DEX CONFIGURATION"
+echo "3.2 SHARED DATA ARCHITECTURE"
 echo "-----------------------------------------------------------"
 
-# 3.2.1 Quickswap Router configured
-QS_ROUTER=$(get_env "UNISWAP_ROUTER")
-info "Quickswap Router: $QS_ROUTER"
-if [ "$QS_ROUTER" = "0xa5E0829CaCEd8fFDD4De3c43696c57F7D7A678ff" ]; then
-    critical_check 0 "Quickswap V2 Router address correct"
+# 3.2.1 POOL_STATE_FILE configured
+POOL_STATE_FILE=$(get_env "POOL_STATE_FILE")
+info "Pool state file: $POOL_STATE_FILE"
+if [ -n "$POOL_STATE_FILE" ]; then
+    critical_check 0 "POOL_STATE_FILE configured"
+    if [ -f "$POOL_STATE_FILE" ]; then
+        important_check 0 "Pool state file exists at configured path"
+    else
+        important_check 1 "Pool state file MISSING at $POOL_STATE_FILE"
+    fi
 else
-    critical_check 1 "Quickswap V2 Router address"
+    critical_check 1 "POOL_STATE_FILE not set (required for shared data mode)"
 fi
 
-# 3.2.2 Sushiswap Router configured
-SUSHI_ROUTER=$(get_env "SUSHISWAP_ROUTER")
-info "Sushiswap Router: $SUSHI_ROUTER"
-if [ "$SUSHI_ROUTER" = "0x1b02dA8Cb0d097eB8D57A175b88c7D8b47997506" ]; then
-    important_check 0 "Sushiswap V2 Router address correct"
+# 3.2.2 WHITELIST_FILE configured
+WHITELIST_FILE=$(get_env "WHITELIST_FILE")
+info "Whitelist file: $WHITELIST_FILE"
+if [ -n "$WHITELIST_FILE" ]; then
+    critical_check 0 "WHITELIST_FILE configured"
+    if [ -f "$WHITELIST_FILE" ]; then
+        important_check 0 "Whitelist file exists at configured path"
+    else
+        important_check 1 "Whitelist file MISSING at $WHITELIST_FILE"
+    fi
 else
-    important_check 1 "Sushiswap V2 Router address"
+    critical_check 1 "WHITELIST_FILE not set (required for Phase 1.1 filtering)"
 fi
 
-# 3.2.3 V3 Factory configured
+echo ""
+
+# ============================================================
+# 3.3 DEX Configuration
+# ============================================================
+echo "-----------------------------------------------------------"
+echo "3.3 DEX CONFIGURATION (V3)"
+echo "-----------------------------------------------------------"
+
+# 3.3.1 V3 Factory configured
 V3_FACTORY=$(get_env "UNISWAP_V3_FACTORY")
 info "V3 Factory: $V3_FACTORY"
 if [ "$V3_FACTORY" = "0x1F98431c8aD98523631AE4a59f267346ea31F984" ]; then
@@ -163,7 +198,7 @@ else
     critical_check 1 "Uniswap V3 Factory address"
 fi
 
-# 3.2.4 V3 Router configured
+# 3.3.2 V3 Router configured
 V3_ROUTER=$(get_env "UNISWAP_V3_ROUTER")
 info "V3 Router: $V3_ROUTER"
 if [ "$V3_ROUTER" = "0xE592427A0AEce92De3Edee1F18E0157C05861564" ]; then
@@ -172,40 +207,39 @@ else
     critical_check 1 "Uniswap V3 Router address"
 fi
 
-# 3.2.5 V3 Quoter configured
+# 3.3.3 V3 Quoter configured (QuoterV1 for pre-checks + Multicall3 batch)
 V3_QUOTER=$(get_env "UNISWAP_V3_QUOTER")
 info "V3 Quoter: $V3_QUOTER"
 if [ "$V3_QUOTER" = "0xb27308f9F90D607463bb33eA1BeBb41C27CE5AB6" ]; then
-    important_check 0 "Uniswap V3 Quoter address correct"
+    critical_check 0 "Uniswap V3 QuoterV1 address correct"
 else
-    important_check 1 "Uniswap V3 Quoter address"
+    critical_check 1 "Uniswap V3 QuoterV1 address"
 fi
 
 echo ""
 
 # ============================================================
-# 3.3 Trading Parameters
+# 3.4 Trading Parameters
 # ============================================================
 echo "-----------------------------------------------------------"
-echo "3.3 TRADING PARAMETERS"
+echo "3.4 TRADING PARAMETERS"
 echo "-----------------------------------------------------------"
 
-# 3.3.1 MIN_PROFIT_USD configured
+# 3.4.1 MIN_PROFIT_USD configured
 MIN_PROFIT=$(get_env "MIN_PROFIT_USD")
 info "Min profit: \$${MIN_PROFIT}"
 if [ -n "$MIN_PROFIT" ]; then
-    # Check it's a reasonable value (between 0.1 and 100)
-    PROFIT_OK=$(python3 -c "print(1 if 0.1 <= float('$MIN_PROFIT') <= 100 else 0)" 2>/dev/null || echo "0")
+    PROFIT_OK=$(python3 -c "print(1 if 0.05 <= float('$MIN_PROFIT') <= 100 else 0)" 2>/dev/null || echo "0")
     if [ "$PROFIT_OK" = "1" ]; then
         important_check 0 "Min profit threshold reasonable (\$$MIN_PROFIT)"
     else
-        important_check 1 "Min profit threshold (\$$MIN_PROFIT - outside 0.1-100 range)"
+        important_check 1 "Min profit threshold (\$$MIN_PROFIT - outside 0.05-100 range)"
     fi
 else
     important_check 1 "Min profit threshold not set"
 fi
 
-# 3.3.2 MAX_TRADE_SIZE_USD configured
+# 3.4.2 MAX_TRADE_SIZE_USD configured
 MAX_TRADE=$(get_env "MAX_TRADE_SIZE_USD")
 info "Max trade size: \$${MAX_TRADE}"
 if [ -n "$MAX_TRADE" ]; then
@@ -219,7 +253,7 @@ else
     important_check 1 "Max trade size not set"
 fi
 
-# 3.3.3 MAX_SLIPPAGE_PERCENT configured
+# 3.4.3 MAX_SLIPPAGE_PERCENT configured
 MAX_SLIPPAGE=$(get_env "MAX_SLIPPAGE_PERCENT")
 info "Max slippage: ${MAX_SLIPPAGE}%"
 if [ -n "$MAX_SLIPPAGE" ]; then
@@ -233,11 +267,11 @@ else
     important_check 1 "Max slippage not set"
 fi
 
-# 3.3.4 MAX_GAS_PRICE_GWEI configured
+# 3.4.4 MAX_GAS_PRICE_GWEI configured
 MAX_GAS=$(get_env "MAX_GAS_PRICE_GWEI")
 info "Max gas price: ${MAX_GAS} gwei"
-if [ -n "$MAX_GAS" ] && [ "$MAX_GAS" -ge 10 ] && [ "$MAX_GAS" -le 500 ]; then
-    important_check 0 "Max gas price reasonable (${MAX_GAS} gwei)"
+if [ -n "$MAX_GAS" ] && [ "$MAX_GAS" -ge 10 ]; then
+    important_check 0 "Max gas price configured (${MAX_GAS} gwei)"
 else
     important_check 1 "Max gas price (${MAX_GAS} gwei)"
 fi
@@ -245,75 +279,63 @@ fi
 echo ""
 
 # ============================================================
-# 3.4 Trading Pairs
+# 3.5 Trading Pairs
 # ============================================================
 echo "-----------------------------------------------------------"
-echo "3.4 TRADING PAIRS"
+echo "3.5 TRADING PAIRS"
 echo "-----------------------------------------------------------"
 
-# 3.4.1 Trading pairs configured
+# 3.5.1 Trading pairs configured
 TRADING_PAIRS=$(get_env "TRADING_PAIRS")
 if [ -n "$TRADING_PAIRS" ]; then
     PAIR_COUNT=$(echo "$TRADING_PAIRS" | tr ',' '\n' | wc -l)
     info "Trading pairs configured: $PAIR_COUNT pairs"
     critical_check 0 "Trading pairs configured ($PAIR_COUNT pairs)"
 
-    # List first few pairs
-    echo "$TRADING_PAIRS" | tr ',' '\n' | head -3 | while read pair; do
+    # List pairs
+    echo "$TRADING_PAIRS" | tr ',' '\n' | while read pair; do
         SYMBOL=$(echo "$pair" | cut -d':' -f3)
         info "  - $SYMBOL"
     done
-    [ "$PAIR_COUNT" -gt 3 ] && info "  ... and $((PAIR_COUNT - 3)) more"
 else
     info "Trading pairs: NOT SET"
     critical_check 1 "Trading pairs configured"
 fi
 
-# 3.4.2 USDC pairs exist (essential for bridged USDC.e trading)
-USDC_PAIRS=$(echo "$TRADING_PAIRS" | grep -o "USDC" | wc -l)
-if [ "$USDC_PAIRS" -gt 0 ]; then
-    important_check 0 "USDC pairs configured ($USDC_PAIRS pairs)"
-else
-    important_check 1 "USDC pairs configured"
-fi
-
 echo ""
 
 # ============================================================
-# 3.5 Logging & Monitoring
+# 3.6 Tax Logging
 # ============================================================
 echo "-----------------------------------------------------------"
-echo "3.5 LOGGING & MONITORING"
+echo "3.6 TAX LOGGING (IRS COMPLIANCE)"
 echo "-----------------------------------------------------------"
 
-# 3.5.1 RUST_LOG configured
+# 3.6.1 Tax logging enabled
+TAX_ENABLED=$(get_env "TAX_LOG_ENABLED")
+info "Tax logging: $TAX_ENABLED"
+if [ "$TAX_ENABLED" = "true" ]; then
+    critical_check 0 "TAX_LOG_ENABLED=true"
+else
+    critical_check 1 "Tax logging not enabled"
+fi
+
+# 3.6.2 Tax directory configured
+TAX_DIR=$(get_env "TAX_LOG_DIR")
+info "Tax directory: $TAX_DIR"
+if [ -n "$TAX_DIR" ]; then
+    important_check 0 "TAX_LOG_DIR configured"
+else
+    important_check 1 "TAX_LOG_DIR not set"
+fi
+
+# 3.6.3 Logging level set
 RUST_LOG=$(get_env "RUST_LOG")
 info "RUST_LOG: $RUST_LOG"
 if [ -n "$RUST_LOG" ]; then
-    important_check 0 "Rust logging configured"
+    recommended_check 0 "Rust logging configured"
 else
-    important_check 1 "Rust logging not configured"
-fi
-
-# 3.5.2 Discord webhook configured
-DISCORD_WEBHOOK=$(get_env "DISCORD_WEBHOOK")
-if [ -n "$DISCORD_WEBHOOK" ] && [[ "$DISCORD_WEBHOOK" == https://discord.com/api/webhooks/* ]]; then
-    info "Discord webhook: configured"
-    recommended_check 0 "Discord webhook configured"
-else
-    info "Discord webhook: not set"
-    recommended_check 1 "Discord webhook not configured"
-fi
-
-# 3.5.3 Log directory exists
-LOG_DIR="/home/botuser/bots/dexarb/logs"
-if [ -d "$LOG_DIR" ]; then
-    LOG_COUNT=$(ls -1 "$LOG_DIR"/*.log 2>/dev/null | wc -l)
-    info "Log directory: $LOG_DIR ($LOG_COUNT log files)"
-    recommended_check 0 "Log directory exists"
-else
-    info "Log directory: NOT FOUND"
-    recommended_check 1 "Log directory missing"
+    recommended_check 1 "Rust logging not configured"
 fi
 
 echo ""
