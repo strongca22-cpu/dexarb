@@ -1,7 +1,7 @@
 {
-  "version": "1.2",
-  "last_updated": "2026-01-30T06:45:00Z",
-  "changelog": "v1.2: SushiSwap V3 cross-DEX expansion. Promoted 2 deep SushiV3 pools to whitelist (12 total). Classified all 13 observation pools: 9 dead → blacklist, 2 marginal → blacklist, 2 promoted. Added 'category' field (dead/marginal) to blacklist. Observation section cleared.",
+  "version": "1.3",
+  "last_updated": "2026-01-30T08:30:00Z",
+  "changelog": "v1.3: QuickSwap V3 (Algebra) integration. Added 5 QuickSwap pools to whitelist (17 total). LINK/USDC blacklisted (98% impact). fee_tier=0 is Algebra sentinel (dynamic fees, single pool per pair). ArbExecutorV2 deployed with Algebra routing support.",
   "config": {
     "default_min_liquidity": 1000000000,
     "whitelist_enforcement": "strict",
@@ -118,9 +118,9 @@
         "pair": "LINK/USDC",
         "dex": "UniswapV3",
         "fee_tier": 3000,
-        "status": "active",
+        "status": "monitoring",
         "min_liquidity": 3000000000,
-        "notes": "Deep — 0.7% impact@$5K, $4967 returned",
+        "notes": "Deep liquidity but SOLE pool — no cross-DEX counterpart, zero arb possible. Demoted to monitoring 2026-01-30. Re-activate when V2 or additional DEX pool added for LINK/USDC.",
         "added": "2026-01-29",
         "last_verified": "2026-01-30"
       },
@@ -143,6 +143,61 @@
         "status": "active",
         "min_liquidity": 3000000000,
         "notes": "SushiV3 cross-DEX — 4.4% impact@$5K, $4781 returned. 2.09T liquidity.",
+        "added": "2026-01-30",
+        "last_verified": "2026-01-30"
+      },
+      {
+        "address": "0x55CAaBB0d2b704FD0eF8192A7E35D8837e678207",
+        "pair": "WETH/USDC",
+        "dex": "QuickswapV3",
+        "fee_tier": 0,
+        "status": "active",
+        "min_liquidity": 3000000000,
+        "notes": "QuickSwap V3 (Algebra) — 0.26% impact@$5K, score=100. Dynamic fee ~0.09%. Round-trip 0.14% with UniV3 0.05%.",
+        "added": "2026-01-30",
+        "last_verified": "2026-01-30"
+      },
+      {
+        "address": "0xAE81FAc689A1b4b1e06e7ef4a2ab4CD8aC0A087D",
+        "pair": "WMATIC/USDC",
+        "dex": "QuickswapV3",
+        "fee_tier": 0,
+        "status": "active",
+        "min_liquidity": 3000000000,
+        "notes": "QuickSwap V3 (Algebra) — 1.58% impact@$5K, score=100. Dynamic fee ~0.09%. Round-trip 0.14% with UniV3 0.05%.",
+        "added": "2026-01-30",
+        "last_verified": "2026-01-30"
+      },
+      {
+        "address": "0xA5CD8351Cbf30B531C7b11B0D9d3Ff38eA2E280f",
+        "pair": "WBTC/USDC",
+        "dex": "QuickswapV3",
+        "fee_tier": 0,
+        "status": "active",
+        "min_liquidity": 3000000000,
+        "notes": "QuickSwap V3 (Algebra) — 3.78% impact@$5K, score=90. Dynamic fee ~0.09%. Round-trip 0.14% with UniV3 0.05%.",
+        "added": "2026-01-30",
+        "last_verified": "2026-01-30"
+      },
+      {
+        "address": "0x7B925e617aefd7FB3a93Abe3a701135D7a1Ba710",
+        "pair": "USDT/USDC",
+        "dex": "QuickswapV3",
+        "fee_tier": 0,
+        "status": "active",
+        "min_liquidity": 1000000000,
+        "notes": "QuickSwap V3 (Algebra) — 0.02% impact@$5K, score=100. Dynamic fee ~0.001%. Round-trip 0.01% with UniV3 0.01%.",
+        "added": "2026-01-30",
+        "last_verified": "2026-01-30"
+      },
+      {
+        "address": "0xe7E0eB9F6bCcCfe847fDf62a3628319a092F11a2",
+        "pair": "DAI/USDC",
+        "dex": "QuickswapV3",
+        "fee_tier": 0,
+        "status": "active",
+        "min_liquidity": 1000000000,
+        "notes": "QuickSwap V3 (Algebra) — 0.02% impact@$5K, score=100. Dynamic fee ~0.001%. Round-trip 0.01% with UniV3 0.01%.",
         "added": "2026-01-30",
         "last_verified": "2026-01-30"
       }
@@ -359,6 +414,17 @@
         "return_at_5k": "$1334",
         "date_added": "2026-01-30",
         "discovered_by": "depth_matrix"
+      },
+      {
+        "address": "0xEFdC563F99310A5Dd189eaaA91A1bf28034dA94C",
+        "pair": "LINK/USDC",
+        "dex": "QuickswapV3",
+        "fee_tier": 0,
+        "category": "dead",
+        "reason": "QuickSwap V3 (Algebra) — 98.18% impact@$5K, barely any liquidity. $10 returns 0.86 LINK. Dynamic fee ~0.20%.",
+        "impact_at_5k": "98.18%",
+        "date_added": "2026-01-30",
+        "discovered_by": "verify_quickswap_pools.py"
       }
     ],
     "fee_tiers": [

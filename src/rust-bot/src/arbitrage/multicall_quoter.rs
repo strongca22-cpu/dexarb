@@ -12,13 +12,14 @@
 //! We decode the first 32 bytes as `uint256 amountOut`. Real failures are
 //! distinguished by empty returnData or the Error(string) selector 0x08c379a2.
 //!
-//! Cross-DEX support: Routes Uniswap V3 legs to QuoterV1 and SushiSwap V3
-//! legs to QuoterV2. Both revert-return amountOut as the first 32 bytes.
+//! Cross-DEX support: Routes Uniswap V3 legs to QuoterV1, SushiSwap V3
+//! legs to QuoterV2, and QuickSwap V3 (Algebra) legs to Algebra QuoterV2.
+//! All revert-return amountOut as the first 32 bytes.
 //! Multicall3 aggregate3 supports mixed target addresses per sub-call.
 //!
 //! Author: AI-Generated
 //! Created: 2026-01-29
-//! Modified: 2026-01-30 - Cross-DEX: dual-quoter (V1 for Uni, V2 for Sushi)
+//! Modified: 2026-01-30 - Cross-DEX: tri-quoter (V1 Uni, V2 Sushi, Algebra QuickSwap)
 
 use crate::types::{ArbitrageOpportunity, BotConfig, DexType};
 use anyhow::{anyhow, Context, Result};
@@ -40,6 +41,12 @@ const QUOTER_V1_SELECTOR: [u8; 4] = [0xf7, 0x72, 0x9d, 0x43];
 /// Note: V2 wraps params in a tuple struct — different selector and param order from V1.
 const QUOTER_V2_SELECTOR: [u8; 4] = [0xc6, 0xa5, 0x02, 0x6a];
 
+/// Algebra QuoterV2 function selector: quoteExactInputSingle(address,address,uint256,uint160)
+/// keccak256("quoteExactInputSingle(address,address,uint256,uint160)")[..4]
+/// Note: Algebra has NO fee parameter — quoter finds the single pool per pair automatically.
+/// Flat params (like V1), but only 4 params instead of 5.
+const QUOTER_ALGEBRA_SELECTOR: [u8; 4] = [0x2d, 0x9e, 0xbd, 0x1d];
+
 /// Multicall3 aggregate3 function selector: aggregate3((address,bool,bytes)[])
 /// keccak256("aggregate3((address,bool,bytes)[])")[..4]
 const AGGREGATE3_SELECTOR: [u8; 4] = [0x82, 0xad, 0x56, 0xcb];
@@ -50,9 +57,11 @@ const ERROR_SELECTOR: [u8; 4] = [0x08, 0xc3, 0x79, 0xa2];
 /// Panic(uint256) selector — another form of actual failure
 const PANIC_SELECTOR: [u8; 4] = [0x4e, 0x48, 0x7b, 0x71];
 
-/// Conservative haircut applied to estimated buy output for sell-leg pre-screen.
-/// The executor uses exact amounts from its own Quoter call.
-const SELL_ESTIMATE_FACTOR: f64 = 0.95;
+/// Sell-leg estimate factor. Previously 0.95 (5% haircut) which created a phantom
+/// ~5% loss in profit calculation, rejecting every opportunity with <5% spread.
+/// Now 1.0: the pre-screen uses the midmarket estimate directly. The executor's
+/// own Quoter safety check provides the real protection.
+const SELL_ESTIMATE_FACTOR: f64 = 1.0;
 
 /// Result of batch verification for a single opportunity
 #[derive(Debug, Clone)]
@@ -86,17 +95,20 @@ impl VerifiedOpportunity {
 }
 
 /// Batch Quoter using Multicall3 for pre-screening opportunities.
-/// Supports dual-quoter: QuoterV1 for Uniswap V3, QuoterV2 for SushiSwap V3.
+/// Supports tri-quoter: QuoterV1 for Uniswap V3, QuoterV2 for SushiSwap V3,
+/// Algebra QuoterV2 for QuickSwap V3.
 pub struct MulticallQuoter<M: Middleware> {
     provider: Arc<M>,
     multicall_address: Address,
     uniswap_quoter_address: Address,
     sushiswap_quoter_address: Option<Address>,
+    quickswap_quoter_address: Option<Address>,
 }
 
 impl<M: Middleware + 'static> MulticallQuoter<M> {
     /// Create a new MulticallQuoter using Quoter addresses from config.
-    /// Uniswap V3 QuoterV1 is required; SushiSwap V3 QuoterV2 is optional.
+    /// Uniswap V3 QuoterV1 is required; SushiSwap V3 QuoterV2 and
+    /// QuickSwap V3 (Algebra) QuoterV2 are optional.
     pub fn new(provider: Arc<M>, config: &BotConfig) -> Result<Self> {
         let multicall_address: Address = MULTICALL3_ADDRESS
             .parse()
@@ -107,10 +119,11 @@ impl<M: Middleware + 'static> MulticallQuoter<M> {
             .ok_or_else(|| anyhow!("UNISWAP_V3_QUOTER not configured — required for Multicall batch verify"))?;
 
         let sushiswap_quoter_address = config.sushiswap_v3_quoter;
+        let quickswap_quoter_address = config.quickswap_v3_quoter;
 
         info!(
-            "MulticallQuoter initialized: Multicall3={:?}, UniQuoter={:?}, SushiQuoter={:?}",
-            multicall_address, uniswap_quoter_address, sushiswap_quoter_address
+            "MulticallQuoter initialized: Multicall3={:?}, UniQuoter={:?}, SushiQuoter={:?}, QuickSwapQuoter={:?}",
+            multicall_address, uniswap_quoter_address, sushiswap_quoter_address, quickswap_quoter_address
         );
 
         Ok(Self {
@@ -118,13 +131,16 @@ impl<M: Middleware + 'static> MulticallQuoter<M> {
             multicall_address,
             uniswap_quoter_address,
             sushiswap_quoter_address,
+            quickswap_quoter_address,
         })
     }
 
     /// Get the correct quoter address for a DexType.
-    /// SushiSwap V3 → SushiSwap QuoterV2; all else → Uniswap QuoterV1.
+    /// QuickSwap V3 → Algebra QuoterV2; SushiSwap V3 → SushiSwap QuoterV2; all else → Uniswap QuoterV1.
     fn quoter_for_dex(&self, dex: DexType) -> Address {
-        if dex.is_sushi_v3() {
+        if dex.is_quickswap_v3() {
+            self.quickswap_quoter_address.unwrap_or(self.uniswap_quoter_address)
+        } else if dex.is_sushi_v3() {
             self.sushiswap_quoter_address.unwrap_or(self.uniswap_quoter_address)
         } else {
             self.uniswap_quoter_address
@@ -165,24 +181,34 @@ impl<M: Middleware + 'static> MulticallQuoter<M> {
                 .v3_fee_tier()
                 .ok_or_else(|| anyhow!("Sell DEX {:?} is not V3", opp.sell_dex))?;
 
-            // Buy leg: token0 → token1 on buy pool
+            // Swap direction depends on which token is the quote (USDC):
+            //   quote=token0: buy token0→token1, sell token1→token0
+            //   quote=token1: buy token1→token0, sell token0→token1
+            let (buy_token_in, buy_token_out, sell_token_in, sell_token_out) =
+                if opp.quote_token_is_token0 {
+                    (opp.pair.token0, opp.pair.token1, opp.pair.token1, opp.pair.token0)
+                } else {
+                    (opp.pair.token1, opp.pair.token0, opp.pair.token0, opp.pair.token1)
+                };
+
+            // Buy leg: quote_token → base_token on buy pool
             let buy_quoter = self.quoter_for_dex(opp.buy_dex);
             let buy_call = Self::encode_quoter_for_dex(
                 opp.buy_dex,
-                opp.pair.token0,
-                opp.pair.token1,
+                buy_token_in,
+                buy_token_out,
                 buy_fee,
                 opp.trade_size,
             );
 
-            // Sell leg: token1 → token0 on sell pool
+            // Sell leg: base_token → quote_token on sell pool
             // Use estimated buy output since we don't have actual yet
             let sell_quoter = self.quoter_for_dex(opp.sell_dex);
             let estimated_buy_out = Self::estimate_buy_output(opp);
             let sell_call = Self::encode_quoter_for_dex(
                 opp.sell_dex,
-                opp.pair.token1,
-                opp.pair.token0,
+                sell_token_in,
+                sell_token_out,
                 sell_fee,
                 estimated_buy_out,
             );
@@ -240,22 +266,48 @@ impl<M: Middleware + 'static> MulticallQuoter<M> {
             match (buy_result, sell_result) {
                 (Ok(buy_out), Ok(sell_out)) => {
                     // Both legs valid — calculate profit in token0 raw units
+                    // Guard: if either value exceeds u128, the quoter returned garbage
+                    let u128_max = U256::from(u128::MAX);
+                    if opp.trade_size > u128_max || sell_out > u128_max {
+                        warn!(
+                            "Multicall overflow guard [{}]: {} — trade_size={} sell_out={} exceed u128",
+                            i, opp.pair.symbol, opp.trade_size, sell_out
+                        );
+                        verified.push(VerifiedOpportunity {
+                            original_index: i,
+                            buy_quoted_out: buy_out,
+                            sell_quoted_out: sell_out,
+                            quoted_profit_raw: 0,
+                            both_legs_valid: false,
+                            error: Some("u128 overflow in profit calculation".to_string()),
+                        });
+                        continue;
+                    }
                     let trade_size_i128 = opp.trade_size.as_u128() as i128;
                     let sell_out_i128 = sell_out.as_u128() as i128;
                     let profit = sell_out_i128 - trade_size_i128;
 
-                    debug!(
-                        "Multicall verified [{}]: {} buy_out={} sell_out={} profit_raw={}",
-                        i, opp.pair.symbol, buy_out, sell_out, profit
-                    );
+                    let is_profitable = profit > 0;
+
+                    if is_profitable {
+                        debug!(
+                            "Multicall verified [{}]: {} buy_out={} sell_out={} profit_raw={}",
+                            i, opp.pair.symbol, buy_out, sell_out, profit
+                        );
+                    } else {
+                        info!(
+                            "Multicall rejected [{}]: {} — quoted loss (profit_raw={}, buy_out={}, sell_out={}, trade_size={})",
+                            i, opp.pair.symbol, profit, buy_out, sell_out, opp.trade_size
+                        );
+                    }
 
                     verified.push(VerifiedOpportunity {
                         original_index: i,
                         buy_quoted_out: buy_out,
                         sell_quoted_out: sell_out,
                         quoted_profit_raw: profit,
-                        both_legs_valid: true,
-                        error: None,
+                        both_legs_valid: is_profitable,
+                        error: if is_profitable { None } else { Some(format!("Quoted loss: {}", profit)) },
                     });
                 }
                 (Err(buy_err), _) => {
@@ -293,7 +345,9 @@ impl<M: Middleware + 'static> MulticallQuoter<M> {
     }
 
     /// Route to the correct quoter encoding based on DexType.
-    /// SushiSwap V3 → QuoterV2 (tuple struct param), all else → QuoterV1 (flat params).
+    /// QuickSwap V3 → Algebra QuoterV2 (no fee param),
+    /// SushiSwap V3 → QuoterV2 (tuple struct param),
+    /// all else → QuoterV1 (flat params).
     fn encode_quoter_for_dex(
         dex: DexType,
         token_in: Address,
@@ -301,7 +355,9 @@ impl<M: Middleware + 'static> MulticallQuoter<M> {
         fee: u32,
         amount_in: U256,
     ) -> Vec<u8> {
-        if dex.is_sushi_v3() {
+        if dex.is_quickswap_v3() {
+            Self::encode_quoter_algebra_call(token_in, token_out, amount_in)
+        } else if dex.is_sushi_v3() {
             Self::encode_quoter_v2_call(token_in, token_out, fee, amount_in)
         } else {
             Self::encode_quoter_v1_call(token_in, token_out, fee, amount_in)
@@ -361,6 +417,36 @@ impl<M: Middleware + 'static> MulticallQuoter<M> {
             Token::Uint(U256::from(fee)),
             Token::Uint(U256::zero()),         // sqrtPriceLimitX96 = 0
         ])]);
+        data.extend_from_slice(&encoded);
+
+        data
+    }
+
+    /// Encode an Algebra QuoterV2 `quoteExactInputSingle` call (QuickSwap V3).
+    ///
+    /// Selector: 0x2d9ebd1d
+    /// Params: (address tokenIn, address tokenOut, uint256 amountIn, uint160 sqrtPriceLimitX96)
+    /// Note: Algebra has NO fee parameter — dynamic fees, single pool per pair.
+    /// The quoter finds the correct pool automatically via the factory.
+    /// sqrtPriceLimitX96 = 0 (no price limit)
+    ///
+    /// Return: (uint256 amountOut, uint160 sqrtPriceX96After, uint32 initializedTicksCrossed, uint256 gasEstimate)
+    /// First 32 bytes of returnData = amountOut (same as V1/V2), so decode_quoter_result works.
+    fn encode_quoter_algebra_call(
+        token_in: Address,
+        token_out: Address,
+        amount_in: U256,
+    ) -> Vec<u8> {
+        let mut data = Vec::with_capacity(132); // 4 selector + 4×32 params
+        data.extend_from_slice(&QUOTER_ALGEBRA_SELECTOR);
+
+        // ABI-encode 4 flat parameters (no fee!)
+        let encoded = abi::encode(&[
+            Token::Address(token_in),
+            Token::Address(token_out),
+            Token::Uint(amount_in),
+            Token::Uint(U256::zero()), // sqrtPriceLimitX96 = 0
+        ]);
         data.extend_from_slice(&encoded);
 
         data
@@ -488,18 +574,39 @@ impl<M: Middleware + 'static> MulticallQuoter<M> {
 
     /// Estimate buy leg output for sell-leg pre-screening.
     ///
-    /// Uses the detector's price with a conservative 5% haircut.
-    /// The executor will use the actual Quoter amount during execution.
+    /// The buy leg converts quote_token → base_token. The estimate depends on
+    /// which token is the quote:
+    ///   quote=token0: amount_in in token0 decimals, buy_price = token1/token0
+    ///                 → expected_out = amount_in * buy_price (in token1 units)
+    ///   quote=token1: amount_in in token1 decimals, buy_price = token1/token0
+    ///                 → expected_out = amount_in / buy_price (in token0 units)
     fn estimate_buy_output(opp: &ArbitrageOpportunity) -> U256 {
-        let amount_in_human =
-            opp.trade_size.as_u128() as f64 / 10_f64.powi(opp.token0_decimals as i32);
-        let expected_out = amount_in_human * opp.buy_price * SELL_ESTIMATE_FACTOR;
-        let raw = expected_out * 10_f64.powi(opp.token1_decimals as i32);
+        let (in_decimals, out_decimals, expected_out_human) = if opp.quote_token_is_token0 {
+            // quote=token0: trade_size is in token0 units, output is token1
+            let amount_in_human =
+                opp.trade_size.low_u128() as f64 / 10_f64.powi(opp.token0_decimals as i32);
+            let out = amount_in_human * opp.buy_price * SELL_ESTIMATE_FACTOR;
+            (opp.token0_decimals, opp.token1_decimals, out)
+        } else {
+            // quote=token1: trade_size is in token1 units (USDC), output is token0
+            let amount_in_human =
+                opp.trade_size.low_u128() as f64 / 10_f64.powi(opp.token1_decimals as i32);
+            // buy_price = token1/token0 (e.g., 82000 USDC per WBTC)
+            // To buy token0: amount_in / buy_price
+            let out = if opp.buy_price > 0.0 {
+                amount_in_human / opp.buy_price * SELL_ESTIMATE_FACTOR
+            } else {
+                0.0
+            };
+            (opp.token1_decimals, opp.token0_decimals, out)
+        };
+
+        let raw = expected_out_human * 10_f64.powi(out_decimals as i32);
 
         if raw <= 0.0 || !raw.is_finite() {
             warn!(
-                "estimate_buy_output: invalid result {:.2} for {} (trade_size={}, buy_price={:.6})",
-                raw, opp.pair.symbol, opp.trade_size, opp.buy_price
+                "estimate_buy_output: invalid result {:.2} for {} (trade_size={}, buy_price={:.6}, quote_is_t0={})",
+                raw, opp.pair.symbol, opp.trade_size, opp.buy_price, opp.quote_token_is_token0
             );
             return U256::zero();
         }
@@ -555,6 +662,27 @@ mod tests {
         // V2 encodes params as a tuple — different from V1 flat params
         // but still produces valid ABI-encoded calldata
         assert!(encoded.len() > 4);
+    }
+
+    #[test]
+    fn test_encode_quoter_algebra_call() {
+        let token_in: Address = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+            .parse()
+            .unwrap(); // USDC.e on Polygon
+        let token_out: Address = "0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619"
+            .parse()
+            .unwrap(); // WETH on Polygon
+
+        let amount_in = U256::from(1_000_000u64); // 1 USDC (6 decimals)
+
+        let encoded = MulticallQuoter::<Provider<Ws>>::encode_quoter_algebra_call(
+            token_in, token_out, amount_in,
+        );
+
+        // Should be 4 (selector) + 4*32 (params) = 132 bytes (no fee param)
+        assert_eq!(encoded.len(), 132);
+        // First 4 bytes = Algebra QuoterV2 selector
+        assert_eq!(&encoded[..4], &QUOTER_ALGEBRA_SELECTOR);
     }
 
     #[test]

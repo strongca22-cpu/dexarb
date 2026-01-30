@@ -17,7 +17,12 @@ use crate::filters::WhitelistFilter;
 use crate::pool::{PoolStateManager, PriceCalculator};
 use crate::types::{ArbitrageOpportunity, BotConfig, DexType, PoolState, TradingPair};
 use ethers::types::{Address, U256};
+use std::str::FromStr;
 use tracing::{debug, info, warn};
+
+/// USDC.e (bridged) on Polygon — the quote token for all trading pairs.
+/// Used to determine swap direction: if USDC is V3 token0 vs token1.
+const USDC_ADDRESS: &str = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
 
 /// Minimum spread percentage to consider (covers fees)
 const MIN_SPREAD_PERCENT: f64 = 0.3;
@@ -168,27 +173,53 @@ impl OpportunityDetector {
         // The executor will try them in profit order and skip Quoter-rejected ones
         let mut results: Vec<ArbitrageOpportunity> = Vec::new();
 
+        // Determine if the quote token (USDC) is V3 token0 or token1.
+        // V3 sorts tokens by address; USDC.e = 0x2791...
+        // This controls buy/sell assignment and swap direction.
+        let usdc_addr = Address::from_str(USDC_ADDRESS).unwrap_or_default();
+        let quote_is_token0 = unified_pools.first()
+            .map(|p| p.pair.token0 == usdc_addr)
+            .unwrap_or(true);
+
         for i in 0..unified_pools.len() {
             for j in (i + 1)..unified_pools.len() {
                 let pool_a = &unified_pools[i];
                 let pool_b = &unified_pools[j];
 
-                // V3 price = token1/token0 (e.g., UNI per USDC)
+                // V3 price = token1/token0
                 //
-                // CORRECT DIRECTION (FIX for $500 loss incident):
-                //   buy_pool  = HIGHER price (more token1 per token0 → better entry)
-                //   sell_pool = LOWER price  (1/price is higher → more token0 per token1 → better exit)
+                // If quote=token0 (USDC=token0, e.g., WETH/USDC):
+                //   Higher price = more base per quote = cheaper base → BUY here
+                //   Lower price  = less base per quote = expensive base → SELL here
                 //
-                // Previously: buy_pool=lower, sell_pool=higher → traded BACKWARDS → guaranteed loss
-                let (buy_pool, sell_pool) = if pool_a.price > pool_b.price {
-                    (pool_a, pool_b)  // pool_a has higher price → buy here
+                // If quote=token1 (USDC=token1, e.g., WBTC/USDC, WMATIC/USDC):
+                //   Lower price  = less quote per base = cheaper base → BUY here
+                //   Higher price = more quote per base = expensive base → SELL here
+                let (buy_pool, sell_pool) = if quote_is_token0 {
+                    // Current behavior: buy where price is higher
+                    if pool_a.price > pool_b.price {
+                        (pool_a, pool_b)
+                    } else {
+                        (pool_b, pool_a)
+                    }
                 } else {
-                    (pool_b, pool_a)  // pool_b has higher price → buy here
+                    // Reversed: buy where price is lower (cheaper base in quote terms)
+                    if pool_a.price < pool_b.price {
+                        (pool_a, pool_b)
+                    } else {
+                        (pool_b, pool_a)
+                    }
                 };
 
                 // Calculate midmarket spread (before fees)
-                // buy_pool.price > sell_pool.price, so this is positive
-                let midmarket_spread = (buy_pool.price - sell_pool.price) / sell_pool.price;
+                // Always positive: distance between buy and sell prices
+                let midmarket_spread = if quote_is_token0 {
+                    // buy has higher price
+                    (buy_pool.price - sell_pool.price) / sell_pool.price
+                } else {
+                    // sell has higher price
+                    (sell_pool.price - buy_pool.price) / buy_pool.price
+                };
 
                 // Calculate round-trip fee
                 let round_trip_fee = (buy_pool.fee_percent + sell_pool.fee_percent) / 100.0;
@@ -202,7 +233,7 @@ impl OpportunityDetector {
 
                 // Estimate profit
                 let gross = executable_spread * self.config.max_trade_size_usd;
-                let slippage_estimate = gross * 0.10;  // 10% slippage estimate
+                let slippage_estimate = gross * 0.01;  // 1% slippage estimate (V3 concentrated liquidity has <0.01% at $140-500)
                 let net_profit = gross - ESTIMATED_GAS_COST_USD - slippage_estimate;
 
                 if net_profit < self.config.min_profit_usd {
@@ -252,6 +283,7 @@ impl OpportunityDetector {
                     token0_decimals: buy_pool.token0_decimals,
                     token1_decimals: buy_pool.token1_decimals,
                     buy_pool_liquidity: Some(buy_pool.liquidity),
+                    quote_token_is_token0: quote_is_token0,
                 });
             }
         }
@@ -339,6 +371,7 @@ impl OpportunityDetector {
             token0_decimals: 18, // V2 pools don't track decimals, default 18
             token1_decimals: 18,
             buy_pool_liquidity: None,
+            quote_token_is_token0: true, // V2 pools: default assumption (USDC is token0)
         })
     }
 
@@ -439,7 +472,7 @@ impl OpportunityDetector {
 
     /// Convert Wei profit to USD based on pair
     fn wei_to_usd(&self, wei: U256, pair_symbol: &str) -> f64 {
-        let wei_f = wei.as_u128() as f64;
+        let wei_f = wei.low_u128() as f64;
 
         // Convert based on token (can be improved with price oracle)
         if pair_symbol.starts_with("WETH") {
@@ -497,6 +530,9 @@ mod tests {
             sushiswap_v3_factory: None,
             sushiswap_v3_router: None,
             sushiswap_v3_quoter: None,
+            quickswap_v3_factory: None,
+            quickswap_v3_router: None,
+            quickswap_v3_quoter: None,
             pairs: vec![],
             poll_interval_ms: 1000,
             max_gas_price_gwei: 100,

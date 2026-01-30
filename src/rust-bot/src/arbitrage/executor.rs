@@ -1,13 +1,15 @@
 //! Trade Executor
 //!
-//! Executes arbitrage trades across DEXs using Uniswap V2 and V3 Router interfaces.
+//! Executes arbitrage trades across DEXs using Uniswap V2, V3, and Algebra Router interfaces.
 //! V2: swapExactTokensForTokens (Quickswap, Sushiswap, Apeswap)
-//! V3: exactInputSingle (Uniswap V3 fee tiers: 0.05%, 0.30%, 1.00%)
+//! V3: exactInputSingle (Uniswap V3, SushiSwap V3 fee tiers)
+//! Algebra: exactInputSingle (QuickSwap V3 — no fee param, dynamic fees)
 //! Includes IRS-compliant tax logging for all executed trades.
 //!
 //! Execution modes:
 //!   - Atomic (preferred): Single tx via ArbExecutor.sol contract. Both swaps
 //!     execute atomically — reverts on loss. Zero leg risk.
+//!     fee=0 sentinel signals Algebra router interface (no fee in swap params).
 //!   - Legacy two-tx: Separate buy + sell transactions (has leg risk).
 //!     Used as fallback if ARB_EXECUTOR_ADDRESS is not configured.
 //!
@@ -22,6 +24,7 @@
 //! Modified: 2026-01-29 (V3 SwapRouter support: exactInputSingle)
 //! Modified: 2026-01-29 (Post-incident: decimal fix, quoter, event parsing)
 //! Modified: 2026-01-30 (Atomic execution via ArbExecutor.sol contract)
+//! Modified: 2026-01-30 (QuickSwap V3 / Algebra router + quoter support)
 
 use crate::tax::{TaxLogger, TaxRecordBuilder};
 use crate::types::{ArbitrageOpportunity, BotConfig, DexType, TradeResult};
@@ -65,6 +68,22 @@ abigen!(
 abigen!(
     IQuoterV2,
     r#"[{"inputs":[{"components":[{"internalType":"address","name":"tokenIn","type":"address"},{"internalType":"address","name":"tokenOut","type":"address"},{"internalType":"uint256","name":"amountIn","type":"uint256"},{"internalType":"uint24","name":"fee","type":"uint24"},{"internalType":"uint160","name":"sqrtPriceLimitX96","type":"uint160"}],"internalType":"struct IQuoterV2.QuoteExactInputSingleParams","name":"params","type":"tuple"}],"name":"quoteExactInputSingle","outputs":[{"internalType":"uint256","name":"amountOut","type":"uint256"},{"internalType":"uint160","name":"sqrtPriceX96After","type":"uint160"},{"internalType":"uint32","name":"initializedTicksCrossed","type":"uint32"},{"internalType":"uint256","name":"gasEstimate","type":"uint256"}],"stateMutability":"nonpayable","type":"function"}]"#
+);
+
+// QuickSwap V3 (Algebra) SwapRouter ABI — no fee parameter, uses limitSqrtPrice
+// ExactInputSingleParams: (tokenIn, tokenOut, recipient, deadline, amountIn, amountOutMinimum, limitSqrtPrice)
+abigen!(
+    IAlgebraSwapRouter,
+    r#"[{"inputs":[{"components":[{"internalType":"address","name":"tokenIn","type":"address"},{"internalType":"address","name":"tokenOut","type":"address"},{"internalType":"address","name":"recipient","type":"address"},{"internalType":"uint256","name":"deadline","type":"uint256"},{"internalType":"uint256","name":"amountIn","type":"uint256"},{"internalType":"uint256","name":"amountOutMinimum","type":"uint256"},{"internalType":"uint160","name":"limitSqrtPrice","type":"uint160"}],"internalType":"struct ISwapRouter.ExactInputSingleParams","name":"params","type":"tuple"}],"name":"exactInputSingle","outputs":[{"internalType":"uint256","name":"amountOut","type":"uint256"}],"stateMutability":"payable","type":"function"}]"#
+);
+
+// QuickSwap V3 (Algebra) Quoter ABI — no fee parameter
+// quoteExactInputSingle(address,address,uint256,uint160) → (uint256,uint16)
+abigen!(
+    IAlgebraQuoter,
+    r#"[
+        function quoteExactInputSingle(address tokenIn, address tokenOut, uint256 amountIn, uint160 limitSqrtPrice) external returns (uint256 amountOut, uint16 fee)
+    ]"#
 );
 
 // ERC20 ABI for token approvals
@@ -154,9 +173,12 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
             opportunity.sell_price
         );
 
-        // Get token addresses
-        let token0 = opportunity.pair.token0;
-        let token1 = opportunity.pair.token1;
+        // Get token addresses — orient so token0 = quote (USDC), token1 = base
+        let (token0, token1) = if opportunity.quote_token_is_token0 {
+            (opportunity.pair.token0, opportunity.pair.token1)
+        } else {
+            (opportunity.pair.token1, opportunity.pair.token0)
+        };
         let trade_size = opportunity.trade_size;
 
         if self.dry_run {
@@ -445,8 +467,14 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
             });
         }
 
-        let token0 = opportunity.pair.token0;
-        let token1 = opportunity.pair.token1;
+        // ArbExecutor.sol token0 = "base token" (start & end) = USDC (quote token)
+        // ArbExecutor.sol token1 = "intermediate token" (bought & sold)
+        // Map from V3 pool ordering to contract ordering based on quote_token_is_token0
+        let (token0, token1) = if opportunity.quote_token_is_token0 {
+            (opportunity.pair.token0, opportunity.pair.token1)
+        } else {
+            (opportunity.pair.token1, opportunity.pair.token0)
+        };
         let trade_size = opportunity.trade_size;
 
         // Get router addresses and fee tiers
@@ -569,7 +597,7 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
         let gas_used = receipt.gas_used.unwrap_or(U256::from(400_000u64));
         let effective_gas_price = receipt.effective_gas_price.unwrap_or(gas_price);
         let gas_cost_wei = gas_used * effective_gas_price;
-        let gas_used_native = gas_cost_wei.as_u128() as f64 / 1e18;
+        let gas_used_native = gas_cost_wei.low_u128() as f64 / 1e18;
         let gas_cost_usd = gas_used_native * 0.50; // MATIC ~$0.50
         let net_profit_usd = profit_usd - gas_cost_usd;
 
@@ -857,7 +885,8 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
     }
 
     /// Execute a V3 swap (exactInputSingle)
-    /// Used for Uniswap V3 fee tiers: 0.05%, 0.30%, 1.00%
+    /// Routes to Algebra SwapRouter (no fee) for QuickSwap V3,
+    /// or standard ISwapRouter (with fee) for Uniswap/SushiSwap V3.
     async fn swap_v3(
         &self,
         dex: DexType,
@@ -867,7 +896,6 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
         min_amount_out: U256,
     ) -> Result<(TxHash, U256, u64)> {
         let router_address = self.get_router_address(dex);
-        let fee = dex.v3_fee_tier().ok_or_else(|| anyhow!("Not a V3 DEX type: {:?}", dex))?;
 
         // Create signer client
         let client = SignerMiddleware::new(
@@ -875,8 +903,6 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
             self.wallet.clone().with_chain_id(self.config.chain_id),
         );
         let client = Arc::new(client);
-
-        let router = ISwapRouter::new(router_address, client.clone());
 
         // Set deadline (current time + 5 minutes)
         let deadline = SystemTime::now()
@@ -887,58 +913,86 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
 
         let wallet_address = self.wallet.address();
 
-        debug!(
-            "V3 Swap: {} {} -> {} on {:?} (fee tier: {})",
-            amount_in, token_in, token_out, dex, fee
-        );
-        debug!("  Min out: {}, Deadline: {}", min_amount_out, deadline);
+        // Route to correct router and wait for receipt
+        // Each branch handles the full send+confirm flow to avoid lifetime issues
+        // with PendingTransaction borrowing from the router contract instance.
+        if dex.is_quickswap_v3() {
+            // QuickSwap V3 (Algebra): no fee parameter, uses limitSqrtPrice
+            debug!(
+                "Algebra Swap: {} {} -> {} on {:?} (dynamic fee)",
+                amount_in, token_in, token_out, dex
+            );
+            debug!("  Min out: {}, Deadline: {}", min_amount_out, deadline);
 
-        // Build ExactInputSingleParams struct (generated by abigen from V3 SwapRouter ABI)
-        // sqrtPriceLimitX96 = 0 means no price limit (accept any price within slippage)
-        let params = i_swap_router::ExactInputSingleParams {
-            token_in,
-            token_out,
-            fee,
-            recipient: wallet_address,
-            deadline: U256::from(deadline),
-            amount_in,
-            amount_out_minimum: min_amount_out,
-            sqrt_price_limit_x96: U256::zero(), // 0 = no limit
-        };
+            let router = IAlgebraSwapRouter::new(router_address, client.clone());
+            let params = i_algebra_swap_router::ExactInputSingleParams {
+                token_in,
+                token_out,
+                recipient: wallet_address,
+                deadline: U256::from(deadline),
+                amount_in,
+                amount_out_minimum: min_amount_out,
+                limit_sqrt_price: U256::zero(), // 0 = no limit
+            };
+            let tx = router.exact_input_single(params);
+            let pending_tx = tx.send().await.map_err(|e| anyhow!("Algebra V3 send failed: {}", e))?;
+            let tx_hash = pending_tx.tx_hash();
+            info!("V3 swap tx submitted: {:?} ({:?})", tx_hash, dex);
 
-        let tx = router.exact_input_single(params);
+            let receipt = pending_tx
+                .await
+                .map_err(|e| anyhow!("V3 confirmation failed: {}", e))?
+                .ok_or_else(|| anyhow!("No receipt returned"))?;
 
-        let pending_tx = tx.send().await.map_err(|e| anyhow!("V3 send failed: {}", e))?;
-        let tx_hash = pending_tx.tx_hash();
+            if receipt.status != Some(U64::from(1)) {
+                return Err(anyhow!("V3 transaction reverted"));
+            }
+            let block_number = receipt.block_number.map(|bn| bn.as_u64()).unwrap_or(0);
+            let amount_out = self
+                .parse_amount_out_from_receipt(&receipt, token_out, wallet_address)
+                .unwrap_or_else(|| { warn!("V3: falling back to min_amount_out"); min_amount_out });
+            info!("V3 swap confirmed: block={}, amount_out={}", block_number, amount_out);
+            Ok((tx_hash, amount_out, block_number))
+        } else {
+            // Uniswap V3 / SushiSwap V3: standard ISwapRouter with fee
+            let fee = dex.v3_fee_tier().ok_or_else(|| anyhow!("Not a V3 DEX type: {:?}", dex))?;
+            debug!(
+                "V3 Swap: {} {} -> {} on {:?} (fee tier: {})",
+                amount_in, token_in, token_out, dex, fee
+            );
+            debug!("  Min out: {}, Deadline: {}", min_amount_out, deadline);
 
-        info!("V3 swap tx submitted: {:?}", tx_hash);
+            let router = ISwapRouter::new(router_address, client.clone());
+            let params = i_swap_router::ExactInputSingleParams {
+                token_in,
+                token_out,
+                fee,
+                recipient: wallet_address,
+                deadline: U256::from(deadline),
+                amount_in,
+                amount_out_minimum: min_amount_out,
+                sqrt_price_limit_x96: U256::zero(), // 0 = no limit
+            };
+            let tx = router.exact_input_single(params);
+            let pending_tx = tx.send().await.map_err(|e| anyhow!("V3 send failed: {}", e))?;
+            let tx_hash = pending_tx.tx_hash();
+            info!("V3 swap tx submitted: {:?} ({:?})", tx_hash, dex);
 
-        // Wait for confirmation
-        let receipt = pending_tx
-            .await
-            .map_err(|e| anyhow!("V3 confirmation failed: {}", e))?
-            .ok_or_else(|| anyhow!("No receipt returned"))?;
+            let receipt = pending_tx
+                .await
+                .map_err(|e| anyhow!("V3 confirmation failed: {}", e))?
+                .ok_or_else(|| anyhow!("No receipt returned"))?;
 
-        if receipt.status != Some(U64::from(1)) {
-            return Err(anyhow!("V3 transaction reverted"));
+            if receipt.status != Some(U64::from(1)) {
+                return Err(anyhow!("V3 transaction reverted"));
+            }
+            let block_number = receipt.block_number.map(|bn| bn.as_u64()).unwrap_or(0);
+            let amount_out = self
+                .parse_amount_out_from_receipt(&receipt, token_out, wallet_address)
+                .unwrap_or_else(|| { warn!("V3: falling back to min_amount_out"); min_amount_out });
+            info!("V3 swap confirmed: block={}, amount_out={}", block_number, amount_out);
+            Ok((tx_hash, amount_out, block_number))
         }
-
-        // Extract block number for tax logging
-        let block_number = receipt.block_number
-            .map(|bn| bn.as_u64())
-            .unwrap_or(0);
-
-        // Parse actual amountOut from ERC20 Transfer events in receipt
-        let amount_out = self
-            .parse_amount_out_from_receipt(&receipt, token_out, wallet_address)
-            .unwrap_or_else(|| {
-                warn!("V3: falling back to min_amount_out as output amount");
-                min_amount_out
-            });
-
-        info!("V3 swap confirmed: block={}, amount_out={}", block_number, amount_out);
-
-        Ok((tx_hash, amount_out, block_number))
     }
 
     /// Ensure token approval for router
@@ -1001,6 +1055,10 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
             DexType::SushiV3_001 | DexType::SushiV3_005 | DexType::SushiV3_030 => {
                 self.config.sushiswap_v3_router.unwrap_or(self.config.sushiswap_router)
             }
+            // QuickSwap V3 (Algebra) — different ABI, different router
+            DexType::QuickswapV3 => {
+                self.config.quickswap_v3_router.unwrap_or(self.config.uniswap_router)
+            }
         }
     }
 
@@ -1028,7 +1086,7 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
         out_decimals: u8,
     ) -> U256 {
         // Step 1: Convert raw input to human-readable
-        let amount_in_human = amount_in.as_u128() as f64 / 10_f64.powi(in_decimals as i32);
+        let amount_in_human = amount_in.low_u128() as f64 / 10_f64.powi(in_decimals as i32);
 
         // Step 2: Calculate expected output in human-readable units
         let expected_out_human = amount_in_human * price;
@@ -1063,6 +1121,7 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
     /// BEFORE committing any capital on-chain.
     ///
     /// This is a read-only simulation (uses .call()) — no gas spent.
+    /// Routes to correct quoter: Algebra (no fee), SushiV3 (QuoterV2), UniV3 (QuoterV1).
     async fn v3_quoter_check(
         &self,
         token_in: Address,
@@ -1075,7 +1134,23 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
             .ok_or_else(|| anyhow!("Not a V3 DEX type: {:?}", dex))?;
 
         // Route to correct quoter based on DEX type
-        let quoted_out = if dex.is_sushi_v3() {
+        let quoted_out = if dex.is_quickswap_v3() {
+            // QuickSwap V3 (Algebra): no fee parameter
+            let quoter_address = self.config.quickswap_v3_quoter
+                .ok_or_else(|| anyhow!("QuickSwap V3 Quoter not configured (QUICKSWAP_V3_QUOTER)"))?;
+            let quoter = IAlgebraQuoter::new(quoter_address, self.provider.clone());
+            let (amount_out, _fee) = quoter
+                .quote_exact_input_single(
+                    token_in,
+                    token_out,
+                    amount_in,
+                    U256::zero(), // limitSqrtPrice = 0 (no limit)
+                )
+                .call()
+                .await
+                .map_err(|e| anyhow!("Algebra Quoter simulation failed: {} — pool may lack liquidity", e))?;
+            amount_out
+        } else if dex.is_sushi_v3() {
             // SushiSwap V3: use QuoterV2 (struct param, tuple return)
             let quoter_address = self.config.sushiswap_v3_quoter
                 .ok_or_else(|| anyhow!("SushiSwap V3 Quoter not configured (SUSHISWAP_V3_QUOTER)"))?;
@@ -1176,7 +1251,7 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
 
     /// Convert Wei to USD based on token pair
     fn wei_to_usd(&self, wei: U256, pair_symbol: &str) -> f64 {
-        let wei_f = wei.as_u128() as f64;
+        let wei_f = wei.low_u128() as f64;
 
         if pair_symbol.starts_with("WETH") {
             (wei_f / 1e18) * 3300.0

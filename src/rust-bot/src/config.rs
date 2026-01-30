@@ -77,6 +77,17 @@ fn load_config_inner() -> Result<BotConfig> {
         .ok()
         .and_then(|s| Address::from_str(&s).ok());
 
+    // Load optional QuickSwap V3 (Algebra) addresses (cross-DEX arb)
+    let quickswap_v3_factory = std::env::var("QUICKSWAP_V3_FACTORY")
+        .ok()
+        .and_then(|s| Address::from_str(&s).ok());
+    let quickswap_v3_router = std::env::var("QUICKSWAP_V3_ROUTER")
+        .ok()
+        .and_then(|s| Address::from_str(&s).ok());
+    let quickswap_v3_quoter = std::env::var("QUICKSWAP_V3_QUOTER")
+        .ok()
+        .and_then(|s| Address::from_str(&s).ok());
+
     Ok(BotConfig {
         rpc_url: std::env::var("RPC_URL")?,
         chain_id: std::env::var("CHAIN_ID")?.parse()?,
@@ -101,6 +112,10 @@ fn load_config_inner() -> Result<BotConfig> {
         sushiswap_v3_factory,
         sushiswap_v3_router,
         sushiswap_v3_quoter,
+
+        quickswap_v3_factory,
+        quickswap_v3_router,
+        quickswap_v3_quoter,
 
         pairs,
 

@@ -37,15 +37,23 @@ pub enum DexType {
     SushiV3_001,   // SushiSwap V3 0.01% fee tier (cross-DEX arb)
     SushiV3_005,   // SushiSwap V3 0.05% fee tier (cross-DEX arb)
     SushiV3_030,   // SushiSwap V3 0.30% fee tier (cross-DEX arb)
+    QuickswapV3,   // QuickSwap V3 (Algebra) — dynamic fees, single pool per pair
 }
 
 impl DexType {
-    /// Returns true if this is a V3 DEX (Uniswap or SushiSwap V3)
+    /// Returns true if this is a V3 DEX (Uniswap, SushiSwap, or QuickSwap V3)
     pub fn is_v3(&self) -> bool {
         matches!(self,
             DexType::UniswapV3_001 | DexType::UniswapV3_005 | DexType::UniswapV3_030 | DexType::UniswapV3_100 |
-            DexType::SushiV3_001 | DexType::SushiV3_005 | DexType::SushiV3_030
+            DexType::SushiV3_001 | DexType::SushiV3_005 | DexType::SushiV3_030 |
+            DexType::QuickswapV3
         )
+    }
+
+    /// Returns true if this is a QuickSwap V3 (Algebra) DEX
+    /// Algebra uses different ABIs: globalState() not slot0(), no fee parameter in quoter/router
+    pub fn is_quickswap_v3(&self) -> bool {
+        matches!(self, DexType::QuickswapV3)
     }
 
     /// Returns true if this is a SushiSwap V3 DEX (for quoter/router routing)
@@ -54,6 +62,7 @@ impl DexType {
     }
 
     /// Returns the fee in basis points for V3 pools
+    /// QuickswapV3 returns None (dynamic fee — read from pool state)
     pub fn v3_fee_bps(&self) -> Option<u32> {
         match self {
             DexType::UniswapV3_001 | DexType::SushiV3_001 => Some(1),    // 0.01%
@@ -64,13 +73,15 @@ impl DexType {
         }
     }
 
-    /// Get V3 fee tier (for factory queries)
+    /// Get V3 fee tier (for factory queries and router calls)
+    /// QuickswapV3 returns Some(0) — sentinel value meaning "Algebra, no fee param"
     pub fn v3_fee_tier(&self) -> Option<u32> {
         match self {
             DexType::UniswapV3_001 | DexType::SushiV3_001 => Some(100),
             DexType::UniswapV3_005 | DexType::SushiV3_005 => Some(500),
             DexType::UniswapV3_030 | DexType::SushiV3_030 => Some(3000),
             DexType::UniswapV3_100 => Some(10000),
+            DexType::QuickswapV3 => Some(0), // Sentinel: Algebra has no fixed fee tier
             _ => None,
         }
     }
@@ -90,6 +101,7 @@ impl fmt::Display for DexType {
             DexType::SushiV3_001 => write!(f, "SushiV3_0.01%"),
             DexType::SushiV3_005 => write!(f, "SushiV3_0.05%"),
             DexType::SushiV3_030 => write!(f, "SushiV3_0.30%"),
+            DexType::QuickswapV3 => write!(f, "QuickswapV3"),
         }
     }
 }
@@ -108,8 +120,8 @@ pub struct PoolState {
 impl PoolState {
     /// Calculate price of token0 in terms of token1
     pub fn price(&self) -> f64 {
-        let reserve0_f = self.reserve0.as_u128() as f64;
-        let reserve1_f = self.reserve1.as_u128() as f64;
+        let reserve0_f = self.reserve0.low_u128() as f64;
+        let reserve1_f = self.reserve1.low_u128() as f64;
 
         if reserve0_f == 0.0 {
             return 0.0;
@@ -223,10 +235,18 @@ impl V3PoolState {
 /// Arbitrage opportunity detected
 ///
 /// Buy/Sell semantics (V3 price = token1/token0, token0 sorted by address):
-///   buy_dex  = pool where we do token0→token1 (higher V3 price = more token1 per token0)
-///   sell_dex = pool where we do token1→token0 (lower V3 price = more token0 per token1)
+///   The trade always starts and ends with the QUOTE token (USDC).
+///   quote_token_is_token0 determines the swap direction:
 ///
-/// Execute flow: token0 → token1 on buy_dex, then token1 → token0 on sell_dex.
+///   If quote=token0 (e.g., WETH/USDC where USDC=token0):
+///     buy_dex  = pool with HIGHER V3 price (more token1 per quote = cheap base → buy here)
+///     sell_dex = pool with LOWER V3 price (less token1 per quote = expensive base → sell here)
+///     Execute: token0(quote)→token1(base) on buy, token1(base)→token0(quote) on sell
+///
+///   If quote=token1 (e.g., WBTC/USDC where USDC=token1):
+///     buy_dex  = pool with LOWER V3 price (less quote per base = cheap base → buy here)
+///     sell_dex = pool with HIGHER V3 price (more quote per base = expensive base → sell here)
+///     Execute: token1(quote)→token0(base) on buy, token0(base)→token1(quote) on sell
 #[derive(Debug, Clone)]
 pub struct ArbitrageOpportunity {
     pub pair: TradingPair,
@@ -236,7 +256,7 @@ pub struct ArbitrageOpportunity {
     pub sell_price: f64,
     pub spread_percent: f64,
     pub estimated_profit: f64, // in USD
-    pub trade_size: U256,      // in wei
+    pub trade_size: U256,      // in quote token units (always USDC with 6 decimals)
     pub timestamp: u64,
     /// Pool address where we buy (optional for tax logging)
     pub buy_pool_address: Option<Address>,
@@ -248,6 +268,11 @@ pub struct ArbitrageOpportunity {
     pub token1_decimals: u8,
     /// Pool liquidity at buy pool (V3 only, for safety checks)
     pub buy_pool_liquidity: Option<u128>,
+    /// Whether the quote token (USDC) is V3 token0.
+    /// Determines swap direction in quoter and executor.
+    /// true:  trade goes token0→token1→token0 (USDC is token0)
+    /// false: trade goes token1→token0→token1 (USDC is token1)
+    pub quote_token_is_token0: bool,
 }
 
 impl ArbitrageOpportunity {
@@ -279,6 +304,7 @@ impl ArbitrageOpportunity {
             token0_decimals: 18, // Default to 18, override for specific tokens
             token1_decimals: 18,
             buy_pool_liquidity: None,
+            quote_token_is_token0: true,
         }
     }
 
@@ -365,6 +391,12 @@ pub struct BotConfig {
     pub sushiswap_v3_factory: Option<Address>,
     pub sushiswap_v3_router: Option<Address>,
     pub sushiswap_v3_quoter: Option<Address>,
+
+    // QuickSwap V3 (Algebra) addresses (cross-DEX arb - optional)
+    // Algebra uses dynamic fees, single pool per pair, different ABI
+    pub quickswap_v3_factory: Option<Address>,
+    pub quickswap_v3_router: Option<Address>,
+    pub quickswap_v3_quoter: Option<Address>,
 
     // Trading pairs to monitor
     pub pairs: Vec<TradingPairConfig>,

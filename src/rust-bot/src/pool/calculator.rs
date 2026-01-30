@@ -81,7 +81,7 @@ impl PriceCalculator {
         }
 
         // Spot price before trade
-        let spot_price = reserve_out.as_u128() as f64 / reserve_in.as_u128() as f64;
+        let spot_price = reserve_out.low_u128() as f64 / reserve_in.low_u128() as f64;
 
         // Actual execution price with trade
         let amount_out = Self::get_amount_out(amount_in, reserve_in, reserve_out);
@@ -89,7 +89,7 @@ impl PriceCalculator {
             return 100.0;
         }
 
-        let execution_price = amount_out.as_u128() as f64 / amount_in.as_u128() as f64;
+        let execution_price = amount_out.low_u128() as f64 / amount_in.low_u128() as f64;
 
         // Price impact as percentage
         ((spot_price - execution_price) / spot_price) * 100.0

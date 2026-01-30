@@ -48,6 +48,17 @@ abigen!(
     ]"#
 );
 
+// Algebra V3 Pool ABI (QuickSwap V3 — globalState instead of slot0, dynamic fee)
+abigen!(
+    AlgebraPool,
+    r#"[
+        function globalState() external view returns (uint160 price, int24 tick, uint16 fee, uint16 timepointIndex, uint8 communityFeeToken0, uint8 communityFeeToken1, bool unlocked)
+        function liquidity() external view returns (uint128)
+        function token0() external view returns (address)
+        function token1() external view returns (address)
+    ]"#
+);
+
 // ERC20 for decimals
 abigen!(
     ERC20Metadata,
@@ -178,33 +189,63 @@ impl<P: Middleware + 'static> V3PoolSyncer<P> {
             let pool_state = pool.clone();
 
             async move {
-                let contract = UniswapV3Pool::new(pool_state.address, provider);
+                if pool_state.dex.is_quickswap_v3() {
+                    // Algebra pool: use globalState() instead of slot0()
+                    // globalState returns (price, tick, fee, ...) — fee is dynamic
+                    let contract = AlgebraPool::new(pool_state.address, provider);
+                    let gs_call = contract.global_state();
+                    let liq_call = contract.liquidity();
+                    let (gs_res, liq_res) = tokio::join!(
+                        gs_call.call(),
+                        liq_call.call()
+                    );
 
-                // Parallel: slot0 + liquidity (2 RPC calls per pool, concurrent)
-                // Bind ContractCall objects before .call() to extend their lifetime
-                let slot0_call = contract.slot_0();
-                let liq_call = contract.liquidity();
-                let (slot0_res, liq_res) = tokio::join!(
-                    slot0_call.call(),
-                    liq_call.call()
-                );
-
-                match (slot0_res, liq_res) {
-                    (Ok((sqrt_price, tick, _, _, _, _, _)), Ok(liq)) => {
-                        Some(V3PoolState {
-                            sqrt_price_x96: U256::from(sqrt_price.as_u128()),
-                            tick: tick as i32,
-                            liquidity: liq,
-                            last_updated: current_block,
-                            ..pool_state
-                        })
+                    match (gs_res, liq_res) {
+                        (Ok((sqrt_price, tick, fee, _, _, _, _)), Ok(liq)) => {
+                            Some(V3PoolState {
+                                sqrt_price_x96: sqrt_price, // uint160 decoded as U256, no truncation
+                                tick: tick as i32,
+                                fee: fee as u32, // dynamic fee from globalState
+                                liquidity: liq,
+                                last_updated: current_block,
+                                ..pool_state
+                            })
+                        }
+                        _ => {
+                            warn!(
+                                "Failed to fast-sync Algebra pool {} {:?} at {:?}",
+                                pool_state.pair.symbol, pool_state.dex, pool_state.address
+                            );
+                            None
+                        }
                     }
-                    _ => {
-                        warn!(
-                            "Failed to fast-sync pool {} {:?} at {:?}",
-                            pool_state.pair.symbol, pool_state.dex, pool_state.address
-                        );
-                        None
+                } else {
+                    // Uniswap/SushiSwap V3: use slot0()
+                    let contract = UniswapV3Pool::new(pool_state.address, provider);
+                    let slot0_call = contract.slot_0();
+                    let liq_call = contract.liquidity();
+                    let (slot0_res, liq_res) = tokio::join!(
+                        slot0_call.call(),
+                        liq_call.call()
+                    );
+
+                    match (slot0_res, liq_res) {
+                        (Ok((sqrt_price, tick, _, _, _, _, _)), Ok(liq)) => {
+                            Some(V3PoolState {
+                                sqrt_price_x96: sqrt_price, // uint160 decoded as U256, no truncation
+                                tick: tick as i32,
+                                liquidity: liq,
+                                last_updated: current_block,
+                                ..pool_state
+                            })
+                        }
+                        _ => {
+                            warn!(
+                                "Failed to fast-sync pool {} {:?} at {:?}",
+                                pool_state.pair.symbol, pool_state.dex, pool_state.address
+                            );
+                            None
+                        }
                     }
                 }
             }
@@ -300,7 +341,7 @@ impl<P: Middleware + 'static> V3PoolSyncer<P> {
             address: pool_address,
             dex: dex_type,
             pair: actual_pair,
-            sqrt_price_x96: U256::from(sqrt_price_x96.as_u128()),
+            sqrt_price_x96: sqrt_price_x96, // uint160 decoded as U256, no truncation
             tick: tick as i32,
             fee: fee_tier,
             liquidity,
@@ -393,29 +434,38 @@ impl<P: Middleware + 'static> V3PoolSyncer<P> {
     }
 
     /// Sync a single V3 pool by address (for event-driven updates)
+    /// Automatically uses globalState() for Algebra (QuickSwap V3) and slot0() for Uniswap/Sushi.
     pub async fn sync_pool_by_address(
         &mut self,
         pool_address: Address,
         dex_type: DexType,
     ) -> Result<V3PoolState> {
-        let pool = UniswapV3Pool::new(pool_address, Arc::clone(&self.provider));
-
-        // Get slot0
-        let (sqrt_price_x96, tick, _, _, _, _, _) = pool
-            .slot_0()
-            .call()
-            .await
-            .context("Failed to get slot0")?;
-
-        // Get liquidity
-        let liquidity = pool.liquidity().call().await?;
-
-        // Get fee
-        let fee = pool.fee().call().await?;
-
-        // Get tokens (ethers-rs abigen converts token0/token1 to token_0/token_1)
-        let token0 = pool.token_0().call().await?;
-        let token1 = pool.token_1().call().await?;
+        let (sqrt_price_x96, tick, fee, liquidity, token0, token1) = if dex_type.is_quickswap_v3() {
+            // Algebra pool: globalState() returns (price, tick, fee, ...)
+            let pool = AlgebraPool::new(pool_address, Arc::clone(&self.provider));
+            let (sqrt_price, tick, fee, _, _, _, _) = pool
+                .global_state()
+                .call()
+                .await
+                .context("Failed to get Algebra globalState")?;
+            let liquidity = pool.liquidity().call().await?;
+            let token0 = pool.token_0().call().await?;
+            let token1 = pool.token_1().call().await?;
+            (sqrt_price, tick, fee as u32, liquidity, token0, token1)
+        } else {
+            // Uniswap/SushiSwap V3 pool: slot0()
+            let pool = UniswapV3Pool::new(pool_address, Arc::clone(&self.provider));
+            let (sqrt_price, tick, _, _, _, _, _) = pool
+                .slot_0()
+                .call()
+                .await
+                .context("Failed to get slot0")?;
+            let liquidity = pool.liquidity().call().await?;
+            let fee = pool.fee().call().await?;
+            let token0 = pool.token_0().call().await?;
+            let token1 = pool.token_1().call().await?;
+            (sqrt_price, tick, fee, liquidity, token0, token1)
+        };
 
         // Get decimals
         let token0_decimals = self.get_decimals(token0).await?;
@@ -432,7 +482,7 @@ impl<P: Middleware + 'static> V3PoolSyncer<P> {
             address: pool_address,
             dex: dex_type,
             pair: TradingPair::new(token0, token1, "UNKNOWN".to_string()),
-            sqrt_price_x96: U256::from(sqrt_price_x96.as_u128()),
+            sqrt_price_x96: sqrt_price_x96, // uint160 decoded as U256, no truncation
             tick: tick as i32,
             fee,
             liquidity,

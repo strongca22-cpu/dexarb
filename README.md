@@ -25,7 +25,7 @@ dexarb/
 └── README.md
 ```
 
-## Status: Phase 1 Day 5 - V3 Integration Complete
+## Status: LIVE — Tri-DEX Atomic Arb (UniV3 + SushiV3 + QuickSwapV3)
 
 - [x] Repository initialized
 - [x] Documentation added
@@ -59,23 +59,25 @@ dexarb/
 ## Quick Start
 
 ```bash
-# Source Rust environment
 source ~/.cargo/env
-
-# Build
 cd src/rust-bot
-cargo build --release
+cargo build --release && cargo test
 
-# Run
-cargo run --release
+# Start live bot
+tmux new-session -d -s livebot "cd ~/bots/dexarb/src/rust-bot && RUST_BACKTRACE=1 RUST_LOG=dexarb_bot=info ./target/release/dexarb-bot > ~/bots/dexarb/data/livebot.log 2>&1"
+
+# Check status
+tail -20 ~/bots/dexarb/data/livebot.log
 ```
 
 ## Strategy Overview
 
 - **Technology Stack**: Rust (bot), Solidity (contracts), Polygon blockchain
 - **Mechanism**: Flash loan arbitrage across DEXs (Uniswap, Sushiswap)
-- **Risk Profile**: Low (atomic execution eliminates leg risk)
-- **Target**: $5-20 profit/trade, 2-5 trades/day (Phase 1)
+- **Risk Profile**: Low (atomic execution via ArbExecutorV2 — reverts on loss)
+- **DEXes**: Uniswap V3, SushiSwap V3, QuickSwap V3 (Algebra Protocol)
+- **Pools**: 17 active across 6 pairs (WETH, WMATIC, WBTC, USDT, DAI, LINK)
+- **Target**: $5-20 profit/trade; WBTC UniV3↔QuickSwap best combo (60% profitable blocks)
 
 See [docs/dex-arbitrage-complete-strategy.md](docs/dex-arbitrage-complete-strategy.md) for full plan.
 

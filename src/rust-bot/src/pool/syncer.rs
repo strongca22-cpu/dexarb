@@ -212,7 +212,8 @@ impl<P: Middleware + 'static> PoolSyncer<P> {
             }
             // V3 types are handled by V3PoolSyncer, not this V2 syncer
             DexType::UniswapV3_001 | DexType::UniswapV3_005 | DexType::UniswapV3_030 | DexType::UniswapV3_100
-            | DexType::SushiV3_001 | DexType::SushiV3_005 | DexType::SushiV3_030 => {
+            | DexType::SushiV3_001 | DexType::SushiV3_005 | DexType::SushiV3_030
+            | DexType::QuickswapV3 => {
                 anyhow::bail!("V3 pools should be synced using V3PoolSyncer")
             }
         };

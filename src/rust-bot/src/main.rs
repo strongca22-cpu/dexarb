@@ -19,12 +19,14 @@
 //! Modified: 2026-01-30 - Monolithic architecture: direct RPC sync, no data collector dependency
 //! Modified: 2026-01-30 - SushiSwap V3 cross-DEX: dual-quoter, multi-DEX whitelist mapping
 //! Modified: 2026-01-30 - Historical price logging + gas estimate fix ($0.50→$0.05)
+//! Modified: 2026-01-30 - QuickSwap V3 (Algebra): tri-quoter, Algebra sync, fee=0 sentinel
 
 use anyhow::Result;
 use dexarb_bot::arbitrage::{MulticallQuoter, OpportunityDetector, TradeExecutor, VerifiedOpportunity};
 use dexarb_bot::config::load_config_from_file;
 use dexarb_bot::filters::WhitelistFilter;
 use dexarb_bot::pool::{PoolStateManager, V3PoolSyncer, SUSHI_V3_FEE_TIERS, V3_FEE_TIERS};
+use dexarb_bot::types::DexType;
 use dexarb_bot::price_logger::PriceLogger;
 use dexarb_bot::types::V3PoolState;
 use ethers::prelude::*;
@@ -40,7 +42,7 @@ async fn main() -> Result<()> {
         .with_target(false)
         .init();
 
-    info!("Phase 1 DEX Arbitrage Bot Starting (monolithic, cross-DEX UniV3+SushiV3)...");
+    info!("Phase 1 DEX Arbitrage Bot Starting (monolithic, cross-DEX UniV3+SushiV3+QuickSwapV3)...");
 
     // Load configuration from .env.live (separate from dev/paper .env)
     let config = load_config_from_file(".env.live")?;
@@ -82,6 +84,8 @@ async fn main() -> Result<()> {
             "SushiswapV3" => SUSHI_V3_FEE_TIERS.iter()
                 .find(|(fee, _)| *fee == wl_pool.fee_tier)
                 .map(|(_, dt)| *dt),
+            // QuickSwap V3 (Algebra): no fee tiers — single pool per pair, dynamic fees
+            "QuickswapV3" => Some(DexType::QuickswapV3),
             other => {
                 warn!("Unknown dex '{}' for {} — skipping", other, wl_pool.pair);
                 continue;
@@ -270,9 +274,9 @@ async fn main() -> Result<()> {
                 }
             };
 
-            // Filter to verified-only, rank by quoted profit
+            // Filter to verified-only AND quoted-profitable, rank by quoted profit
             let mut ranked: Vec<&VerifiedOpportunity> = verified.iter()
-                .filter(|v| v.both_legs_valid)
+                .filter(|v| v.both_legs_valid && v.quoted_profit_raw > 0)
                 .collect();
             ranked.sort_by(|a, b| b.quoted_profit_raw.cmp(&a.quoted_profit_raw));
 
