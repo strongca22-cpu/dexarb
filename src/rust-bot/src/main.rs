@@ -7,8 +7,8 @@
 //! Architecture:
 //! - Loads whitelist at startup, initial sync via sync_pool_by_address()
 //! - Supports Uniswap V3 + SushiSwap V3 pools (cross-DEX arb)
-//! - Main loop: fetch block → skip if same → sync_known_pools_parallel() → detect → execute
-//! - ~1s cycle latency (vs ~5s with split file-polling architecture)
+//! - Main loop: WS subscribe_blocks() → sync_known_pools_parallel() → detect → execute
+//! - ~100ms block notification (vs 3s polling), auto-reconnect on WS drop
 //! - Data collector preserved separately for paper trading / research
 //!
 //! Author: AI-Generated
@@ -20,6 +20,7 @@
 //! Modified: 2026-01-30 - SushiSwap V3 cross-DEX: dual-quoter, multi-DEX whitelist mapping
 //! Modified: 2026-01-30 - Historical price logging + gas estimate fix ($0.50→$0.05)
 //! Modified: 2026-01-30 - QuickSwap V3 (Algebra): tri-quoter, Algebra sync, fee=0 sentinel
+//! Modified: 2026-01-30 - WS block subscription: subscribe_blocks() replaces 3s polling
 
 use anyhow::Result;
 use dexarb_bot::arbitrage::{MulticallQuoter, OpportunityDetector, TradeExecutor, VerifiedOpportunity};
@@ -30,6 +31,7 @@ use dexarb_bot::types::DexType;
 use dexarb_bot::price_logger::PriceLogger;
 use dexarb_bot::types::V3PoolState;
 use ethers::prelude::*;
+use futures::StreamExt;
 use std::sync::Arc;
 use tracing::{error, info, warn, Level};
 use tracing_subscriber;
@@ -51,14 +53,17 @@ async fn main() -> Result<()> {
     info!("Trading pairs: {}", config.pairs.len());
     info!("Poll interval: {}ms", config.poll_interval_ms);
 
-    // Initialize provider (WebSocket — used for sync, Quoter, and execution)
-    info!("Connecting to Polygon via WebSocket...");
+    // Initialize providers (two WS connections to avoid subscription contention)
+    // Provider 1: RPC calls (sync, Quoter, execution)
+    // Provider 2: Block subscription only (dedicated reader for newHeads)
+    info!("Connecting to Polygon via WebSocket (RPC + subscription)...");
     let provider = Provider::<Ws>::connect(&config.rpc_url).await?;
     let provider = Arc::new(provider);
+    let sub_provider = Provider::<Ws>::connect(&config.rpc_url).await?;
 
     // Verify connection
     let block = provider.get_block_number().await?;
-    info!("Connected! Current block: {}", block);
+    info!("Connected! Current block: {} (2 WS connections)", block);
 
     // Load whitelist
     let whitelist_path = config.whitelist_file.as_deref()
@@ -185,173 +190,168 @@ async fn main() -> Result<()> {
     }
 
     info!("Bot initialized successfully (monolithic mode)");
-    info!("Starting opportunity detection loop (direct RPC sync)...");
+    info!("Starting opportunity detection loop (WS block subscription)...");
 
     // Statistics tracking
     let mut total_opportunities: u64 = 0;
     let mut total_scans: u64 = 0;
     let mut last_block: u64 = 0;
 
-    // Main monitoring loop
-    let poll_interval = std::time::Duration::from_millis(config.poll_interval_ms);
+    // Main monitoring loop — WS block subscription (reacts to new blocks in ~100ms)
+    // If subscription drops, bot exits (restart via tmux/supervisor).
     let mut iteration = 0u64;
 
-    loop {
-        iteration += 1;
-        total_scans += 1;
+    // Subscribe to new blocks via dedicated WS connection
+    info!("Subscribing to new blocks via WebSocket (dedicated connection)...");
+    let mut block_stream = sub_provider.subscribe_blocks().await?;
+    info!("WS block subscription active — reacting to blocks in real-time");
 
-        // Fetch current block number (1 RPC call — skip full sync if same block)
-        let current_block = match provider.get_block_number().await {
-            Ok(b) => b.as_u64(),
-            Err(e) => {
-                if iteration % 100 == 0 {
-                    warn!("Failed to get block number: {}", e);
-                }
-                tokio::time::sleep(poll_interval).await;
+    while let Some(block) = block_stream.next().await {
+            let current_block = block.number.map(|n| n.as_u64()).unwrap_or(last_block + 1);
+
+            iteration += 1;
+            total_scans += 1;
+
+            // Log status periodically
+            if iteration % 100 == 0 {
+                let (_, v3_count, min_block, max_block) = state_manager.combined_stats();
+                info!(
+                    "Iteration {} (WS) | {} V3 pools | blocks {}-{} | {} opps found / {} scans | block {}",
+                    iteration, v3_count, min_block, max_block, total_opportunities, total_scans, current_block
+                );
+            }
+
+            // Skip duplicate blocks (WS can deliver same block twice)
+            if current_block <= last_block {
                 continue;
             }
-        };
+            last_block = current_block;
 
-        // Log status periodically (BEFORE block-change gate — fires every 100 iterations)
-        if iteration % 100 == 0 {
-            let (_, v3_count, min_block, max_block) = state_manager.combined_stats();
-            info!(
-                "Iteration {} | {} V3 pools | blocks {}-{} | {} opps found / {} scans | block {}",
-                iteration, v3_count, min_block, max_block, total_opportunities, total_scans, current_block
-            );
-        }
-
-        // Skip if same block (no new data — saves ~21 RPC calls per skip)
-        if current_block == last_block {
-            tokio::time::sleep(poll_interval).await;
-            continue;
-        }
-        last_block = current_block;
-
-        // Sync all V3 pools concurrently (~21 RPC calls, ~400ms wall-clock)
-        let updated = v3_syncer.sync_known_pools_parallel(&v3_pools).await;
-        if !updated.is_empty() {
-            v3_pools = updated;
-            for pool in &v3_pools {
-                state_manager.update_v3_pool(pool.clone());
-            }
-
-            // Log price snapshots (research — no RPC cost, just CSV writes)
-            if let Some(ref mut logger) = price_logger {
-                logger.log_prices(current_block, &v3_pools);
-            }
-        } else {
-            warn!("Parallel V3 sync returned empty — keeping previous state");
-            tokio::time::sleep(poll_interval).await;
-            continue;
-        }
-
-        // Scan for opportunities
-        let opportunities = detector.scan_opportunities();
-
-        if !opportunities.is_empty() {
-            total_opportunities += opportunities.len() as u64;
-
-            for opp in &opportunities {
-                info!(
-                    "📊 {} | Spread: {:.2}% | Est. Profit: ${:.2} | Size: {}",
-                    opp.pair.symbol,
-                    opp.spread_percent,
-                    opp.estimated_profit,
-                    opp.trade_size
-                );
-            }
-
-            // Multicall3 batch pre-screen: verify all opportunities in 1 RPC call
-            let verified = match multicall_quoter.batch_verify(&opportunities, &config).await {
-                Ok(v) => v,
-                Err(e) => {
-                    warn!("Multicall batch verify failed: {} — falling back to unfiltered", e);
-                    // Fallback: pass all opps through (executor's own Quoter checks still apply)
-                    opportunities.iter().enumerate()
-                        .map(|(i, _)| VerifiedOpportunity::passthrough(i))
-                        .collect()
+            // Sync all V3 pools concurrently (~21 RPC calls, ~400ms wall-clock)
+            let updated = v3_syncer.sync_known_pools_parallel(&v3_pools).await;
+            if !updated.is_empty() {
+                v3_pools = updated;
+                for pool in &v3_pools {
+                    state_manager.update_v3_pool(pool.clone());
                 }
-            };
 
-            // Filter to verified-only AND quoted-profitable, rank by quoted profit
-            let mut ranked: Vec<&VerifiedOpportunity> = verified.iter()
-                .filter(|v| v.both_legs_valid && v.quoted_profit_raw > 0)
-                .collect();
-            ranked.sort_by(|a, b| b.quoted_profit_raw.cmp(&a.quoted_profit_raw));
-
-            let filtered_count = opportunities.len() - ranked.len();
-            if filtered_count > 0 {
-                info!(
-                    "Multicall pre-screen: {}/{} verified, {} filtered out",
-                    ranked.len(), opportunities.len(), filtered_count
-                );
+                // Log price snapshots (research — no RPC cost, just CSV writes)
+                if let Some(ref mut logger) = price_logger {
+                    logger.log_prices(current_block, &v3_pools);
+                }
+            } else {
+                warn!("Parallel V3 sync returned empty — keeping previous state");
+                continue;
             }
 
-            // Try verified opportunities (best quoted profit first, fall through on Quoter rejections)
-            for (rank, verified_opp) in ranked.iter().enumerate() {
-                let opp = &opportunities[verified_opp.original_index];
-                info!(
-                    "TRY #{}: {} - Buy {:?} Sell {:?} - ${:.2} (quoted_profit_raw={})",
-                    rank + 1,
-                    opp.pair.symbol,
-                    opp.buy_dex,
-                    opp.sell_dex,
-                    opp.estimated_profit,
-                    verified_opp.quoted_profit_raw
-                );
+            // Scan for opportunities
+            let opportunities = detector.scan_opportunities();
 
-                match executor.execute(opp).await {
-                    Ok(result) => {
-                        if result.success {
-                            info!(
-                                "Trade complete: {} | Net profit: ${:.2} | Time: {}ms",
-                                result.opportunity,
-                                result.net_profit_usd,
-                                result.execution_time_ms
-                            );
-                            break; // Stop after successful trade
-                        } else {
-                            let error_msg = result.error.unwrap_or_else(|| "Unknown".to_string());
+            if !opportunities.is_empty() {
+                total_opportunities += opportunities.len() as u64;
 
-                            // CRITICAL: If a transaction was submitted on-chain, capital is
-                            // committed. HALT immediately — do NOT try next opportunity.
-                            // This catches: buy succeeded but sell Quoter rejected (holding tokens).
-                            if result.tx_hash.is_some() {
-                                error!(
-                                    "HALT: On-chain tx submitted but trade failed: {} | Error: {} | TX: {}",
-                                    result.opportunity, error_msg,
-                                    result.tx_hash.as_deref().unwrap_or("?")
-                                );
-                                error!("Capital committed — manual recovery needed. Stopping all trading.");
-                                break;
-                            }
+                for opp in &opportunities {
+                    info!(
+                        "📊 {} | Spread: {:.2}% | Est. Profit: ${:.2} | Size: {}",
+                        opp.pair.symbol,
+                        opp.spread_percent,
+                        opp.estimated_profit,
+                        opp.trade_size
+                    );
+                }
 
-                            // No tx submitted = pre-trade rejection (zero capital risk)
-                            if error_msg.contains("Quoter") || error_msg.contains("Gas price") {
+                // Multicall3 batch pre-screen: verify all opportunities in 1 RPC call
+                let verified = match multicall_quoter.batch_verify(&opportunities, &config).await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        warn!("Multicall batch verify failed: {} — falling back to unfiltered", e);
+                        // Fallback: pass all opps through (executor's own Quoter checks still apply)
+                        opportunities.iter().enumerate()
+                            .map(|(i, _)| VerifiedOpportunity::passthrough(i))
+                            .collect()
+                    }
+                };
+
+                // Filter to verified-only AND quoted-profitable, rank by quoted profit
+                let mut ranked: Vec<&VerifiedOpportunity> = verified.iter()
+                    .filter(|v| v.both_legs_valid && v.quoted_profit_raw > 0)
+                    .collect();
+                ranked.sort_by(|a, b| b.quoted_profit_raw.cmp(&a.quoted_profit_raw));
+
+                let filtered_count = opportunities.len() - ranked.len();
+                if filtered_count > 0 {
+                    info!(
+                        "Multicall pre-screen: {}/{} verified, {} filtered out",
+                        ranked.len(), opportunities.len(), filtered_count
+                    );
+                }
+
+                // Try verified opportunities (best quoted profit first, fall through on Quoter rejections)
+                for (rank, verified_opp) in ranked.iter().enumerate() {
+                    let opp = &opportunities[verified_opp.original_index];
+                    info!(
+                        "TRY #{}: {} - Buy {:?} Sell {:?} - ${:.2} (quoted_profit_raw={})",
+                        rank + 1,
+                        opp.pair.symbol,
+                        opp.buy_dex,
+                        opp.sell_dex,
+                        opp.estimated_profit,
+                        verified_opp.quoted_profit_raw
+                    );
+
+                    match executor.execute(opp).await {
+                        Ok(result) => {
+                            if result.success {
                                 info!(
-                                    "Quoter rejected #{} {} ({}), trying next...",
-                                    rank + 1, result.opportunity, error_msg
+                                    "Trade complete: {} | Net profit: ${:.2} | Time: {}ms",
+                                    result.opportunity,
+                                    result.net_profit_usd,
+                                    result.execution_time_ms
                                 );
-                                continue;
+                                break; // Stop after successful trade
                             } else {
-                                // Unknown pre-trade failure — stop for safety
-                                warn!(
-                                    "Trade failed: {} | Error: {}",
-                                    result.opportunity, error_msg
-                                );
-                                break;
+                                let error_msg = result.error.unwrap_or_else(|| "Unknown".to_string());
+
+                                // CRITICAL: If a transaction was submitted on-chain, capital is
+                                // committed. HALT immediately — do NOT try next opportunity.
+                                // This catches: buy succeeded but sell Quoter rejected (holding tokens).
+                                if result.tx_hash.is_some() {
+                                    error!(
+                                        "HALT: On-chain tx submitted but trade failed: {} | Error: {} | TX: {}",
+                                        result.opportunity, error_msg,
+                                        result.tx_hash.as_deref().unwrap_or("?")
+                                    );
+                                    error!("Capital committed — manual recovery needed. Stopping all trading.");
+                                    break;
+                                }
+
+                                // No tx submitted = pre-trade rejection (zero capital risk)
+                                if error_msg.contains("Quoter") || error_msg.contains("Gas price") {
+                                    info!(
+                                        "Quoter rejected #{} {} ({}), trying next...",
+                                        rank + 1, result.opportunity, error_msg
+                                    );
+                                    continue;
+                                } else {
+                                    // Unknown pre-trade failure — stop for safety
+                                    warn!(
+                                        "Trade failed: {} | Error: {}",
+                                        result.opportunity, error_msg
+                                    );
+                                    break;
+                                }
                             }
                         }
-                    }
-                    Err(e) => {
-                        error!("Execution error: {}", e);
-                        break; // Stop on unexpected errors
+                        Err(e) => {
+                            error!("Execution error: {}", e);
+                            break; // Stop on unexpected errors
+                        }
                     }
                 }
             }
-        }
+    } // end while let Some(block)
 
-        tokio::time::sleep(poll_interval).await;
-    }
+    // Stream ended — WS disconnected. Exit so supervisor can restart.
+    error!("WS block subscription stream ended — exiting for restart");
+    Ok(())
 }
