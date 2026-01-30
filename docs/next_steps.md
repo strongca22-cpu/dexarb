@@ -1,13 +1,14 @@
 # Next Steps - DEX Arbitrage Bot
 
-## Status: LIVE — V3 Tri-DEX + Midmarket Fix + V2↔V3 Next
+## Status: LIVE — WS Block Sub + Tri-DEX + V2↔V3 Next
 
 **Date:** 2026-01-30
-**Pools:** 16 active V3 (9 Uni + 2 Sushi + 5 QS). LINK/USDC demoted to monitoring (sole pool, zero arb).
+**Pools:** 16 active V3 (9 Uni + 2 Sushi + 5 QS). LINK/USDC monitoring (sole pool, zero arb).
 **Execution:** Atomic via `ArbExecutorV2` (`0x1126...c570`)
 **Build:** 44/44 tests pass, clean release build
-**Opportunities:** 0 post-fix — V3↔V3 spreads structurally below fee thresholds (see analysis below)
-**Next:** WS block subscription → V2↔V3 cross-protocol (9 deep V2 pools found)
+**Mode:** WS block subscription (dual-provider, ~2s Polygon blocks), 3 tmux sessions (livebot, botstatus, botwatch)
+**Opportunities:** 4 pre-WS (all gas-gated 1096-1113 gwei > 1000 max). 0 post-WS restart (V3↔V3 structurally tight).
+**Next:** V2↔V3 cross-protocol (9 deep V2 pools found, 0.5-2%+ divergence expected)
 
 ---
 
@@ -39,9 +40,9 @@ Monolithic bot syncs pools directly via RPC, eliminating file I/O indirection:
 | Detect + Quoter + Execute | ~600ms | ~600ms |
 | **Total** | **0.8-10.8s (avg ~5.8s)** | **~1.0s** |
 
-**Main loop:** fetch block → skip if same → `sync_known_pools_parallel()` → price log → detect → Multicall3 verify → execute
+**Main loop:** WS `subscribe_blocks()` → skip duplicate → `sync_known_pools_parallel()` → price log → detect → Multicall3 verify → execute
 
-**RPC budget:** 1 block call/iteration + 35 sync calls on new block (17 pools × 2 + 1). At 3s poll with ~50% same-block skips: ~6 calls/s avg = ~15.5M/month (Alchemy free tier: 22.2M, 70% utilization).
+**RPC budget:** WS subscription + 33 sync calls/new block (16 pools × 2 + 1). Every ~2s Polygon block: ~16.5 calls/s burst = ~20M/month (Alchemy free tier: 22.2M, 90% utilization).
 
 ---
 
@@ -69,6 +70,9 @@ Monolithic bot syncs pools directly via RPC, eliminating file I/O indirection:
 | u128 overflow fix | 2026-01-30 | Removed `as_u128()` panics across 7 files; v3_syncer stores sqrtPriceX96 as U256 directly |
 | Price data analysis | 2026-01-30 | 129K rows, 6.4h (QS-era only): WBTC/USDC UniV3↔QS best combo (60% prof), $37/hr at $500 size (midmarket ceiling) |
 | Negative-profit guard | 2026-01-30 | Multicall Quoter now rejects `profit<=0`; main.rs belt-and-suspenders `quoted_profit_raw>0` filter |
+| Midmarket spread fix | 2026-01-30 | SELL_ESTIMATE_FACTOR 0.95→1.0, token ordering fix, slippage 10%→1% |
+| WS block subscription | 2026-01-30 | `subscribe_blocks()` replaces 3s polling, dual-provider (RPC + subscription), ~100ms block notification |
+| Discord + botwatch fixes | 2026-01-30 | Correct log path, separate attempts/completed/HALTs, clock-aligned 30min, botwatch kill monitor |
 
 ---
 
@@ -154,10 +158,10 @@ Monolithic bot syncs pools directly via RPC, eliminating file I/O indirection:
 - Quoter probes at multiple sizes to find optimal trade amount per opportunity
 - Complexity: Medium
 
-**P6: Websocket Block Subscription (Latency Reduction)**
-- Switch from polling at `poll_interval_ms` to `eth_subscribe("newHeads")`
-- Detect new blocks instantly vs up to 3s latency (may miss blocks at 2s Polygon block time)
-- Complexity: Low (ethers-rs supports natively)
+**P6: Websocket Block Subscription (Latency Reduction)** --- DONE (2026-01-30)
+- Dual `Provider<Ws>`: one for RPC calls, one dedicated to `subscribe_blocks()` (avoids ethers-rs reader contention)
+- Reacts to every Polygon block (~2s), auto-exits on WS drop for supervisor restart
+- 4 real opportunities detected pre-WS restart: WETH/USDC 0.11-0.19%, WBTC/USDC 0.11-0.12% (all gas-gated at 1096-1113 gwei)
 
 **P7: Private Transaction Submission (MEV Protection)**
 - Send via Flashbots Protect or Polygon private mempool (e.g., Marlin)
@@ -176,7 +180,7 @@ Monolithic bot syncs pools directly via RPC, eliminating file I/O indirection:
 - Critical diagnostic: if historical analysis shows zero opportunities with perfect execution, the strategy needs fundamental changes
 - Complexity: Medium
 
-### Recommended Priority (Updated 2026-01-30 evening)
+### Recommended Priority (Updated 2026-01-30 session 3)
 
 | # | Item | Rationale |
 |---|------|-----------|
@@ -184,11 +188,12 @@ Monolithic bot syncs pools directly via RPC, eliminating file I/O indirection:
 | -- | ~~QuickSwap V3 (P3)~~ | **DONE** |
 | -- | ~~Analyze price data (P9)~~ | **DONE** |
 | -- | ~~Negative-profit guard~~ | **DONE** |
-| -- | ~~ERC20 approval~~ | **DONE** — max allowance set |
-| -- | ~~Midmarket spread fix~~ | **DONE** — SELL_ESTIMATE_FACTOR 0.95→1.0, token ordering fix, slippage 10%→1% |
-| 1 | WS block subscription (P6) | $0 cost, ~20 lines, catches blocks in ~100ms vs 3s poll delay |
-| 2 | V2↔V3 cross-protocol (P2) | **Essential** — V3↔V3 spreads don't exceed fees; 9 deep V2 pools found |
-| 3 | Increase trade size (P5) | $140→$500 after first V2↔V3 trade |
+| -- | ~~ERC20 approval~~ | **DONE** |
+| -- | ~~Midmarket spread fix~~ | **DONE** |
+| -- | ~~WS block subscription (P6)~~ | **DONE** — dual-provider, ~100ms block notification |
+| 1 | V2↔V3 cross-protocol (P2) | **Essential** — V3↔V3 spreads don't exceed fees; 9 deep V2 pools found; V2 lags V3 by 0.5-2%+ |
+| 2 | Gas limit tuning | 4 real opps gas-gated at 1096-1113 gwei (max 1000). Consider 1500 or dynamic cap. |
+| 3 | Increase trade size (P5) | $140→$500 after first profitable trade |
 | 4 | Flash loan extension (P1+) | Zero-capital arb at $50K+ sizes |
 
 ---
@@ -202,6 +207,7 @@ Monolithic bot syncs pools directly via RPC, eliminating file I/O indirection:
 
 | 2026-01-30 | $0 | Negative-profit trade attempted: Quoter returned `profit_raw=-10608070` but `both_legs_valid=true` passed filter | Quoter now sets `both_legs_valid=false` when `profit<=0`; main.rs adds `quoted_profit_raw>0` guard |
 | 2026-01-30 | $0 | `ERC20: transfer amount exceeds balance` on atomic exec — wallet hadn't approved ArbExecutor to spend USDC | Reverted at `eth_estimateGas` (pre-flight), no gas spent. Approval needed before live trading. |
+| 2026-01-30 | $0 | u128 overflow panic in `v3_syncer.rs` — sqrtPriceX96 (uint160) exceeds u128 | Removed `as_u128()` in 7 files, store sqrtPriceX96 as U256 directly |
 
 All incidents led to architectural improvements (Quoter pre-check, whitelist filter, HALT on committed capital, profit guard).
 
@@ -223,14 +229,14 @@ All incidents led to architectural improvements (Quoter pre-check, whitelist fil
 # Build
 source ~/.cargo/env && cd ~/bots/dexarb/src/rust-bot && cargo build --release
 
-# Start live bot (monolithic — no data collector needed)
-tmux new-session -d -s livebot "cd ~/bots/dexarb/src/rust-bot && RUST_BACKTRACE=1 RUST_LOG=dexarb_bot=info ./target/release/dexarb-bot > ~/bots/dexarb/data/livebot.log 2>&1"
+# Start live bot (monolithic, WS block subscription)
+tmux new-session -d -s livebot "cd ~/bots/dexarb/src/rust-bot && RUST_BACKTRACE=1 RUST_LOG=dexarb_bot=info ./target/release/dexarb-bot > ~/bots/dexarb/data/logs/livebot_ws.log 2>&1"
 
 # Start bot watch (kills livebot on first trade)
 tmux new-session -d -s botwatch "bash ~/bots/dexarb/scripts/bot_watch.sh"
 
-# Discord status (30 min, 10 min initial delay)
-tmux new-session -d -s botstatus "sleep 600 && bash ~/bots/dexarb/scripts/bot_status_discord.sh --loop"
+# Discord status (30 min, clock-aligned to :00/:30)
+tmux new-session -d -s botstatus "bash ~/bots/dexarb/scripts/bot_status_discord.sh --loop"
 
 # Checklist
 bash ~/bots/dexarb/scripts/checklist_full.sh
@@ -242,14 +248,14 @@ bash ~/bots/dexarb/scripts/checklist_full.sh
 
 | File | Purpose |
 |------|---------|
-| `src/main.rs` | Monolithic live bot (sync + detect + price log + execute) |
+| `src/main.rs` | Monolithic live bot (WS block sub + sync + detect + price log + execute) |
 | `src/price_logger.rs` | Historical price CSV logger (daily rotation) |
 | `src/arbitrage/detector.rs` | Opportunity detection, gas estimate ($0.05) |
 | `src/arbitrage/executor.rs` | Trade execution: atomic (ArbExecutor) + legacy two-tx fallback |
 | `src/arbitrage/multicall_quoter.rs` | Batch Quoter pre-screen, tri-quoter (V1 Uni/V2 Sushi/Algebra QS) |
 | `contracts/src/ArbExecutor.sol` | Atomic arb contract V2 (Polygon: `0x1126...c570`) — Algebra + standard V3 |
 | `contracts/test/ArbExecutor.t.sol` | Foundry tests (4 unit + 2 fork) |
-| `.env.live` | Live bot config (3s poll, LIVE_MODE=true, ARB_EXECUTOR_ADDRESS set) |
+| `.env.live` | Live bot config (WS mode, LIVE_MODE=true, ARB_EXECUTOR_ADDRESS set) |
 | `config/pools_whitelist.json` | 16 active V3 pools (9 Uni + 2 Sushi + 5 QS) + 1 monitoring, whitelist v1.4 |
 | `scripts/analyze_price_log.py` | Cross-DEX spread analysis, per-pool stats, profitability |
 | `scripts/analyze_trade_sizes.py` | Trade size profitability estimates ($100-$5000) |
@@ -328,17 +334,6 @@ V2 factory addresses already in `.env.live`: QuickSwapV2 (`0x5757...`), SushiSwa
 
 ---
 
-## Midmarket Spread Fix (2026-01-30)
-
-**Bugs fixed:**
-1. `SELL_ESTIMATE_FACTOR` 0.95→1.0 — 5% haircut created phantom $6.45 loss per $140 trade
-2. Token ordering — WMATIC/WBTC pairs had inverted buy/sell and wrong trade_size units
-3. Slippage estimate 10%→1% — V3 concentrated liquidity has <0.01% slippage at $140-500
-
-**Files changed:** `types.rs` (quote_token_is_token0 field), `detector.rs` (direction-aware buy/sell), `multicall_quoter.rs` (direction-aware encoding), `executor.rs` (direction-aware contract calls).
-
----
-
 ## ArbExecutor Funding Model
 
 The contract (`0x1126...c570`) does **not** hold funds. It uses `transferFrom(caller → contract)` per trade, then returns all tokens. The EOA wallet is the source.
@@ -350,13 +345,4 @@ The contract (`0x1126...c570`) does **not** hold funds. It uses `transferFrom(ca
 
 ---
 
-## Incident: u128 Overflow Crash (2026-01-30)
-
-**Symptom:** Bot panicked at `primitive-types` `as_u128()` after detecting WMATIC/USDC QuickSwap opportunity.
-**Root cause:** `v3_syncer.rs` did needless `U256 → u128 → U256` roundtrip on sqrtPriceX96 (uint160 can exceed u128). Additional unsafe `as_u128()` calls in quoter/executor/detector.
-**Fix:** Removed truncation in v3_syncer (4 sites); replaced `as_u128()` with `low_u128()` in 7 files; added overflow guard in multicall_quoter profit calc.
-**Status:** Fixed, 44/44 tests pass, bot stable 500+ iterations post-fix.
-
----
-
-*Last updated: 2026-01-30 — Live: tri-DEX (16 V3 pools) + midmarket fix + slippage fix. V3↔V3 structurally unprofitable. 9 deep V2 pools found. Next: WS block subscription → V2↔V3 cross-protocol*
+*Last updated: 2026-01-30 session 3 — Live: WS block sub + tri-DEX (16 V3 pools). 4 real opps found (gas-gated). V3↔V3 structurally tight. Next: V2↔V3 cross-protocol (9 deep V2 pools) + gas limit tuning*

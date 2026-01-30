@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 #
 # Script Name: bot_status_discord.sh
-# Purpose: Send live bot status report to Discord every 15 minutes
+# Purpose: Send live bot status report to Discord every 30 minutes (aligned to :00/:30)
 # Author: AI-Generated
 # Created: 2026-01-30
+# Modified: 2026-01-30 - Fix log path, trade counting, clock-aligned 30min schedule
 #
 # Usage:
 #   # One-shot:
@@ -21,9 +22,8 @@ set -euo pipefail
 
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly BOT_DIR="$(dirname "$SCRIPT_DIR")"
-readonly LOG_FILE="$BOT_DIR/data/livebot.log"
+readonly LOG_FILE="$BOT_DIR/data/logs/livebot_ws.log"
 readonly WEBHOOK_URL="$(grep 'DISCORD_WEBHOOK=' "$BOT_DIR/src/rust-bot/.env" 2>/dev/null | cut -d'=' -f2-)"
-readonly INTERVAL_SEC=1800  # 30 minutes
 
 send_discord() {
     local msg="$1"
@@ -61,10 +61,14 @@ build_report() {
     log_lines=$(wc -l < "$LOG_FILE" 2>/dev/null || echo "0")
     latest_status=$(grep "Iteration" "$LOG_FILE" 2>/dev/null | tail -1 | sed 's/\x1b\[[0-9;]*m//g' | sed 's/^.*INFO //' || echo "No iteration log yet")
 
-    # Check for trade activity
-    local trades
-    trades=$(grep -c "TRY #\|Trade complete\|HALT" "$LOG_FILE" 2>/dev/null || true)
-    trades=${trades:-0}
+    # Check for trade activity (separate attempts from completions)
+    local attempts completed halts
+    attempts=$(grep -c "TRY #" "$LOG_FILE" 2>/dev/null || true)
+    attempts=${attempts:-0}
+    completed=$(grep -c "Trade complete" "$LOG_FILE" 2>/dev/null || true)
+    completed=${completed:-0}
+    halts=$(grep -c "HALT" "$LOG_FILE" 2>/dev/null || true)
+    halts=${halts:-0}
 
     # Build message
     cat <<EOF
@@ -73,7 +77,7 @@ build_report() {
 Sessions:  $sessions
 Process:   $status
 Log lines: $log_lines
-Trades:    $trades
+Attempts:  $attempts  Completed: $completed  HALTs: $halts
 Latest:    $latest_status
 \`\`\`
 EOF
@@ -86,12 +90,22 @@ if [ -z "$WEBHOOK_URL" ]; then
 fi
 
 if [ "${1:-}" = "--loop" ]; then
-    echo "Starting status loop (every ${INTERVAL_SEC}s)..."
+    echo "Starting status loop (every 30 min, aligned to :00/:30)..."
     while true; do
         report=$(build_report)
         http_code=$(send_discord "$report")
         echo "[$(date -u '+%H:%M:%S')] Sent status (HTTP $http_code)"
-        sleep "$INTERVAL_SEC"
+        # Sleep until next :00 or :30 mark
+        min=$(date '+%M' | sed 's/^0//')
+        if [ "$min" -lt 30 ]; then
+            wait_sec=$(( (30 - min) * 60 - $(date '+%S' | sed 's/^0//') ))
+        else
+            wait_sec=$(( (60 - min) * 60 - $(date '+%S' | sed 's/^0//') ))
+        fi
+        # Minimum 60s to avoid rapid-fire on edge cases
+        [ "$wait_sec" -lt 60 ] && wait_sec=60
+        echo "  Next report in ${wait_sec}s (at next :00/:30)"
+        sleep "$wait_sec"
     done
 else
     report=$(build_report)

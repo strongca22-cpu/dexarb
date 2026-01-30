@@ -19,7 +19,7 @@
 
 set -euo pipefail
 
-LOG_FILE="/home/botuser/bots/dexarb/data/livebot.log"
+LOG_FILE="/home/botuser/bots/dexarb/data/logs/livebot_ws.log"
 TMUX_SESSION="livebot"
 
 echo "=== Bot Watch ==="
