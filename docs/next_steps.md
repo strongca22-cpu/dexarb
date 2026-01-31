@@ -1,14 +1,13 @@
 # Next Steps - DEX Arbitrage Bot
 
-## Status: LIVE — WS Block Sub + Tri-DEX + V2↔V3 Next
+## Status: LIVE — Atomic V2↔V3 + V3↔V3, 23 Pools, WS Block Sub
 
-**Date:** 2026-01-30
-**Pools:** 16 active V3 (9 Uni + 2 Sushi + 5 QS). LINK/USDC monitoring (sole pool, zero arb).
-**Execution:** Atomic via `ArbExecutorV2` (`0x1126...c570`)
-**Build:** 44/44 tests pass, clean release build
-**Mode:** WS block subscription (dual-provider, ~2s Polygon blocks), 3 tmux sessions (livebot, botstatus, botwatch)
-**Opportunities:** 4 pre-WS (all gas-gated 1096-1113 gwei > 1000 max). 0 post-WS restart (V3↔V3 structurally tight).
-**Next:** V2↔V3 cross-protocol (9 deep V2 pools found, 0.5-2%+ divergence expected)
+**Date:** 2026-01-31
+**Pools:** 23 active (16 V3 + 7 V2), 1 V3 monitoring, 2 V2 observation
+**Execution:** Atomic via `ArbExecutorV3` (`0x7761f012a0EFa05eac3e717f93ad39cC4e2474F7`) — V3↔V3, V2↔V3, V2↔V2
+**Build:** 51/51 Rust tests, 10/10 Solidity fork tests, clean release build
+**Mode:** WS block subscription (~2s Polygon blocks), 3 tmux sessions (livebot, botstatus, botwatch)
+**Steady state:** DAI/USDC V2→V3 0.14% spread detected every block — correctly filtered by quoter (below 0.31% RT fee). Waiting for transient volatility spikes.
 
 ---
 
@@ -16,33 +15,33 @@
 
 | Wallet | Address | Purpose | USDC.e | USDC (native) | MATIC |
 |--------|---------|---------|--------|---------------|-------|
-| **Live** | `0xa532eb528aE17eFC881FCe6894a08B5b70fF21e2` | Trading (at-risk) | 516.70 | 400.00 | 166.94 |
+| **Live** | `0xa532eb528aE17eFC881FCe6894a08B5b70fF21e2` | Trading (at-risk) | 516.70 | 400.00 | 165.57 |
 | **Backup** | `0x8e843e351c284dd96F8E458c10B39164b2Aeb7Fb` | Deep storage (manual) | 0 | 0 | 0.07 |
 
-**Fund transfer (2026-01-30):** Consolidated $356.70 USDC.e from backup → live wallet (TX: `0x16ecf...2ad77`). 0.05 MATIC sent live → backup for gas (TX: `0x11f70...bcc4`).
-
-**Native USDC ($400) is NOT at risk:** All 17 pools use USDC.e (`0x2791...`). ArbExecutor approval is on USDC.e only. Native USDC (`0x3c499...`) has zero approval, zero pool references — completely untouched by bot operations.
+**Native USDC ($400) is NOT at risk:** All pools use USDC.e (`0x2791...`). ArbExecutor approval is on USDC.e only.
 
 **Settings:** MAX_TRADE_SIZE_USD=140, MIN_PROFIT_USD=0.10, MAX_SLIPPAGE_PERCENT=0.5
 
 ---
 
-## Monolithic Architecture (Implemented 2026-01-30)
+## Architecture
 
-Previous split architecture (data collector → JSON file → live bot) had ~5s average latency.
-Monolithic bot syncs pools directly via RPC, eliminating file I/O indirection:
+Monolithic bot: WS `subscribe_blocks()` → sync V3+V2 pools → price log → detect → Multicall3 verify → atomic execute
 
-| Step | Split (old) | Monolithic (current) |
-|------|-------------|---------------------|
-| Fetch block | 0ms | ~50ms |
-| RPC sync | 200ms | 400ms (12 pools concurrent) |
-| File write → read | 0-10s (poll alignment) | 0ms (in-memory) |
-| Detect + Quoter + Execute | ~600ms | ~600ms |
-| **Total** | **0.8-10.8s (avg ~5.8s)** | **~1.0s** |
+**Execution pipeline:**
+```
+Detector (reserve/tick prices) → min_profit gate ($0.10)
+  → Multicall Quoter (V3 on-chain, V2 passthrough)
+  → ArbExecutor.sol (fee sentinel routing: V2/Algebra/V3)
+  → Revert on loss (zero risk)
+```
 
-**Main loop:** WS `subscribe_blocks()` → skip duplicate → `sync_known_pools_parallel()` → price log → detect → Multicall3 verify → execute
+**Fee sentinel routing (ArbExecutor.sol):**
+- `fee = 0` → Algebra SwapRouter (QuickSwap V3)
+- `fee = 1..65535` → Standard V3 SwapRouter (Uniswap/SushiSwap V3)
+- `fee = 16777215` → V2 Router (`swapExactTokensForTokens`)
 
-**RPC budget:** WS subscription + 33 sync calls/new block (16 pools × 2 + 1). Every ~2s Polygon block: ~16.5 calls/s burst = ~20M/month (Alchemy free tier: 22.2M, 90% utilization).
+**RPC budget:** WS + ~40 sync calls/block (23 pools). ~20 calls/s burst = ~22M/month (Alchemy free: 22.2M).
 
 ---
 
@@ -50,36 +49,23 @@ Monolithic bot syncs pools directly via RPC, eliminating file I/O indirection:
 
 | Phase | Date | Summary |
 |-------|------|---------|
-| V3 swap routing | 2026-01-28 | `exactInputSingle` support, V3 SwapRouter integration |
-| Critical bug fixes | 2026-01-29 | Decimal mismatch, liquidity check, trade direction, buy-then-continue HALT |
-| Shared data architecture | 2026-01-29 | JSON state file, live bot reads from file (zero RPC for price discovery) |
-| Parallel V3 sync | 2026-01-29 | `sync_known_pools_parallel()` — all pools concurrent via `join_all` |
-| Phase 1.1 whitelist | 2026-01-29 | 10 active pools, 7 blacklisted, strict enforcement, per-tier liquidity thresholds |
-| Phase 2.1 Multicall3 | 2026-01-29 | Batch Quoter pre-screen — verify all opps in 1 RPC call, 7 unit tests |
-| V3-only data collector | 2026-01-30 | Removed V2 syncing, whitelist-driven pool sync, 60% RPC reduction |
-| Deployment checklist | 2026-01-30 | 6 shell scripts (~102 checks), all 5 sections pass |
-| Live test (split) | 2026-01-30 | Bot running, zero errors, zero capital spent |
-| Monolithic live bot | 2026-01-30 | Direct RPC sync, ~1s cycle, observability fix |
-| Checklist + monitoring | 2026-01-30 | Checklist updated for monolithic, Discord status, bot watch |
-| SushiSwap V3 recon | 2026-01-30 | Factory verified on-chain, 12 pools found, 2 promoted to active |
-| SushiSwap V3 integration | 2026-01-30 | Cross-DEX: DexType variants, dual-quoter (V1/V2), executor routing, whitelist v1.2 |
-| Gas estimate fix | 2026-01-30 | Detector $0.50→$0.05, executor $0.50→$0.01 (Polygon-accurate) |
-| Historical price logging | 2026-01-30 | `PriceLogger` module — daily CSV rotation, ~240 rows/min, zero RPC cost |
-| Atomic executor | 2026-01-30 | `ArbExecutor.sol` deployed to Polygon, single-tx execution, zero leg risk |
-| QuickSwap V3 (Algebra) | 2026-01-30 | Tri-DEX: DexType, Algebra sync (globalState), tri-quoter, ArbExecutorV2 with Algebra router, 5 pools whitelisted |
-| u128 overflow fix | 2026-01-30 | Removed `as_u128()` panics across 7 files; v3_syncer stores sqrtPriceX96 as U256 directly |
-| Price data analysis | 2026-01-30 | 129K rows, 6.4h (QS-era only): WBTC/USDC UniV3↔QS best combo (60% prof), $37/hr at $500 size (midmarket ceiling) |
-| Negative-profit guard | 2026-01-30 | Multicall Quoter now rejects `profit<=0`; main.rs belt-and-suspenders `quoted_profit_raw>0` filter |
-| Midmarket spread fix | 2026-01-30 | SELL_ESTIMATE_FACTOR 0.95→1.0, token ordering fix, slippage 10%→1% |
-| WS block subscription | 2026-01-30 | `subscribe_blocks()` replaces 3s polling, dual-provider (RPC + subscription), ~100ms block notification |
-| Discord + botwatch fixes | 2026-01-30 | Correct log path, separate attempts/completed/HALTs, clock-aligned 30min, botwatch kill monitor |
-| V2 pool assessment | 2026-01-30 | verify_v2_pools.py: 12 V2 pools assessed, 7 whitelist, 2 marginal, 3 dead. Whitelist v1.4. |
+| V3 swap routing | 01-28 | `exactInputSingle`, V3 SwapRouter |
+| Critical bug fixes | 01-29 | Decimal mismatch, liquidity check, trade direction, HALT |
+| Phase 1.1 whitelist | 01-29 | Strict enforcement, per-tier liquidity thresholds |
+| Phase 2.1 Multicall3 | 01-29 | Batch Quoter pre-screen, 1 RPC call |
+| Monolithic live bot | 01-30 | Direct RPC sync, ~1s cycle, in-memory pools |
+| SushiSwap V3 integration | 01-30 | Cross-DEX DexType variants, dual-quoter |
+| Atomic executor V1 | 01-30 | `ArbExecutor.sol` V1, single-tx V3↔V3 |
+| QuickSwap V3 (Algebra) | 01-30 | Tri-DEX, fee=0 sentinel, 5 pools |
+| WS block subscription | 01-30 | `subscribe_blocks()`, ~100ms notification |
+| V2 pool assessment | 01-30 | 7 whitelist, 2 marginal, 3 dead V2 pools |
+| **V2↔V3 atomic execution** | **01-31** | **V2 syncer, V2 DexType, atomic_fee(), ArbExecutorV3 deployed** |
+| **Profit reporting fix** | **01-31** | **Quote token decimals instead of wei_to_usd()** |
+| **Discord log fix** | **01-31** | **Dynamic log file resolution (newest livebot*.log)** |
 
 ---
 
 ## Active Whitelist (v1.4)
-
-16 active V3 + 7 v2_ready + 2 v2_observation (1 V3 monitoring):
 
 **V3 Pools (16 active):**
 
@@ -96,121 +82,87 @@ Monolithic bot syncs pools directly via RPC, eliminating file I/O indirection:
 | SushiswapV3 | WETH/USDC | 0.30% | active |
 | QuickSwapV3 | WETH/WMATIC/WBTC/USDT/DAI | dynamic | active (5) |
 
-**V2 Pools (7 v2_ready — pending Rust implementation):**
+**V2 Pools (7 active):**
 
-| DEX | Pair | TVL | Impact @$140 | Impact @$5K | Score |
-|-----|------|-----|-------------|-------------|-------|
-| QuickSwapV2 | WETH/USDC | $2.59M | 0.01% | 0.43% | 100 |
-| SushiSwapV2 | WETH/USDC | $493K | 0.06% | 2.20% | 90 |
-| QuickSwapV2 | WMATIC/USDC | $1.69M | 0.04% | 1.58% | 100 |
-| QuickSwapV2 | USDT/USDC | $628K | 0.04% | 1.56% | 100 |
-| SushiSwapV2 | USDT/USDC | $351K | 0.08% | 2.77% | 90 |
-| QuickSwapV2 | DAI/USDC | $301K | 0.09% | 3.21% | 90 |
-| SushiSwapV2 | DAI/USDC | $197K | 0.14% | 4.82% | 90 |
+| DEX | Pair | TVL | Impact @$140 | Score |
+|-----|------|-----|-------------|-------|
+| QuickSwapV2 | WETH/USDC | $2.59M | 0.01% | 100 |
+| SushiSwapV2 | WETH/USDC | $493K | 0.06% | 90 |
+| QuickSwapV2 | WMATIC/USDC | $1.69M | 0.04% | 100 |
+| QuickSwapV2 | USDT/USDC | $628K | 0.04% | 100 |
+| SushiSwapV2 | USDT/USDC | $351K | 0.08% | 90 |
+| QuickSwapV2 | DAI/USDC | $301K | 0.09% | 90 |
+| SushiSwapV2 | DAI/USDC | $197K | 0.14% | 90 |
 
-**V2 Observation (2 marginal — usable at $140, degrade at $5K):**
+**V2 Observation (2):** SushiSwapV2 WMATIC/USDC ($255K), QuickSwapV2 WBTC/USDC ($184K).
+**Blacklisted:** 22 V3 pools (dead/marginal), 3 V2 dead, 1% fee tier banned.
 
-| DEX | Pair | TVL | Impact @$140 | Impact @$5K |
-|-----|------|-----|-------------|-------------|
-| SushiSwapV2 | WMATIC/USDC | $255K | 0.30% | 9.66% |
-| QuickSwapV2 | WBTC/USDC | $184K | 0.14% | 5.58% |
+---
 
-**V2 Blacklisted (3 dead):** WBTC/SushiV2 ($508), LINK/QSV2 ($16), LINK/SushiV2 ($136).
-**V3 Blacklisted:** 19 pools (12 dead, 7 marginal V3). QS LINK ($0 depth). 1% fee tier banned.
+## Contracts
 
-**SushiSwap V3 Contracts (Polygon):**
-
-| Contract | Address |
-|----------|---------|
-| Factory | `0x917933899c6a5F8E37F31E19f92CdBFF7e8FF0e2` |
-| SwapRouter | `0x0aF89E1620b96170e2a9D0b68fEebb767eD044c3` |
-| QuoterV2 | `0xb1E835Dc2785b52265711e17fCCb0fd018226a6e` |
-
-**QuickSwap V3 (Algebra Protocol) Contracts (Polygon):**
-
-| Contract | Address |
-|----------|---------|
-| Factory | `0x411b0fAcC3489691f28ad58c47006AF5E3Ab3A28` |
-| SwapRouter | `0xf5b509bB0909a69B1c207E495f687a596C168E12` |
-| QuoterV2 | `0xa15F0D7377B2A0C0c10db057f641beD21028FC89` |
+| Contract | Address | Status |
+|----------|---------|--------|
+| ArbExecutorV3 | `0x7761f012a0EFa05eac3e717f93ad39cC4e2474F7` | **LIVE** — V2+V3 atomic |
+| ArbExecutorV2 | `0x1126Ee8C1caAeADd6CF72676470172b3aF39c570` | Retired (V3-only, drained) |
+| ArbExecutorV1 | `0xA14e76548D71a2207ECc52c129DB2Ba333cc97Fb` | Retired |
 
 ---
 
 ## Roadmap — Priority Order
 
-### Tier 1: Highest Impact (addresses 0-opportunity problem)
+### Tier 1: Data-Driven (collect before acting)
 
-**P1: Atomic Execution via Custom Smart Contract** --- DONE (2026-01-30)
-- `ArbExecutor.sol` deployed: `0xA14e76548D71a2207ECc52c129DB2Ba333cc97Fb`
-- Both V3 swap legs in one atomic tx — reverts on loss, zero leg risk
-- USDC approved (max uint256), Foundry test suite (6 tests), Rust executor integrated
-- Flash loan extension available as future add-on
+**P1: Collect Price History Data (1-3 days)**
+- Bot is running, logging all spreads. Let data accumulate.
+- Analyze: when do transient spikes occur? Which pairs? Time-of-day patterns?
+- Informs all decisions below (trade size, pairs, thresholds).
 
-**P2: V2 ↔ V3 Cross-Protocol Arbitrage**
-- V2 pools (QuickSwap, SushiSwap V2) use constant-product pricing, update differently from V3
-- Price divergence between V2 and V3 likely larger and more frequent than V3↔V3
-- Needs: re-enable V2 pool syncing, fix price format incompatibility (`detector.rs:104`), V2↔V3 comparison
-- V2 0.3% fee → V2↔V3_0.05% round-trip = 0.35%, but divergence should be larger
-- Complexity: Medium — **NOTE:** previously explored, hit issues; may need investigation
-- Impact: Potentially highest — V2/V3 drift is a well-known arb source
+**P2: Increase Trade Size ($140 → $500)**
+- $500 at 0.33% net spread = $1.65 vs $0.46 at $140
+- Wait for price data to confirm opportunity frequency first
+- Promote 2 observation V2 pools (both viable at $500)
 
-**P3: QuickSwap V3 (Algebra Protocol) — Third DEX** --- DONE (2026-01-30)
-- Algebra protocol: dynamic fees, `globalState()` instead of `slot0()`, no fee param in quoter/router
-- `ArbExecutorV2` deployed (`0x1126...c570`): branches on fee==0 → Algebra, else → standard V3
-- Tri-quoter: Multicall3 routes to UniV1/SushiV2/AlgebraV2 per leg
-- 5 pools whitelisted (WETH, WMATIC, WBTC, USDT, DAI), LINK blacklisted (98% impact)
-- Cross-DEX advantage: QS ~0.09% + UniV3 0.05% = **0.14% RT** (was 0.35% best)
-- **Result:** 9 opportunities in first 7600 scans (was 0 with 12 pools)
+### Tier 2: Execution Improvements
 
-**P4: Triangular Arbitrage (Multi-Hop Routes)**
-- A→B→C→A across three pools (e.g., USDC→WETH→WMATIC→USDC)
-- Finds circular arb that two-pool scanning misses entirely
-- Complexity: High (route enumeration, multi-leg execution)
+**P3: Private Transaction Submission (MEV Protection)**
+- Flashbots Protect or Polygon Fastlane
+- Prevents frontrunning/sandwiching of bot trades
+- Likely the biggest single edge improvement
 
-### Tier 2: Medium Impact (improve detection quality & speed)
+**P4: Dynamic Trade Sizing**
+- Size per-opportunity based on pool depth and spread width
+- Wider spread → bigger trade (up to pool depth limit)
 
-**P5: Dynamic Trade Sizing Based on Liquidity Depth**
-- Currently uses fixed `max_trade_size_usd`
-- Quoter probes at multiple sizes to find optimal trade amount per opportunity
-- Complexity: Medium
+**P5: Gas Price Optimization**
+- Use `eth_maxPriorityFeePerGas` with minimal tip
+- Currently uses provider default (sometimes overpays)
 
-**P6: Websocket Block Subscription (Latency Reduction)** --- DONE (2026-01-30)
-- Dual `Provider<Ws>`: one for RPC calls, one dedicated to `subscribe_blocks()` (avoids ethers-rs reader contention)
-- Reacts to every Polygon block (~2s), auto-exits on WS drop for supervisor restart
-- 4 real opportunities detected pre-WS restart: WETH/USDC 0.11-0.19%, WBTC/USDC 0.11-0.12% (all gas-gated at 1096-1113 gwei)
+### Tier 3: Strategy Expansion
 
-**P7: Private Transaction Submission (MEV Protection)**
-- Send via Flashbots Protect or Polygon private mempool (e.g., Marlin)
-- Prevents sandwich attacks on bot's trades
-- Complexity: Low-Medium — defensive only
+**P6: Triangular Arbitrage (Multi-Hop)**
+- USDC→WETH→WMATIC→USDC across 3 pools
+- Multiplicatively more paths, finds circular arbs
+- High complexity
 
-### Tier 3: Operational Quality
+**P7: Flash Loans (Zero-Capital)**
+- Aave/Balancer flash loans for $50K+ trades
+- Profit = gross - gas (no capital at risk)
+- Adds ~100k gas overhead
 
-**P8: Automatic Whitelist Refresh**
-- Periodically re-run Quoter depth probes on all pools, auto-promote/demote based on liquidity
-- Complexity: Medium
+**P8: Additional Chains**
+- Arbitrum, Base, Optimism — same architecture, different RPCs
 
-**P9: Backtesting on Historical Blocks**
-- Replay historical blocks through detector to validate strategy edge
-- Use price logger data to analyze: when do spreads appear? Which pairs? What time of day?
-- Critical diagnostic: if historical analysis shows zero opportunities with perfect execution, the strategy needs fundamental changes
-- Complexity: Medium
+---
 
-### Recommended Priority (Updated 2026-01-30 session 3)
+## Steady-State Spread Analysis
 
-| # | Item | Rationale |
-|---|------|-----------|
-| -- | ~~Atomic smart contract (P1)~~ | **DONE** |
-| -- | ~~QuickSwap V3 (P3)~~ | **DONE** |
-| -- | ~~Analyze price data (P9)~~ | **DONE** |
-| -- | ~~Negative-profit guard~~ | **DONE** |
-| -- | ~~ERC20 approval~~ | **DONE** |
-| -- | ~~Midmarket spread fix~~ | **DONE** |
-| -- | ~~WS block subscription (P6)~~ | **DONE** — dual-provider, ~100ms block notification |
-| 1 | V2↔V3 cross-protocol (P2) | **Essential** — V3↔V3 spreads don't exceed fees; 9 deep V2 pools found; V2 lags V3 by 0.5-2%+ |
-| 2 | Gas limit tuning | 4 real opps gas-gated at 1096-1113 gwei (max 1000). Consider 1500 or dynamic cap. |
-| 3 | Increase trade size (P5) | $140→$500 after first profitable trade |
-| 4 | Flash loan extension (P1+) | Zero-capital arb at $50K+ sizes |
+DAI/USDC V2→V3 shows persistent 0.14% spread every block. This is **structural** (not arbitrageable):
+- QuickSwapV2 fee: 0.30%
+- UniV3 0.01% fee: 0.01%
+- Round-trip: 0.31% > 0.14% spread
+
+Real opportunities are **transient** — large swaps, liquidations, or volatility push prices past fee equilibrium. These happen during active market hours, not quiet periods.
 
 ---
 
@@ -218,24 +170,11 @@ Monolithic bot syncs pools directly via RPC, eliminating file I/O indirection:
 
 | Date | Loss | Root Cause | Fix |
 |------|------|-----------|-----|
-| 2026-01-29 | $500 | Decimal mismatch + no liquidity check + inverted trade direction | All three bugs fixed |
-| 2026-01-29 | $3.35 | WETH/USDC 0.01% thin pool + buy-then-continue bug | HALT on `tx_hash`, 0.01% blacklisted for non-stables |
-
-| 2026-01-30 | $0 | Negative-profit trade attempted: Quoter returned `profit_raw=-10608070` but `both_legs_valid=true` passed filter | Quoter now sets `both_legs_valid=false` when `profit<=0`; main.rs adds `quoted_profit_raw>0` guard |
-| 2026-01-30 | $0 | `ERC20: transfer amount exceeds balance` on atomic exec — wallet hadn't approved ArbExecutor to spend USDC | Reverted at `eth_estimateGas` (pre-flight), no gas spent. Approval needed before live trading. |
-| 2026-01-30 | $0 | u128 overflow panic in `v3_syncer.rs` — sqrtPriceX96 (uint160) exceeds u128 | Removed `as_u128()` in 7 files, store sqrtPriceX96 as U256 directly |
-
-All incidents led to architectural improvements (Quoter pre-check, whitelist filter, HALT on committed capital, profit guard).
-
----
-
-## Disk Budget (Price Logging)
-
-- ~175 bytes/row, 12 pools, ~20 blocks/min = ~240 rows/min
-- **1 day:** ~58 MB
-- **1 month:** ~1.7 GB
-- **Disk free:** ~20 GB = ~11 months runway
-- Consider 90-day retention or gzip compression if space becomes tight
+| 01-29 | $500 | Decimal mismatch + no liquidity check + inverted direction | All three bugs fixed |
+| 01-29 | $3.35 | Thin pool + buy-then-continue bug | HALT, 0.01% blacklisted |
+| 01-30 | $0 | Negative-profit trade attempted | Quoter profit≤0 guard |
+| 01-30 | $0 | ERC20 approval missing | Pre-flight revert, no gas |
+| 01-30 | $0 | u128 overflow (sqrtPriceX96) | Store as U256 |
 
 ---
 
@@ -245,121 +184,32 @@ All incidents led to architectural improvements (Quoter pre-check, whitelist fil
 # Build
 source ~/.cargo/env && cd ~/bots/dexarb/src/rust-bot && cargo build --release
 
-# Start live bot (monolithic, WS block subscription)
-tmux new-session -d -s livebot "cd ~/bots/dexarb/src/rust-bot && RUST_BACKTRACE=1 RUST_LOG=dexarb_bot=info ./target/release/dexarb-bot > ~/bots/dexarb/data/logs/livebot_ws.log 2>&1"
+# Start live bot
+tmux new-session -d -s livebot "cd ~/bots/dexarb/src/rust-bot && RUST_LOG=dexarb_bot=info,warn cargo run --release --bin dexarb-bot -- --env .env.live 2>&1 | tee ~/bots/dexarb/data/logs/livebot_$(date +%Y%m%d_%H%M%S).log"
 
-# Start bot watch (kills livebot on first trade)
+# Bot watch (kills on first trade)
 tmux new-session -d -s botwatch "bash ~/bots/dexarb/scripts/bot_watch.sh"
 
-# Discord status (30 min, clock-aligned to :00/:30)
+# Discord status (30 min loop)
 tmux new-session -d -s botstatus "bash ~/bots/dexarb/scripts/bot_status_discord.sh --loop"
-
-# Checklist
-bash ~/bots/dexarb/scripts/checklist_full.sh
 ```
 
 ---
 
-## File Reference
+## Key Files
 
 | File | Purpose |
 |------|---------|
-| `src/main.rs` | Monolithic live bot (WS block sub + sync + detect + price log + execute) |
-| `src/price_logger.rs` | Historical price CSV logger (daily rotation) |
-| `src/arbitrage/detector.rs` | Opportunity detection, gas estimate ($0.05) |
-| `src/arbitrage/executor.rs` | Trade execution: atomic (ArbExecutor) + legacy two-tx fallback |
-| `src/arbitrage/multicall_quoter.rs` | Batch Quoter pre-screen, tri-quoter (V1 Uni/V2 Sushi/Algebra QS) |
-| `contracts/src/ArbExecutor.sol` | Atomic arb contract V2 (Polygon: `0x1126...c570`) — Algebra + standard V3 |
-| `contracts/test/ArbExecutor.t.sol` | Foundry tests (4 unit + 2 fork) |
-| `.env.live` | Live bot config (WS mode, LIVE_MODE=true, ARB_EXECUTOR_ADDRESS set) |
-| `config/pools_whitelist.json` | v1.4: 16 active V3 + 7 v2_ready + 2 v2_observation + 22 blacklisted |
-| `scripts/verify_v2_pools.py` | V2 pool assessment (getReserves, constant-product math, depth matrix) |
-| `scripts/analyze_price_log.py` | Cross-DEX spread analysis, per-pool stats, profitability |
-| `scripts/analyze_trade_sizes.py` | Trade size profitability estimates ($100-$5000) |
-| `scripts/verify_quickswap_pools.py` | Algebra pool assessment (dynamic fees, $1-$5000 quotes) |
-| `scripts/bot_watch.sh` | Auto-kill on first trade |
-| `scripts/bot_status_discord.sh` | Discord status report (30 min loop) |
-| `scripts/checklist_full.sh` | Deployment checklist (5 sections) |
-| `scripts/verify_whitelist.py` | Dollar-value Quoter matrix, dual-quoter support |
-| `data/price_history/` | Price log CSV directory (~58 MB/day) |
+| `src/main.rs` | Monolithic bot (WS + sync + detect + log + execute) |
+| `src/arbitrage/detector.rs` | Unified V2+V3 opportunity detection |
+| `src/arbitrage/executor.rs` | Atomic execution via ArbExecutor, profit reporting |
+| `src/arbitrage/multicall_quoter.rs` | Batch V3 quoter, V2 passthrough |
+| `src/pool/v2_syncer.rs` | V2 reserve sync (getReserves) |
+| `src/types.rs` | DexType, V2_FEE_SENTINEL, atomic_fee() |
+| `contracts/src/ArbExecutor.sol` | Atomic arb V3 (V2+Algebra+V3 routing) |
+| `.env.live` | Live config (ARB_EXECUTOR_ADDRESS, LIVE_MODE=true) |
+| `config/pools_whitelist.json` | v1.4: 23 active + 22 blacklisted |
 
 ---
 
-## Price Data Analysis Summary (2026-01-30, QuickSwap-era: 6h 25m, 129K rows)
-
-**Data window:** 08:44–15:09 UTC (QuickSwap-enabled bot only, pre-crash). 7,605 blocks, 17 pools, 6 pairs.
-
-**Best combo:** WBTC/USDC UniV3(0.05%) ↔ QuickSwap(~0.088%) = 0.138% RT fee. Profitable 60% of blocks.
-
-| Trade Size | Prof. Blocks | Total $ (6.4h) | $/hour | $/day est. |
-|------------|-------------|----------------|--------|-----------|
-| $100 | 1,201 | $33 | $5.22 | $125 |
-| $500 | 1,994 | $238 | $37.10 | $890 |
-| $1,000 | 1,994 | $496 | $77.30 | $1,855 |
-
-Midmarket ceiling estimates (no slippage). Realistic yield ~30-50% after slippage/MEV/gas spikes.
-
-**Top combos by pair (at $140):**
-
-| Pair | Combo | Prof% | MaxNet$ |
-|------|-------|-------|---------|
-| WBTC/USDC | UniV3_0.05% ↔ QS(878) | 60.1% | $0.13 |
-| USDT/USDC | SushiV3_0.01% ↔ QS(10) | 11.1% | $0.00 |
-| WBTC/USDC | UniV3_0.05% ↔ QS(876) | 9.2% | $0.22 |
-| WETH/USDC | SushiV3_0.30% ↔ UniV3_0.05% | 3.2% | $0.24 |
-| WMATIC/USDC | UniV3_0.05% ↔ QS(900) | 2.0% | $0.14 |
-
-**Bot vs analysis gap:** Bot detected 9 opportunities in ~7,600 scans; analysis shows 447+ profitable blocks. Gap = detector min-spread threshold + Quoter rejection + gas gate.
-
-**Gas spike observed:** 1558 gwei (max 1000 allowed) — blocked 2 WETH/USDC executions correctly.
-
----
-
-## V3↔V3 Structural Analysis (2026-01-30)
-
-**Finding:** V3 cross-DEX spreads are structurally below fee thresholds. At $140 trade size, minimum executable spread is 0.012% (post slippage fix). But observed max V3 spreads are:
-
-| Pool Combo | RT Fee | Max Observed Spread | Exceeds? |
-|---|---|---|---|
-| USDT Uni 0.01% + Sushi 0.01% | 0.02% | 0.01% | No |
-| WETH Uni 0.05% + QS ~0.09% | 0.14% | 0.04% | No |
-| WETH Uni 0.30% + Sushi 0.30% | 0.60% | 0.06% | No |
-
-**Root cause:** V3 pools on Polygon are efficiently arbitraged by existing bots. Spreads rarely reach fee thresholds.
-
-**Solution:** V2↔V3 cross-protocol. V2 constant-product pools lag V3 during volatility (only update on trades). Divergence reaches 0.5-2%+, well above 0.35% V2↔V3 round-trip fee.
-
-## V2 Pool Assessment (Verified On-Chain 2026-01-30, block 82344927)
-
-**Script:** `scripts/verify_v2_pools.py` — getReserves() + constant-product math, $1-$5K depth matrix.
-
-9 V2 pools viable (7 whitelist + 2 marginal). All handle $140 trade size with <0.30% impact.
-
-**Best V2↔V3 round-trip fees:**
-
-| V2 Pool | V3 Counterpart | RT Fee |
-|---------|---------------|--------|
-| USDT/DAI V2 (any) | QS V3 (~0.001%) | **0.30%** |
-| USDT/DAI V2 (any) | UniV3 0.01% | **0.31%** |
-| WETH/WMATIC V2 (any) | UniV3 0.05% | **0.35%** |
-| WETH/WMATIC V2 (any) | QS V3 (~0.09%) | 0.39% |
-
-V2 factory addresses in `.env.live`: QuickSwapV2 (`0x5757...`), SushiSwapV2 (`0xc35D...`).
-V2 router addresses needed for Rust: QuickSwapV2 Router, SushiSwapV2 Router (standard UniV2 fork ABI).
-
-Dead V2: WBTC/SushiV2 ($508 TVL), LINK/QSV2 ($16), LINK/SushiV2 ($136).
-
----
-
-## ArbExecutor Funding Model
-
-The contract (`0x1126...c570`) does **not** hold funds. It uses `transferFrom(caller → contract)` per trade, then returns all tokens. The EOA wallet is the source.
-
-**Live trading status (2026-01-30):**
-1. ~~EOA wallet must call `USDC.approve(ArbExecutor, type(uint256).max)`~~ — **DONE** (verified on-chain: max allowance set)
-2. Wallet USDC.e balance: $516.70 (trade size $140, headroom for $500 scale-up)
-3. Wallet MATIC: 166.94 (~$0.01/trade on Polygon — gas for ~16,000+ trades)
-
----
-
-*Last updated: 2026-01-30 session 4 — V2 pool assessment complete: 7 whitelist + 2 marginal V2 pools verified on-chain (whitelist v1.4). Next: Rust V2↔V3 implementation (V2 syncer, V2 DexType, V2 router, detector cross-protocol comparison)*
+*Last updated: 2026-01-31 session 5 — V2↔V3 atomic execution deployed and live. ArbExecutorV3 at 0x7761...4F7. Profit reporting fixed (quote token decimals). Bot running: 23 pools (16 V3 + 7 V2), WS block sub, steady-state spreads filtered correctly. Next: collect data, analyze spread patterns, then scale trade size.*

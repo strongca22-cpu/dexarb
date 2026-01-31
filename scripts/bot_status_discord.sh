@@ -22,7 +22,7 @@ set -euo pipefail
 
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly BOT_DIR="$(dirname "$SCRIPT_DIR")"
-readonly LOG_FILE="$BOT_DIR/data/logs/livebot_ws.log"
+# LOG_FILE resolved dynamically in build_report() to always use newest log
 readonly WEBHOOK_URL="$(grep 'DISCORD_WEBHOOK=' "$BOT_DIR/src/rust-bot/.env" 2>/dev/null | cut -d'=' -f2-)"
 readonly WALLET="0xa532eb528ae17efc881fce6894a08b5b70ff21e2"
 readonly USDC_ADDR="0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
@@ -40,6 +40,10 @@ send_discord() {
 }
 
 build_report() {
+    # Resolve newest log file each call (not at startup — bot restarts create new logs)
+    local LOG_FILE
+    LOG_FILE="$(ls -t "$BOT_DIR"/data/logs/livebot*.log 2>/dev/null | head -1)"
+
     local now
     now=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
 
