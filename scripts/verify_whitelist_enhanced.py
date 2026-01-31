@@ -17,6 +17,7 @@ Purpose:
 
 Author: Enhanced version
 Created: 2026-01-30
+Modified: 2026-01-31 - Multi-chain: --chain polygon|base, chain-specific addresses/quoters
 Based on: Original verify_whitelist.py
 
 Dependencies:
@@ -24,7 +25,8 @@ Dependencies:
     - curl (for JSON-RPC calls)
 
 Usage:
-    python3 scripts/verify_whitelist_enhanced.py                    # Full analysis
+    python3 scripts/verify_whitelist_enhanced.py                    # Polygon (default)
+    python3 scripts/verify_whitelist_enhanced.py --chain base       # Base
     python3 scripts/verify_whitelist_enhanced.py --categorize       # Show recommendations
     python3 scripts/verify_whitelist_enhanced.py --rpc https://...  # Custom RPC
     python3 scripts/verify_whitelist_enhanced.py --verbose          # Detailed output
@@ -43,13 +45,57 @@ import argparse
 from datetime import datetime, timezone
 from typing import Dict, List, Tuple, Optional
 
-# --- Constants ---
+# --- Chain Configuration ---
 
-USDC_ADDRESS = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
-V3_FACTORY = "0x1F98431c8aD98523631AE4a59f267346ea31F984"
-V3_QUOTER = "0xb27308f9F90D607463bb33eA1BeBb41C27CE5AB6"
-SUSHI_V3_QUOTER = "0xb1E835Dc2785b52265711e17fCCb0fd018226a6e"
-DEFAULT_RPC = "https://polygon-bor.publicnode.com"
+CHAIN_CONFIGS = {
+    "polygon": {
+        "usdc_address": "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
+        "v3_quoter": "0xb27308f9F90D607463bb33eA1BeBb41C27CE5AB6",
+        "v3_quoter_version": "v1",
+        "sushi_v3_quoter": "0xb1E835Dc2785b52265711e17fCCb0fd018226a6e",
+        "default_rpc": "https://polygon-bor.publicnode.com",
+        "token_addresses": {
+            "USDC":   "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
+            "WETH":   "0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619",
+            "WMATIC": "0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270",
+            "WBTC":   "0x1BFD67037B42Cf73acF2047067bd4F2C47D9BfD6",
+            "USDT":   "0xc2132D05D31c914a87C6611C10748AEb04B58e8F",
+            "DAI":    "0x8f3Cf7ad23Cd3CaDbD9735AFf958023239c6A063",
+            "LINK":   "0x53E0bca35eC356BD5ddDFebbD1Fc0fD03FaBad39",
+        },
+        "token_decimals": {
+            "USDC": 6, "USDT": 6, "DAI": 18, "WETH": 18,
+            "WMATIC": 18, "WBTC": 8, "LINK": 18,
+        },
+    },
+    "base": {
+        "usdc_address": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        "v3_quoter": "0x3d4e44Eb1374240CE5F1B871ab261CD16335B76a",
+        "v3_quoter_version": "v2",
+        "sushi_v3_quoter": "0xb1E835Dc2785b52265711e17fCCb0fd018226a6e",
+        "default_rpc": "https://mainnet.base.org",
+        "token_addresses": {
+            "USDC":   "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+            "WETH":   "0x4200000000000000000000000000000000000006",
+            "cbETH":  "0x2Ae3F1Ec7F1F5012CFEab0185bfc7aa3cf0DEc22",
+            "DAI":    "0x50c5725949A6F0c72E6C4a641F24049A917DB0Cb",
+            "USDbC":  "0xd9aAEc86B65D86f6A7B5B1b0c42FFA531710b6CA",
+        },
+        "token_decimals": {
+            "USDC": 6, "WETH": 18, "cbETH": 18, "DAI": 18, "USDbC": 6,
+        },
+    },
+}
+
+# --- Mutable globals (set by configure_chain()) ---
+
+USDC_ADDRESS = ""
+V3_QUOTER = ""
+V3_QUOTER_VERSION = "v1"
+SUSHI_V3_QUOTER = ""
+DEFAULT_RPC = ""
+TOKEN_ADDRESSES = {}
+TOKEN_DECIMALS = {}
 
 # Quote sizes for depth analysis
 QUOTE_SIZES_USD = [1, 10, 100, 1000, 5000]
@@ -78,20 +124,24 @@ FEE_TIER_NAMES = {
     10000: "1.00%",
 }
 
-TOKEN_ADDRESSES = {
-    "USDC":   "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
-    "WETH":   "0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619",
-    "WMATIC": "0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270",
-    "WBTC":   "0x1BFD67037B42Cf73acF2047067bd4F2C47D9BfD6",
-    "USDT":   "0xc2132D05D31c914a87C6611C10748AEb04B58e8F",
-    "DAI":    "0x8f3Cf7ad23Cd3CaDbD9735AFf958023239c6A063",
-    "LINK":   "0x53E0bca35eC356BD5ddDFebbD1Fc0fD03FaBad39",
-}
 
-TOKEN_DECIMALS = {
-    "USDC": 6, "USDT": 6, "DAI": 18, "WETH": 18,
-    "WMATIC": 18, "WBTC": 8, "LINK": 18,
-}
+def configure_chain(chain: str):
+    """Set module globals from chain config. Must be called before any verification."""
+    global USDC_ADDRESS, V3_QUOTER, V3_QUOTER_VERSION, SUSHI_V3_QUOTER
+    global DEFAULT_RPC, TOKEN_ADDRESSES, TOKEN_DECIMALS
+
+    if chain not in CHAIN_CONFIGS:
+        print(f"{RED}ERROR: Unknown chain '{chain}'. Supported: {', '.join(CHAIN_CONFIGS.keys())}{RESET}")
+        sys.exit(2)
+
+    cfg = CHAIN_CONFIGS[chain]
+    USDC_ADDRESS = cfg["usdc_address"]
+    V3_QUOTER = cfg["v3_quoter"]
+    V3_QUOTER_VERSION = cfg["v3_quoter_version"]
+    SUSHI_V3_QUOTER = cfg["sushi_v3_quoter"]
+    DEFAULT_RPC = cfg["default_rpc"]
+    TOKEN_ADDRESSES = cfg["token_addresses"]
+    TOKEN_DECIMALS = cfg["token_decimals"]
 
 # ANSI colors
 GREEN = "\033[92m"
@@ -218,26 +268,33 @@ def load_whitelist(path: str) -> dict:
         sys.exit(2)
 
 
-def resolve_rpc_url(cli_rpc: str = None) -> str:
-    """Resolve RPC URL from CLI, .env, or default."""
+def resolve_rpc_url(cli_rpc: str = None, chain: str = "polygon") -> str:
+    """Resolve RPC URL from CLI arg, chain-specific .env file, or default."""
     if cli_rpc:
         return cli_rpc
 
-    env_path = os.path.join(os.path.dirname(__file__), "..", "src", "rust-bot", ".env")
-    if os.path.exists(env_path):
-        try:
-            with open(env_path, "r") as f:
-                for line in f:
-                    line = line.strip()
-                    if line.startswith("RPC_URL=") and not line.startswith("#"):
-                        url = line.split("=", 1)[1].strip()
-                        if url.startswith("wss://"):
-                            url = "https://" + url[6:]
-                        elif url.startswith("ws://"):
-                            url = "http://" + url[5:]
-                        return url
-        except Exception:
-            pass
+    env_dir = os.path.join(os.path.dirname(__file__), "..", "src", "rust-bot")
+    env_files = [os.path.join(env_dir, f".env.{chain}")]
+    if chain == "polygon":
+        env_files.append(os.path.join(env_dir, ".env"))
+
+    for env_path in env_files:
+        if os.path.exists(env_path):
+            try:
+                with open(env_path, "r") as f:
+                    for line in f:
+                        line = line.strip()
+                        if line.startswith("RPC_URL=") and not line.startswith("#"):
+                            url = line.split("=", 1)[1].strip()
+                            if "YOUR_" in url:
+                                continue
+                            if url.startswith("wss://"):
+                                url = "https://" + url[6:]
+                            elif url.startswith("ws://"):
+                                url = "http://" + url[5:]
+                            return url
+            except Exception:
+                pass
 
     return DEFAULT_RPC
 
@@ -305,6 +362,9 @@ def _resolve_quoter(dex: str) -> tuple:
     """Return (quoter_address, selector, param_order)."""
     if dex and "sushi" in dex.lower():
         return (SUSHI_V3_QUOTER, SELECTOR_QUOTE_V2, "v2")
+    # Uniswap V3: V1 on Polygon, V2 on Base (configured via V3_QUOTER_VERSION)
+    if V3_QUOTER_VERSION == "v2":
+        return (V3_QUOTER, SELECTOR_QUOTE_V2, "v2")
     return (V3_QUOTER, SELECTOR_QUOTE_V1, "v1")
 
 
@@ -756,9 +816,15 @@ def main():
         description="Enhanced whitelist verifier with automated categorization"
     )
     parser.add_argument(
+        "--chain",
+        default="polygon",
+        choices=list(CHAIN_CONFIGS.keys()),
+        help="Chain to verify (default: polygon)"
+    )
+    parser.add_argument(
         "--whitelist", "-w",
-        default=os.path.join(os.path.dirname(__file__), "..", "config", "pools_whitelist.json"),
-        help="Path to pools_whitelist.json"
+        default=None,
+        help="Path to pools_whitelist.json (default: config/{chain}/pools_whitelist.json)"
     )
     parser.add_argument(
         "--rpc", "-r",
@@ -778,9 +844,18 @@ def main():
 
     args = parser.parse_args()
 
+    # Configure chain-specific constants
+    configure_chain(args.chain)
+
+    # Default whitelist path: config/{chain}/pools_whitelist.json
+    if args.whitelist is None:
+        args.whitelist = os.path.join(
+            os.path.dirname(__file__), "..", "config", args.chain, "pools_whitelist.json"
+        )
+
     # Load config
     whitelist_path = os.path.abspath(args.whitelist)
-    rpc_url = resolve_rpc_url(args.rpc)
+    rpc_url = resolve_rpc_url(args.rpc, chain=args.chain)
     data = load_whitelist(whitelist_path)
 
     # Get block
@@ -790,7 +865,7 @@ def main():
         sys.exit(2)
 
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-    print(f"\n  {BOLD}Enhanced Whitelist Verifier{RESET} | {now} | Block {block}")
+    print(f"\n  {BOLD}Enhanced Whitelist Verifier{RESET} | {args.chain.upper()} | {now} | Block {block}")
     print(f"  RPC: {rpc_url}")
     print(f"  File: {whitelist_path}\n")
 

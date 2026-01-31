@@ -1,8 +1,8 @@
-# Session Summary: Phase 2 Base Support — Partial (2026-01-31, Session 8)
+# Session Summary: Phase 2 Base Support (2026-01-31, Sessions 8-9)
 
 ## Overview
 
-Implemented the code and config portions of Phase 2 (Base chain support) from `docs/MULTI_CHAIN_ARCHITECTURE.md` v2.0. Discovered pools on Base, created `.env.base` and `config/base/pools_whitelist.json`, fixed a critical QuoterV1/V2 compatibility issue, and adapted `verify_whitelist.py` for multi-chain. Deployment and live testing are BLOCKED on wallet funding and Alchemy API key.
+Implemented Phase 2 (Base chain support) from `docs/MULTI_CHAIN_ARCHITECTURE.md` v2.0. Session 8: discovered pools, created `.env.base` and whitelist, fixed QuoterV1/V2 compatibility, adapted `verify_whitelist.py` for multi-chain. Session 9: resolved blockers — generated dedicated Base wallet, funded with ETH from Coinbase, enabled Base Mainnet on Alchemy, configured `.env.base` with real WS key. Ready for ArbExecutor deployment.
 
 ## Context
 
@@ -71,7 +71,8 @@ Queried Uniswap V3 factory (`0x33128a8f...`) and SushiSwap V3 factory (`0xc35DAD
 - `UNISWAP_V3_QUOTER_IS_V2=true` — critical flag
 - `UNISWAP_V3_QUOTER=0x3d4e44Eb1374240CE5F1B871ab261CD16335B76a` (QuoterV2)
 - V2 routers set to zero address (unused on Base initially)
-- `RPC_URL=wss://base-mainnet.g.alchemy.com/v2/YOUR_ALCHEMY_BASE_KEY` (placeholder)
+- `RPC_URL=wss://base-mainnet.g.alchemy.com/v2/<key>` (configured in session 9)
+- Dedicated wallet: `0x48091E0ee0427A7369c7732f779a09A0988144fa` (session 9)
 - `LIVE_MODE=false`
 
 **`config/base/pools_whitelist.json`** — v1.0
@@ -130,24 +131,22 @@ Queried Uniswap V3 factory (`0x33128a8f...`) and SushiSwap V3 factory (`0xc35DAD
 | `docs/next_steps.md` | Updated | Phase 2 progress, Base whitelist, blockers |
 | `docs/session_summaries/2026-01-31_phase2_base_support.md` | Created | This file |
 
-## Blockers (User Action Required)
+## Blockers — RESOLVED (Session 9)
 
-### 1. Fund Wallet on Base with ETH
-- Wallet: `0xa532eb528aE17eFC881FCe6894a08B5b70fF21e2`
-- Current balance: 0 ETH, 0 USDC on Base
-- Need: ~0.01 ETH for ArbExecutor deployment + gas
-- Options: Bridge from Polygon (Base Bridge or third-party), direct transfer from exchange
+### 1. Fund Wallet on Base with ETH — DONE
+- Generated dedicated Base wallet: `0x48091E0ee0427A7369c7732f779a09A0988144fa` (separate from Polygon for isolation)
+- Funded from Coinbase: 0.0057 ETH on Base (native)
+- Updated `.env.base` with new wallet private key
 
-### 2. Alchemy API Key for Base
-- `.env.base` has placeholder: `wss://base-mainnet.g.alchemy.com/v2/YOUR_ALCHEMY_BASE_KEY`
-- The bot's `subscribe_blocks()` requires WebSocket (`wss://`) — Base public RPC (`https://mainnet.base.org`) is HTTP-only
-- Action: Add Base chain to Alchemy dashboard, get API key, update `.env.base`
+### 2. Alchemy API Key for Base — DONE
+- Enabled Base Mainnet on existing Alchemy app (same key as Polygon)
+- Updated `.env.base`: `RPC_URL=wss://base-mainnet.g.alchemy.com/v2/<key>`
+- Verified: `cast block-number` returns block 41,530,272
 
-## Next Steps (After Blockers Resolved)
+## Next Steps
 
-1. Update `.env.base` with real Alchemy WS key
-2. Deploy ArbExecutor.sol to Base: `forge create --rpc-url <base_rpc> --private-key <key> src/ArbExecutor.sol:ArbExecutor --constructor-args <wallet_addr> <usdc_addr>`
-3. Approve USDC for executor on Base
-4. Update `.env.base` with `ARB_EXECUTOR_ADDRESS=<deployed_address>`
-5. Start Base bot in dry-run: `--chain base` with `LIVE_MODE=false`
-6. Collect price data for 48h+ before considering live trading
+1. Deploy ArbExecutor.sol to Base: `forge create --rpc-url <base_rpc> --private-key <key> src/ArbExecutor.sol:ArbExecutor --constructor-args <wallet_addr> <usdc_addr>`
+2. Update `.env.base` with `ARB_EXECUTOR_ADDRESS=<deployed_address>`
+3. Approve USDC for executor on Base (when trading phase begins)
+4. Start Base bot in dry-run: `--chain base` with `LIVE_MODE=false`
+5. Collect price data for 48h+ before considering live trading

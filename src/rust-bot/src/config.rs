@@ -182,5 +182,11 @@ fn load_config_inner() -> Result<BotConfig> {
         skip_multicall_prescreen: std::env::var("SKIP_MULTICALL_PRESCREEN")
             .map(|v| v.to_lowercase() == "true")
             .unwrap_or(false),
+
+        // Route cooldown: suppress failed routes for N blocks (default 10, 0 = disabled)
+        route_cooldown_blocks: std::env::var("ROUTE_COOLDOWN_BLOCKS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(10),
     })
 }

@@ -536,6 +536,13 @@ pub struct BotConfig {
     // to the executor (which still has its own Quoter + eth_estimateGas checks).
     // Saves ~12ms per scan cycle by eliminating redundant on-chain verification.
     pub skip_multicall_prescreen: bool,
+
+    // Route cooldown: suppress failed routes for N blocks (escalating backoff).
+    // After a route fails, it is suppressed for N blocks. On repeated failures,
+    // cooldown escalates 5× per failure up to ~1800 blocks (~1 hr on Polygon).
+    // Eliminates hammering of structurally dead spreads. Set to 0 to disable.
+    // Default: 10 blocks (~20s on Polygon).
+    pub route_cooldown_blocks: u64,
 }
 
 #[cfg(test)]

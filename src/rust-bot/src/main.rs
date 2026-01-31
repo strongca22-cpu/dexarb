@@ -26,10 +26,11 @@
 //! Modified: 2026-01-30 - WS block subscription: subscribe_blocks() replaces 3s polling
 //! Modified: 2026-01-30 - V2↔V3 cross-protocol: V2PoolSyncer, decimal-adjusted pricing
 //! Modified: 2026-01-31 - Multi-chain: --chain CLI arg, chain-aware .env + data paths
+//! Modified: 2026-01-31 - Route cooldown: escalating backoff suppresses stale/dead spreads
 
 use anyhow::Result;
 use clap::Parser;
-use dexarb_bot::arbitrage::{MulticallQuoter, OpportunityDetector, TradeExecutor, VerifiedOpportunity};
+use dexarb_bot::arbitrage::{MulticallQuoter, OpportunityDetector, RouteCooldown, TradeExecutor, VerifiedOpportunity};
 use dexarb_bot::config::load_config_from_file;
 use dexarb_bot::filters::WhitelistFilter;
 use dexarb_bot::pool::{PoolStateManager, V2PoolSyncer, V3PoolSyncer, SUSHI_V3_FEE_TIERS, V3_FEE_TIERS};
@@ -332,6 +333,15 @@ async fn main() -> Result<()> {
     info!("Bot initialized successfully (monolithic mode)");
     info!("Starting opportunity detection loop (WS block subscription)...");
 
+    // Route cooldown tracker — suppresses stale/dead spreads with escalating backoff
+    let mut route_cooldown = RouteCooldown::new(config.route_cooldown_blocks);
+    if config.route_cooldown_blocks > 0 {
+        info!("Route cooldown ENABLED: initial {} blocks, escalating 5× per failure (max ~1hr)",
+              config.route_cooldown_blocks);
+    } else {
+        info!("Route cooldown DISABLED (ROUTE_COOLDOWN_BLOCKS=0)");
+    }
+
     // Statistics tracking
     let mut total_opportunities: u64 = 0;
     let mut total_scans: u64 = 0;
@@ -352,12 +362,14 @@ async fn main() -> Result<()> {
             iteration += 1;
             total_scans += 1;
 
-            // Log status periodically
+            // Log status periodically + cleanup expired cooldowns
             if iteration % 100 == 0 {
+                route_cooldown.cleanup(current_block);
                 let (v2_count, v3_count, min_block, max_block) = state_manager.combined_stats();
+                let cd_count = route_cooldown.active_count();
                 info!(
-                    "Iteration {} (WS) | {} V3 + {} V2 pools | blocks {}-{} | {} opps found / {} scans | block {}",
-                    iteration, v3_count, v2_count, min_block, max_block, total_opportunities, total_scans, current_block
+                    "Iteration {} (WS) | {} V3 + {} V2 pools | blocks {}-{} | {} opps found / {} scans | {} routes cooled | block {}",
+                    iteration, v3_count, v2_count, min_block, max_block, total_opportunities, total_scans, cd_count, current_block
                 );
             }
 
@@ -396,7 +408,22 @@ async fn main() -> Result<()> {
             }
 
             // Scan for opportunities
-            let opportunities = detector.scan_opportunities();
+            let all_opportunities = detector.scan_opportunities();
+
+            // Filter out routes that are in cooldown (recently failed, likely stale/dead)
+            let suppressed = all_opportunities.iter()
+                .filter(|opp| route_cooldown.is_cooled_down(
+                    &opp.pair.symbol, opp.buy_dex, opp.sell_dex, current_block
+                ))
+                .count();
+            let opportunities: Vec<_> = all_opportunities.into_iter()
+                .filter(|opp| !route_cooldown.is_cooled_down(
+                    &opp.pair.symbol, opp.buy_dex, opp.sell_dex, current_block
+                ))
+                .collect();
+            if suppressed > 0 {
+                info!("🧊 {} routes suppressed (cooldown), {} remaining", suppressed, opportunities.len());
+            }
 
             if !opportunities.is_empty() {
                 total_opportunities += opportunities.len() as u64;
@@ -483,6 +510,7 @@ async fn main() -> Result<()> {
                                     result.net_profit_usd,
                                     result.execution_time_ms
                                 );
+                                route_cooldown.record_success(&opp.pair.symbol, opp.buy_dex, opp.sell_dex);
                                 break; // Stop after successful trade
                             } else {
                                 let error_msg = result.error.unwrap_or_else(|| "Unknown".to_string());
@@ -501,6 +529,8 @@ async fn main() -> Result<()> {
                                 }
 
                                 // No tx submitted = pre-trade rejection (zero capital risk)
+                                // Record failure for cooldown (stale/dead spread suppression)
+                                route_cooldown.record_failure(&opp.pair.symbol, opp.buy_dex, opp.sell_dex, current_block);
                                 if error_msg.contains("Quoter") || error_msg.contains("Gas price") {
                                     info!(
                                         "Quoter rejected #{} {} ({}), trying next...",
@@ -518,6 +548,7 @@ async fn main() -> Result<()> {
                             }
                         }
                         Err(e) => {
+                            route_cooldown.record_failure(&opp.pair.symbol, opp.buy_dex, opp.sell_dex, current_block);
                             error!("Execution error: {}", e);
                             break; // Stop on unexpected errors
                         }

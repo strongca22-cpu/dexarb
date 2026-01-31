@@ -4,7 +4,7 @@
 
 **Date:** 2026-01-31
 **Polygon:** 23 active pools (16 V3 + 7 V2), atomic via `ArbExecutorV3` (`0x7761...`), WS block sub
-**Base:** 4 active V3 pools discovered, `.env.base` + whitelist created, QuoterV2 fix merged — BLOCKED on wallet funding + Alchemy key
+**Base:** 4 active V3 pools, `.env.base` configured, wallet funded (0.0057 ETH), Alchemy WS key live — ready for ArbExecutor deploy
 **Build:** 51/51 Rust tests, clean release build
 **Mode:** WS block subscription (~2s Polygon blocks), 3 tmux sessions (livebot, botstatus, botwatch)
 **Steady state:** DAI/USDC V2→V3 0.14% spread detected every block — correctly filtered by quoter (below 0.31% RT fee). Waiting for transient volatility spikes.
@@ -20,7 +20,9 @@
 
 **Native USDC ($400) is NOT at risk:** All pools use USDC.e (`0x2791...`). ArbExecutor approval is on USDC.e only.
 
-**Settings:** MAX_TRADE_SIZE_USD=140, MIN_PROFIT_USD=0.10, MAX_SLIPPAGE_PERCENT=0.5
+**Settings:** MAX_TRADE_SIZE_USD=500, MIN_PROFIT_USD=0.10, MAX_SLIPPAGE_PERCENT=0.5
+
+**Base Wallet:** `0x48091E0ee0427A7369c7732f779a09A0988144fa` | 0.0057 ETH | Separate from Polygon for isolation
 
 ---
 
@@ -134,7 +136,7 @@ Detector (reserve/tick prices) → min_profit gate ($0.10)
 **P0: Multi-Chain Architecture — Base Integration**
 - Architecture doc revised with codebase-grounded plan: `docs/MULTI_CHAIN_ARCHITECTURE.md` v2.0
 - **Phase 1 — DONE:** `clap` + `--chain` flag, `QUOTE_TOKEN_ADDRESS` + `ESTIMATED_GAS_COST_USD` in `.env`, chain-aware data paths, `.env.polygon`, `config/polygon/`, `data/polygon/`
-- **Phase 2 — IN PROGRESS:** Pool discovery done (4 active, 2 observation, 2 blacklisted). `.env.base` created. QuoterV2 fix merged (types.rs, config.rs, multicall_quoter.rs, executor.rs). `verify_whitelist.py --chain base` working. **BLOCKED:** wallet has 0 ETH on Base (need funding for ArbExecutor deploy + gas), need Alchemy WS key for Base.
+- **Phase 2 — IN PROGRESS:** Pool discovery done, `.env.base` created, QuoterV2 fix merged, `verify_whitelist.py --chain base` working. Wallet funded (0.0057 ETH), Alchemy WS key configured. **Next:** Deploy ArbExecutor to Base, start dry-run data collection.
 - **Phase 3 — Parallel operation:** Base data collection (dry run 48h+), analyze spreads, go live if viable
 - **Phase 4 — DONE:** `config/{arbitrum,optimism}/.gitkeep`, `data/{arbitrum,optimism}/.gitkeep`
 - Polygon stays live throughout. Base starts in data-collection mode.
@@ -243,10 +245,10 @@ tmux new-session -d -s botstatus "bash ~/bots/dexarb/scripts/bot_status_discord.
 | `.env.live` | Legacy config (kept for backwards compat, identical to .env.polygon) |
 | `config/polygon/pools_whitelist.json` | v1.4: 23 active + 22 blacklisted (chain-specific path) |
 | `config/base/pools_whitelist.json` | v1.0: 4 active, 2 observation, 2 blacklisted (WETH/USDC) |
-| `.env.base` | Base config (QuoterV2, USDC native, placeholder Alchemy key) |
+| `.env.base` | Base config (QuoterV2, USDC native, Alchemy WS key, dedicated wallet) |
 | `scripts/verify_whitelist.py` | Multi-chain pool verifier (`--chain polygon` / `--chain base`) |
 | `docs/MULTI_CHAIN_ARCHITECTURE.md` | Multi-chain plan v2.0 (codebase-grounded) |
 
 ---
 
-*Last updated: 2026-01-31 session 8 — Phase 2 multi-chain (partial): Base pool discovery (4 active WETH/USDC pools on UniV3+SushiV3), QuoterV2 fix (types.rs, config.rs, multicall_quoter.rs, executor.rs), `.env.base` created, `config/base/pools_whitelist.json` v1.0, `verify_whitelist.py --chain` multi-chain support. 51/51 tests pass. BLOCKED: wallet has 0 ETH on Base (need funding), need Alchemy WS key for Base. Polygon live bot unchanged and running.*
+*Last updated: 2026-01-31 session 9 — Phase 2 blockers resolved: Base wallet funded (0.0057 ETH at `0x4809...`), Alchemy WS key configured (same app as Polygon, Base Mainnet enabled). `.env.base` fully configured. Next: deploy ArbExecutor to Base, start dry-run. Polygon live bot unchanged.*

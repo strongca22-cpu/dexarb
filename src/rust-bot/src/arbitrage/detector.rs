@@ -584,6 +584,8 @@ mod tests {
             price_log_enabled: false,
             price_log_dir: None,
             arb_executor_address: None,
+            skip_multicall_prescreen: false,
+            route_cooldown_blocks: 10,
         }
     }
 

@@ -4,7 +4,7 @@
 # Purpose: Monitor live bot log and kill it after first completed trade
 # Author: AI-Generated
 # Created: 2026-01-30
-# Modified: 2026-01-30
+# Modified: 2026-01-31 - Renamed session target to livebot.polygon (multi-chain)
 #
 # Usage:
 #   ./scripts/bot_watch.sh
@@ -23,7 +23,7 @@
 set -euo pipefail
 
 LOG_FILE="/home/botuser/bots/dexarb/data/logs/livebot_ws.log"
-TMUX_SESSION="livebot"
+TMUX_SESSION="livebot_polygon"
 
 echo "=== Bot Watch ==="
 echo "Monitoring: $LOG_FILE"

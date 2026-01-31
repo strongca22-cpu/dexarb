@@ -5,6 +5,7 @@
 # Author: AI-Generated
 # Created: 2026-01-30
 # Modified: 2026-01-30 - Fix log path, trade counting, clock-aligned 30min schedule
+# Modified: 2026-01-31 - Multi-chain naming (livebot.polygon), prominent status indicator
 #
 # Usage:
 #   # One-shot:
@@ -51,16 +52,18 @@ build_report() {
     local sessions
     sessions=$(tmux list-sessions 2>/dev/null | cut -d: -f1 | tr '\n' ', ' | sed 's/,$//' || echo "NONE")
 
-    # Bot process
-    local pid status
+    # Bot process — check if livebot.polygon tmux session exists AND dexarb-bot is running
+    local pid proc_detail bot_status
     pid=$(pgrep -x dexarb-bot 2>/dev/null | head -1 || echo "")
     if [ -n "$pid" ]; then
         local ctx mem
         ctx=$(grep "^voluntary_ctxt_switches" /proc/"$pid"/status 2>/dev/null | awk '{print $2}' || echo "?")
         mem=$(grep "VmRSS" /proc/"$pid"/status 2>/dev/null | awk '{print $2, $3}' || echo "?")
-        status="PID $pid | ${mem} | ctx=$ctx"
+        proc_detail="PID $pid | ${mem} | ctx=$ctx"
+        bot_status="RUNNING"
     else
-        status="NOT RUNNING"
+        proc_detail="no process"
+        bot_status="DOWN"
     fi
 
     # Latest status line from log
@@ -88,10 +91,10 @@ build_report() {
 
     # Build message
     cat <<EOF
-**Bot Status Report** — \`$now\`
+**livebot.polygon** [$bot_status] — \`$now\`
 \`\`\`
+Process:   $proc_detail
 Sessions:  $sessions
-Process:   $status
 Wallet:    $usdc_bal USDC | $matic_bal MATIC
 Log lines: $log_lines
 Attempts:  $attempts  Completed: $completed  HALTs: $halts
