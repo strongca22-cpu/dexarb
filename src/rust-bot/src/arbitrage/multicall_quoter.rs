@@ -103,6 +103,8 @@ pub struct MulticallQuoter<M: Middleware> {
     uniswap_quoter_address: Address,
     sushiswap_quoter_address: Option<Address>,
     quickswap_quoter_address: Option<Address>,
+    /// When true, Uniswap V3 quoter uses V2 ABI (Base). Default false (V1, Polygon).
+    uniswap_quoter_is_v2: bool,
 }
 
 impl<M: Middleware + 'static> MulticallQuoter<M> {
@@ -120,10 +122,13 @@ impl<M: Middleware + 'static> MulticallQuoter<M> {
 
         let sushiswap_quoter_address = config.sushiswap_v3_quoter;
         let quickswap_quoter_address = config.quickswap_v3_quoter;
+        let uniswap_quoter_is_v2 = config.uniswap_v3_quoter_is_v2;
 
         info!(
-            "MulticallQuoter initialized: Multicall3={:?}, UniQuoter={:?}, SushiQuoter={:?}, QuickSwapQuoter={:?}",
-            multicall_address, uniswap_quoter_address, sushiswap_quoter_address, quickswap_quoter_address
+            "MulticallQuoter initialized: Multicall3={:?}, UniQuoter={:?} (v{}), SushiQuoter={:?}, QuickSwapQuoter={:?}",
+            multicall_address, uniswap_quoter_address,
+            if uniswap_quoter_is_v2 { "2" } else { "1" },
+            sushiswap_quoter_address, quickswap_quoter_address
         );
 
         Ok(Self {
@@ -132,6 +137,7 @@ impl<M: Middleware + 'static> MulticallQuoter<M> {
             uniswap_quoter_address,
             sushiswap_quoter_address,
             quickswap_quoter_address,
+            uniswap_quoter_is_v2,
         })
     }
 
@@ -207,7 +213,7 @@ impl<M: Middleware + 'static> MulticallQuoter<M> {
 
             // Buy leg: quote_token → base_token on buy pool
             let buy_quoter = self.quoter_for_dex(opp.buy_dex);
-            let buy_call = Self::encode_quoter_for_dex(
+            let buy_call = self.encode_quoter_for_dex(
                 opp.buy_dex,
                 buy_token_in,
                 buy_token_out,
@@ -219,7 +225,7 @@ impl<M: Middleware + 'static> MulticallQuoter<M> {
             // Use estimated buy output since we don't have actual yet
             let sell_quoter = self.quoter_for_dex(opp.sell_dex);
             let estimated_buy_out = Self::estimate_buy_output(opp);
-            let sell_call = Self::encode_quoter_for_dex(
+            let sell_call = self.encode_quoter_for_dex(
                 opp.sell_dex,
                 sell_token_in,
                 sell_token_out,
@@ -387,8 +393,9 @@ impl<M: Middleware + 'static> MulticallQuoter<M> {
     /// Route to the correct quoter encoding based on DexType.
     /// QuickSwap V3 → Algebra QuoterV2 (no fee param),
     /// SushiSwap V3 → QuoterV2 (tuple struct param),
-    /// all else → QuoterV1 (flat params).
+    /// Uniswap V3 → QuoterV1 (flat params) or QuoterV2 if uniswap_quoter_is_v2.
     fn encode_quoter_for_dex(
+        &self,
         dex: DexType,
         token_in: Address,
         token_out: Address,
@@ -398,6 +405,9 @@ impl<M: Middleware + 'static> MulticallQuoter<M> {
         if dex.is_quickswap_v3() {
             Self::encode_quoter_algebra_call(token_in, token_out, amount_in)
         } else if dex.is_sushi_v3() {
+            Self::encode_quoter_v2_call(token_in, token_out, fee, amount_in)
+        } else if self.uniswap_quoter_is_v2 {
+            // Base: Uniswap V3 QuoterV2 (same ABI as SushiSwap V3 QuoterV2)
             Self::encode_quoter_v2_call(token_in, token_out, fee, amount_in)
         } else {
             Self::encode_quoter_v1_call(token_in, token_out, fee, amount_in)

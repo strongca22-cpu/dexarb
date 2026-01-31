@@ -1144,8 +1144,26 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
                 .await
                 .map_err(|e| anyhow!("SushiV3 QuoterV2 simulation failed: {} — pool may lack liquidity", e))?;
             amount_out
+        } else if self.config.uniswap_v3_quoter_is_v2 {
+            // Uniswap V3 with QuoterV2 (Base): struct params, tuple return
+            let quoter_address = self.config.uniswap_v3_quoter
+                .ok_or_else(|| anyhow!("V3 Quoter address not configured (UNISWAP_V3_QUOTER)"))?;
+            let quoter = IQuoterV2::new(quoter_address, self.provider.clone());
+            let params = QuoteExactInputSingleParams {
+                token_in,
+                token_out,
+                amount_in,
+                fee: fee.into(),
+                sqrt_price_limit_x96: U256::zero(),
+            };
+            let (amount_out, _, _, _) = quoter
+                .quote_exact_input_single(params)
+                .call()
+                .await
+                .map_err(|e| anyhow!("V3 QuoterV2 simulation failed: {} — pool may lack liquidity", e))?;
+            amount_out
         } else {
-            // Uniswap V3: use QuoterV1 (flat params, single return)
+            // Uniswap V3: use QuoterV1 (flat params, single return) — Polygon
             let quoter_address = self.config.uniswap_v3_quoter
                 .ok_or_else(|| anyhow!("V3 Quoter address not configured (UNISWAP_V3_QUOTER)"))?;
             let quoter = IQuoter::new(quoter_address, self.provider.clone());

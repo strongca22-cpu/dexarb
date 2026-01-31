@@ -2,7 +2,7 @@
 name = "dexarb-bot"
 version = "0.1.0"
 edition = "2021"
-description = "Phase 1 DEX Arbitrage Bot - Polygon"
+description = "DEX Arbitrage Bot - Multi-Chain (Polygon, Base)"
 
 [dependencies]
 # Core Ethereum interaction (ethers-rs)
@@ -27,6 +27,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 # Configuration
 dotenv = "0.15"
 toml = "0.8"
+clap = { version = "4.0", features = ["derive", "env"] }
 
 # Signal handling (for SIGHUP reload)
 signal-hook = "0.3"

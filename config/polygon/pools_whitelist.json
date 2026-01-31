@@ -1,0 +1,578 @@
+{
+  "version": "1.4",
+  "last_updated": "2026-01-30T21:51:00Z",
+  "changelog": "v1.4: V2 pool assessment for V2↔V3 cross-protocol arb. 7 V2 pools whitelisted (v2_ready), 2 marginal V2 pools in observation, 3 dead V2 pools blacklisted. Verified on-chain via verify_v2_pools.py (block 82344927). Total: 16 active V3 + 7 v2_ready + 2 v2_observation.",
+  "config": {
+    "default_min_liquidity": 1000000000,
+    "whitelist_enforcement": "strict",
+    "liquidity_thresholds": {
+      "v3_100": 10000000000,
+      "v3_500": 5000000000,
+      "v3_3000": 3000000000,
+      "v3_10000": 0
+    }
+  },
+  "whitelist": {
+    "pools": [
+      {
+        "address": "0x45dda9cb7c25131df268515131f647d726f50608",
+        "pair": "WETH/USDC",
+        "dex": "UniswapV3",
+        "fee_tier": 500,
+        "status": "active",
+        "min_liquidity": 5000000000,
+        "notes": "Deep — 0.3% impact@$5K, $4983 returned",
+        "added": "2026-01-29",
+        "last_verified": "2026-01-30"
+      },
+      {
+        "address": "0x0e44ceb592acfc5d3f09d996302eb4c499ff8c10",
+        "pair": "WETH/USDC",
+        "dex": "UniswapV3",
+        "fee_tier": 3000,
+        "status": "active",
+        "min_liquidity": 3000000000,
+        "notes": "Deep — 1.9% impact@$5K, $4906 returned",
+        "added": "2026-01-29",
+        "last_verified": "2026-01-30"
+      },
+      {
+        "address": "0xa374094527e1673a86de625aa59517c5de346d32",
+        "pair": "WMATIC/USDC",
+        "dex": "UniswapV3",
+        "fee_tier": 500,
+        "status": "active",
+        "min_liquidity": 5000000000,
+        "notes": "Deep — 3.8% impact@$5K, $4812 returned",
+        "added": "2026-01-29",
+        "last_verified": "2026-01-30"
+      },
+      {
+        "address": "0xeef1a9507b3d505f0062f2be9453981255b503c8",
+        "pair": "WBTC/USDC",
+        "dex": "UniswapV3",
+        "fee_tier": 500,
+        "status": "active",
+        "min_liquidity": 5000000000,
+        "notes": "Deep — 0.3% impact@$5K, $4982 returned",
+        "added": "2026-01-29",
+        "last_verified": "2026-01-30"
+      },
+      {
+        "address": "0x3f5228d0e7d75467366be7de2c31d0d098ba2c23",
+        "pair": "USDT/USDC",
+        "dex": "UniswapV3",
+        "fee_tier": 500,
+        "status": "active",
+        "min_liquidity": 1000000000,
+        "notes": "Very deep stablecoin — 0.1% impact@$5K, $4996 returned",
+        "added": "2026-01-29",
+        "last_verified": "2026-01-30"
+      },
+      {
+        "address": "0x24555b1e26407b8b56621da41f175c5e2b80f1b8",
+        "pair": "USDT/USDC",
+        "dex": "UniswapV3",
+        "fee_tier": 3000,
+        "status": "active",
+        "min_liquidity": 1000000000,
+        "notes": "Very deep stablecoin — 0.1% impact@$5K, $4993 returned",
+        "added": "2026-01-29",
+        "last_verified": "2026-01-30"
+      },
+      {
+        "address": "0xdac8a8e6dbf8c690ec6815e0ff03491b2770255d",
+        "pair": "USDT/USDC",
+        "dex": "UniswapV3",
+        "fee_tier": 100,
+        "status": "active",
+        "min_liquidity": 10000000000,
+        "notes": "Very deep stablecoin — 0.0% impact@$5K, $4999 returned",
+        "added": "2026-01-29",
+        "last_verified": "2026-01-30"
+      },
+      {
+        "address": "0x5f69c2ec01c22843f8273838d570243fd1963014",
+        "pair": "DAI/USDC",
+        "dex": "UniswapV3",
+        "fee_tier": 500,
+        "status": "active",
+        "min_liquidity": 1000000000,
+        "notes": "Very deep stablecoin — 0.0% impact@$5K, $4999 returned",
+        "added": "2026-01-29",
+        "last_verified": "2026-01-30"
+      },
+      {
+        "address": "0x5645dcb64c059aa11212707fbf4e7f984440a8cf",
+        "pair": "DAI/USDC",
+        "dex": "UniswapV3",
+        "fee_tier": 100,
+        "status": "active",
+        "min_liquidity": 10000000000,
+        "notes": "Very deep stablecoin — 0.0% impact@$5K, $4999 returned",
+        "added": "2026-01-29",
+        "last_verified": "2026-01-30"
+      },
+      {
+        "address": "0x94ab9e4553ffb839431e37cc79ba8905f45bfbea",
+        "pair": "LINK/USDC",
+        "dex": "UniswapV3",
+        "fee_tier": 3000,
+        "status": "monitoring",
+        "min_liquidity": 3000000000,
+        "notes": "Deep liquidity but SOLE pool — no cross-DEX counterpart, zero arb possible. Demoted to monitoring 2026-01-30. Re-activate when V2 or additional DEX pool added for LINK/USDC.",
+        "added": "2026-01-29",
+        "last_verified": "2026-01-30"
+      },
+      {
+        "address": "0x8cfaab34f5159abf9c35587ac40d09a05dc94765",
+        "pair": "USDT/USDC",
+        "dex": "SushiswapV3",
+        "fee_tier": 100,
+        "status": "active",
+        "min_liquidity": 10000000000,
+        "notes": "SushiV3 cross-DEX — 0.2% impact@$5K, $4991 returned. Deep stablecoin.",
+        "added": "2026-01-30",
+        "last_verified": "2026-01-30"
+      },
+      {
+        "address": "0x1b0585fc8195fc04a46a365e670024dfb63a960c",
+        "pair": "WETH/USDC",
+        "dex": "SushiswapV3",
+        "fee_tier": 3000,
+        "status": "active",
+        "min_liquidity": 3000000000,
+        "notes": "SushiV3 cross-DEX — 4.4% impact@$5K, $4781 returned. 2.09T liquidity.",
+        "added": "2026-01-30",
+        "last_verified": "2026-01-30"
+      },
+      {
+        "address": "0x55CAaBB0d2b704FD0eF8192A7E35D8837e678207",
+        "pair": "WETH/USDC",
+        "dex": "QuickswapV3",
+        "fee_tier": 0,
+        "status": "active",
+        "min_liquidity": 3000000000,
+        "notes": "QuickSwap V3 (Algebra) — 0.26% impact@$5K, score=100. Dynamic fee ~0.09%. Round-trip 0.14% with UniV3 0.05%.",
+        "added": "2026-01-30",
+        "last_verified": "2026-01-30"
+      },
+      {
+        "address": "0xAE81FAc689A1b4b1e06e7ef4a2ab4CD8aC0A087D",
+        "pair": "WMATIC/USDC",
+        "dex": "QuickswapV3",
+        "fee_tier": 0,
+        "status": "active",
+        "min_liquidity": 3000000000,
+        "notes": "QuickSwap V3 (Algebra) — 1.58% impact@$5K, score=100. Dynamic fee ~0.09%. Round-trip 0.14% with UniV3 0.05%.",
+        "added": "2026-01-30",
+        "last_verified": "2026-01-30"
+      },
+      {
+        "address": "0xA5CD8351Cbf30B531C7b11B0D9d3Ff38eA2E280f",
+        "pair": "WBTC/USDC",
+        "dex": "QuickswapV3",
+        "fee_tier": 0,
+        "status": "active",
+        "min_liquidity": 3000000000,
+        "notes": "QuickSwap V3 (Algebra) — 3.78% impact@$5K, score=90. Dynamic fee ~0.09%. Round-trip 0.14% with UniV3 0.05%.",
+        "added": "2026-01-30",
+        "last_verified": "2026-01-30"
+      },
+      {
+        "address": "0x7B925e617aefd7FB3a93Abe3a701135D7a1Ba710",
+        "pair": "USDT/USDC",
+        "dex": "QuickswapV3",
+        "fee_tier": 0,
+        "status": "active",
+        "min_liquidity": 1000000000,
+        "notes": "QuickSwap V3 (Algebra) — 0.02% impact@$5K, score=100. Dynamic fee ~0.001%. Round-trip 0.01% with UniV3 0.01%.",
+        "added": "2026-01-30",
+        "last_verified": "2026-01-30"
+      },
+      {
+        "address": "0xe7E0eB9F6bCcCfe847fDf62a3628319a092F11a2",
+        "pair": "DAI/USDC",
+        "dex": "QuickswapV3",
+        "fee_tier": 0,
+        "status": "active",
+        "min_liquidity": 1000000000,
+        "notes": "QuickSwap V3 (Algebra) — 0.02% impact@$5K, score=100. Dynamic fee ~0.001%. Round-trip 0.01% with UniV3 0.01%.",
+        "added": "2026-01-30",
+        "last_verified": "2026-01-30"
+      },
+      {
+        "address": "0x853ee4b2a13f8a742d64c8f088be7ba2131f670d",
+        "pair": "WETH/USDC",
+        "dex": "QuickSwapV2",
+        "fee_tier": 3000,
+        "status": "v2_ready",
+        "min_liquidity": 0,
+        "notes": "V2 constant-product. TVL=$2.59M, 0.43% impact@$5K, score=100. Best V2↔V3: 0.35% RT with UniV3 0.05%.",
+        "added": "2026-01-30",
+        "last_verified": "2026-01-30"
+      },
+      {
+        "address": "0x34965ba0ac2451a34a0471f04cca3f990b8dea27",
+        "pair": "WETH/USDC",
+        "dex": "SushiSwapV2",
+        "fee_tier": 3000,
+        "status": "v2_ready",
+        "min_liquidity": 0,
+        "notes": "V2 constant-product. TVL=$493K, 2.20% impact@$5K, score=90. Best V2↔V3: 0.35% RT with UniV3 0.05%.",
+        "added": "2026-01-30",
+        "last_verified": "2026-01-30"
+      },
+      {
+        "address": "0x6e7a5fafcec6bb1e78bae2a1f0b612012bf14827",
+        "pair": "WMATIC/USDC",
+        "dex": "QuickSwapV2",
+        "fee_tier": 3000,
+        "status": "v2_ready",
+        "min_liquidity": 0,
+        "notes": "V2 constant-product. TVL=$1.69M, 1.58% impact@$5K, score=100. Best V2↔V3: 0.35% RT with UniV3 0.05%.",
+        "added": "2026-01-30",
+        "last_verified": "2026-01-30"
+      },
+      {
+        "address": "0x2cf7252e74036d1da831d11089d326296e64a728",
+        "pair": "USDT/USDC",
+        "dex": "QuickSwapV2",
+        "fee_tier": 3000,
+        "status": "v2_ready",
+        "min_liquidity": 0,
+        "notes": "V2 constant-product. TVL=$628K, 1.56% impact@$5K, score=100. Best V2↔V3: 0.31% RT with UniV3 0.01%.",
+        "added": "2026-01-30",
+        "last_verified": "2026-01-30"
+      },
+      {
+        "address": "0x4b1f1e2435a9c96f7330faea190ef6a7c8d70001",
+        "pair": "USDT/USDC",
+        "dex": "SushiSwapV2",
+        "fee_tier": 3000,
+        "status": "v2_ready",
+        "min_liquidity": 0,
+        "notes": "V2 constant-product. TVL=$351K, 2.77% impact@$5K, score=90. Best V2↔V3: 0.31% RT with UniV3 0.01%.",
+        "added": "2026-01-30",
+        "last_verified": "2026-01-30"
+      },
+      {
+        "address": "0xf04adbf75cdfc5ed26eea4bbbb991db002036bdd",
+        "pair": "DAI/USDC",
+        "dex": "QuickSwapV2",
+        "fee_tier": 3000,
+        "status": "v2_ready",
+        "min_liquidity": 0,
+        "notes": "V2 constant-product. TVL=$301K, 3.21% impact@$5K, score=90. Best V2↔V3: 0.31% RT with UniV3 0.01%.",
+        "added": "2026-01-30",
+        "last_verified": "2026-01-30"
+      },
+      {
+        "address": "0xcd578f016888b57f1b1e3f887f392f0159e26747",
+        "pair": "DAI/USDC",
+        "dex": "SushiSwapV2",
+        "fee_tier": 3000,
+        "status": "v2_ready",
+        "min_liquidity": 0,
+        "notes": "V2 constant-product. TVL=$197K, 4.82% impact@$5K, score=90. Best V2↔V3: 0.31% RT with UniV3 0.01%.",
+        "added": "2026-01-30",
+        "last_verified": "2026-01-30"
+      }
+    ]
+  },
+  "blacklist": {
+    "pools": [
+      {
+        "address": "0x04537f43f6add7b1b60cab199c7a910024ee0594",
+        "pair": "WETH/USDC",
+        "dex": "UniswapV3",
+        "fee_tier": 100,
+        "category": "dead",
+        "reason": "Low liquidity (831B), near-zero executable depth. $31@$100, $41@$5K. Caused $3.35 loss on 2026-01-29.",
+        "impact_at_5k": "99.2%",
+        "date_added": "2026-01-29",
+        "discovered_by": "live_incident"
+      },
+      {
+        "address": "0x226d890ece7e75375589cceaf0c3b56436b61c60",
+        "pair": "UNI/USDC",
+        "dex": "UniswapV3",
+        "fee_tier": 500,
+        "category": "dead",
+        "reason": "Dead pool — $10 in returns $1.29 out. $1.33@$100, $1.33@$5K.",
+        "impact_at_5k": "100%",
+        "date_added": "2026-01-29",
+        "discovered_by": "depth_matrix"
+      },
+      {
+        "address": "0x257d365f7870742c87bb3a8a53a609979908799a",
+        "pair": "DAI/USDC",
+        "dex": "UniswapV3",
+        "fee_tier": 3000,
+        "category": "dead",
+        "reason": "Exhausted liquidity at current tick — maxes out at ~$44 regardless of input. $44@$100, $44@$5K.",
+        "impact_at_5k": "99.1%",
+        "date_added": "2026-01-29",
+        "discovered_by": "depth_matrix"
+      },
+      {
+        "address": "0xef69494eea0ecbfbbfa1cfd5386268a562bc875f",
+        "pair": "WETH/USDC",
+        "dex": "SushiswapV3",
+        "fee_tier": 100,
+        "category": "dead",
+        "reason": "SushiV3 — $40@$100, $41@$5K. Near-zero depth beyond $10.",
+        "impact_at_5k": "99.2%",
+        "date_added": "2026-01-30",
+        "discovered_by": "depth_matrix"
+      },
+      {
+        "address": "0xcafdbcaa114315e5508a1cc1275b4e5d88bc218c",
+        "pair": "WETH/USDC",
+        "dex": "SushiswapV3",
+        "fee_tier": 500,
+        "category": "dead",
+        "reason": "SushiV3 — $1.04@$100, $1.04@$5K. Dead pool, nearly zero liquidity at tick.",
+        "impact_at_5k": "100%",
+        "date_added": "2026-01-30",
+        "discovered_by": "depth_matrix"
+      },
+      {
+        "address": "0x0a6c4588b7d8bd22cf120283b1fff953420c45f3",
+        "pair": "WMATIC/USDC",
+        "dex": "UniswapV3",
+        "fee_tier": 100,
+        "category": "dead",
+        "reason": "0.01% non-stablecoin — $59@$100 (59% return), $268@$5K. Not viable even at small size.",
+        "impact_at_5k": "94.6%",
+        "date_added": "2026-01-30",
+        "discovered_by": "depth_matrix"
+      },
+      {
+        "address": "0x934f3f8749164111f0386ece4f4965a687e576d5",
+        "pair": "WMATIC/USDC",
+        "dex": "SushiswapV3",
+        "fee_tier": 100,
+        "category": "dead",
+        "reason": "SushiV3 — $20@$100, $20@$5K. Near-zero depth beyond $1.",
+        "impact_at_5k": "99.6%",
+        "date_added": "2026-01-30",
+        "discovered_by": "depth_matrix"
+      },
+      {
+        "address": "0xcccc583ad4fbeda6e999c66ce066d4f2e16b5cf5",
+        "pair": "WMATIC/USDC",
+        "dex": "SushiswapV3",
+        "fee_tier": 3000,
+        "category": "dead",
+        "reason": "SushiV3 — $15@$100, $16@$5K. Near-zero depth beyond $1.",
+        "impact_at_5k": "99.7%",
+        "date_added": "2026-01-30",
+        "discovered_by": "depth_matrix"
+      },
+      {
+        "address": "0x135a796632229424b10237f8f127898dbf6f793f",
+        "pair": "WBTC/USDC",
+        "dex": "SushiswapV3",
+        "fee_tier": 500,
+        "category": "dead",
+        "reason": "SushiV3 — all quotes FAIL. Zero liquidity at current tick.",
+        "impact_at_5k": "FAIL",
+        "date_added": "2026-01-30",
+        "discovered_by": "depth_matrix"
+      },
+      {
+        "address": "0xf88de8aaa065ecbf9a3c67f7a93b4c82595f6d6f",
+        "pair": "WBTC/USDC",
+        "dex": "SushiswapV3",
+        "fee_tier": 3000,
+        "category": "dead",
+        "reason": "SushiV3 — $2.67@$100, $2.67@$5K. Near-zero depth.",
+        "impact_at_5k": "99.9%",
+        "date_added": "2026-01-30",
+        "discovered_by": "depth_matrix"
+      },
+      {
+        "address": "0xa4f9403c28de0a64cc14a184e3d6d9c6f5fee289",
+        "pair": "USDT/USDC",
+        "dex": "SushiswapV3",
+        "fee_tier": 500,
+        "category": "dead",
+        "reason": "SushiV3 — all quotes FAIL. Zero liquidity at current tick.",
+        "impact_at_5k": "FAIL",
+        "date_added": "2026-01-30",
+        "discovered_by": "depth_matrix"
+      },
+      {
+        "address": "0xf106f85e7e37e0d1441f30ab0f43acfcebd0d7d2",
+        "pair": "USDT/USDC",
+        "dex": "SushiswapV3",
+        "fee_tier": 3000,
+        "category": "dead",
+        "reason": "SushiV3 — all quotes FAIL. Zero liquidity at current tick.",
+        "impact_at_5k": "FAIL",
+        "date_added": "2026-01-30",
+        "discovered_by": "depth_matrix"
+      },
+      {
+        "address": "0x74d3c85df4dbd03c7c12f7649faa6457610e7604",
+        "pair": "UNI/USDC",
+        "dex": "UniswapV3",
+        "fee_tier": 3000,
+        "category": "marginal",
+        "reason": "Marginal — $99@$100 (ok), $4071@$5K (18.6% impact). Works for small trades, dangerous at scale.",
+        "impact_at_5k": "18.6%",
+        "return_at_100": "$99.20",
+        "return_at_5k": "$4071",
+        "date_added": "2026-01-29",
+        "discovered_by": "depth_matrix"
+      },
+      {
+        "address": "0x22177148e681a6ca5242c9888ace170ee7ec47bd",
+        "pair": "LINK/USDC",
+        "dex": "UniswapV3",
+        "fee_tier": 500,
+        "category": "marginal",
+        "reason": "Marginal — $97@$100 (ok), $1344@$5K (73.1% impact). Works at $100, collapses at $1K+.",
+        "impact_at_5k": "73.1%",
+        "return_at_100": "$96.74",
+        "return_at_5k": "$1344",
+        "date_added": "2026-01-29",
+        "discovered_by": "depth_matrix"
+      },
+      {
+        "address": "0x88f3c15523544835ff6c738ddb30995339ad57d6",
+        "pair": "WMATIC/USDC",
+        "dex": "UniswapV3",
+        "fee_tier": 3000,
+        "category": "marginal",
+        "reason": "Marginal — $97@$100 (ok), $3236@$5K (35.3% impact). Works at $100, risky at $1K+.",
+        "impact_at_5k": "35.3%",
+        "return_at_100": "$96.85",
+        "return_at_5k": "$3236",
+        "date_added": "2026-01-29",
+        "discovered_by": "depth_matrix"
+      },
+      {
+        "address": "0x847b64f9d3a95e977d157866447a5c0a5dfa0ee5",
+        "pair": "WBTC/USDC",
+        "dex": "UniswapV3",
+        "fee_tier": 3000,
+        "category": "marginal",
+        "reason": "Marginal — $100@$100 (ok), $4674@$5K (6.5% impact). Best of the marginals, but not deep enough for strict whitelist.",
+        "impact_at_5k": "6.5%",
+        "return_at_100": "$99.73",
+        "return_at_5k": "$4674",
+        "date_added": "2026-01-29",
+        "discovered_by": "depth_matrix"
+      },
+      {
+        "address": "0x21988c9cfd08db3b5793c2c6782271dc94749251",
+        "pair": "WMATIC/USDC",
+        "dex": "SushiswapV3",
+        "fee_tier": 500,
+        "category": "marginal",
+        "reason": "SushiV3 marginal — $94@$100 (ok), $1317@$5K (73.6% impact). Works at $100, collapses at $1K+.",
+        "impact_at_5k": "73.6%",
+        "return_at_100": "$94.21",
+        "return_at_5k": "$1317",
+        "date_added": "2026-01-30",
+        "discovered_by": "depth_matrix"
+      },
+      {
+        "address": "0x4646e8a5e1d14e2da01577822d6346c7883c6890",
+        "pair": "DAI/USDC",
+        "dex": "SushiswapV3",
+        "fee_tier": 100,
+        "category": "marginal",
+        "reason": "SushiV3 marginal — $100@$100 (perfect), $1334@$5K (73.3% impact). Deep at $100-$1K, but collapses at $5K.",
+        "impact_at_5k": "73.3%",
+        "return_at_100": "$100",
+        "return_at_5k": "$1334",
+        "date_added": "2026-01-30",
+        "discovered_by": "depth_matrix"
+      },
+      {
+        "address": "0xEFdC563F99310A5Dd189eaaA91A1bf28034dA94C",
+        "pair": "LINK/USDC",
+        "dex": "QuickswapV3",
+        "fee_tier": 0,
+        "category": "dead",
+        "reason": "QuickSwap V3 (Algebra) — 98.18% impact@$5K, barely any liquidity. $10 returns 0.86 LINK. Dynamic fee ~0.20%.",
+        "impact_at_5k": "98.18%",
+        "date_added": "2026-01-30",
+        "discovered_by": "verify_quickswap_pools.py"
+      },
+      {
+        "address": "0xd02b870c556480491c70aaf98c297fddd93f6f5c",
+        "pair": "WBTC/USDC",
+        "dex": "SushiSwapV2",
+        "fee_tier": 3000,
+        "category": "dead",
+        "reason": "V2 dead pool — TVL=$508, 37% impact@$140, 95% impact@$5K. Reserves: 230 USDC + 0.003 WBTC.",
+        "impact_at_5k": "95.55%",
+        "date_added": "2026-01-30",
+        "discovered_by": "verify_v2_pools.py"
+      },
+      {
+        "address": "0x70cee55c98f6da2685807611f115ea737d4a248e",
+        "pair": "LINK/USDC",
+        "dex": "QuickSwapV2",
+        "fee_tier": 3000,
+        "category": "dead",
+        "reason": "V2 dead pool — TVL=$16, 60% impact@$10, 96% impact@$140. Reserves: $5 USDC + 0.45 LINK.",
+        "impact_at_5k": "99.88%",
+        "date_added": "2026-01-30",
+        "discovered_by": "verify_v2_pools.py"
+      },
+      {
+        "address": "0x8bc8e9f621ee8babda8dc0e6fc991aaf9bf8510b",
+        "pair": "LINK/USDC",
+        "dex": "SushiSwapV2",
+        "fee_tier": 3000,
+        "category": "dead",
+        "reason": "V2 dead pool — TVL=$136, 18% impact@$10, 77% impact@$140. Reserves: $41 USDC + 3.8 LINK.",
+        "impact_at_5k": "99.17%",
+        "date_added": "2026-01-30",
+        "discovered_by": "verify_v2_pools.py"
+      }
+    ],
+    "fee_tiers": [
+      {
+        "tier": 10000,
+        "reason": "Systematic phantom liquidity across all 1% pools on Polygon. 100% Quoter rejection rate.",
+        "applies_to": "all_v3",
+        "date_added": "2026-01-28",
+        "evidence": "phantom_spread_analysis.md"
+      }
+    ],
+    "pairs": []
+  },
+  "observation": {
+    "comment": "Pools under observation — marginal V2 pools usable at $140 trade size but degrade at $5K. Re-evaluate when trade size scales beyond $500.",
+    "pools": [
+      {
+        "address": "0xcd353f79d9fade311fc3119b841e1f456b54e858",
+        "pair": "WMATIC/USDC",
+        "dex": "SushiSwapV2",
+        "fee_tier": 3000,
+        "status": "v2_observation",
+        "notes": "V2 marginal — TVL=$255K, 0.30% impact@$140 (OK), 9.66% impact@$5K (too high). Usable at $140 trade size.",
+        "added": "2026-01-30",
+        "last_verified": "2026-01-30",
+        "concern": "High impact at $5K. Promote to v2_ready when trade size capped at $500 or less."
+      },
+      {
+        "address": "0xf6a637525402643b0654a54bead2cb9a83c8b498",
+        "pair": "WBTC/USDC",
+        "dex": "QuickSwapV2",
+        "fee_tier": 3000,
+        "status": "v2_observation",
+        "notes": "V2 marginal — TVL=$184K, 0.14% impact@$140 (OK), 5.58% impact@$5K (high). Usable at $140 trade size.",
+        "added": "2026-01-30",
+        "last_verified": "2026-01-30",
+        "concern": "Only V2 pool for WBTC/USDC. Moderate impact at $1K (1.15%). Consider including for diversity."
+      }
+    ]
+  }
+}

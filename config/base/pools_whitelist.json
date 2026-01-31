@@ -1,0 +1,108 @@
+{
+  "version": "1.0",
+  "last_updated": "2026-01-31T00:00:00Z",
+  "changelog": "v1.0: Initial Base whitelist — V3 only (Uniswap V3 + SushiSwap V3). WETH/USDC pools discovered via cast call on Base mainnet. 4 active, 2 observation, 2 blacklisted. No QuickSwap/Algebra on Base.",
+  "config": {
+    "default_min_liquidity": 1000000000000,
+    "whitelist_enforcement": "strict",
+    "liquidity_thresholds": {
+      "v3_100": 10000000000000,
+      "v3_500": 5000000000000,
+      "v3_3000": 3000000000000,
+      "v3_10000": 0
+    }
+  },
+  "whitelist": {
+    "pools": [
+      {
+        "address": "0xd0b53D9277642d899DF5C87A3966A349A798F224",
+        "pair": "WETH/USDC",
+        "dex": "UniswapV3",
+        "fee_tier": 500,
+        "status": "active",
+        "min_liquidity": 5000000000000,
+        "notes": "Deepest 0.05% tier on Base. Liquidity 1.241e18.",
+        "added": "2026-01-31"
+      },
+      {
+        "address": "0x6c561B446416E1A00E8E93E221854d6eA4171372",
+        "pair": "WETH/USDC",
+        "dex": "UniswapV3",
+        "fee_tier": 3000,
+        "status": "active",
+        "min_liquidity": 3000000000000,
+        "notes": "Deepest overall WETH/USDC on Base. Liquidity 6.942e18.",
+        "added": "2026-01-31"
+      },
+      {
+        "address": "0xb4CB800910B228ED3d0834cF79D697127BBB00e5",
+        "pair": "WETH/USDC",
+        "dex": "UniswapV3",
+        "fee_tier": 100,
+        "status": "active",
+        "min_liquidity": 10000000000000,
+        "notes": "0.01% tier, decent liquidity 4.818e16. Cross-fee-tier arb with 0.05%/0.30%.",
+        "added": "2026-01-31"
+      },
+      {
+        "address": "0x57713F7716e0b0F65ec116912F834E49805480d2",
+        "pair": "WETH/USDC",
+        "dex": "SushiswapV3",
+        "fee_tier": 500,
+        "status": "active",
+        "min_liquidity": 5000000000000,
+        "notes": "SushiSwap V3 cross-DEX with UniV3 0.05%. Liquidity 1.096e16.",
+        "added": "2026-01-31"
+      }
+    ]
+  },
+  "observation": {
+    "pools": [
+      {
+        "address": "0x0b1C2DCbBfA744ebD3fC17fF1A96A1E1Eb4B2d69",
+        "pair": "WETH/USDC",
+        "dex": "UniswapV3",
+        "fee_tier": 10000,
+        "status": "observation",
+        "notes": "1% fee tier — low liquidity 6.867e15. Monitor for growth.",
+        "added": "2026-01-31"
+      },
+      {
+        "address": "0x41595326AaBe6132FC6C7aE71Af087A3A9DBC9F6",
+        "pair": "WETH/USDC",
+        "dex": "SushiswapV3",
+        "fee_tier": 3000,
+        "status": "observation",
+        "notes": "SushiSwap V3 0.30% — thin liquidity 7.626e14. Monitor.",
+        "added": "2026-01-31"
+      }
+    ]
+  },
+  "blacklist": {
+    "pools": [
+      {
+        "address": "0x482Fe995c4a52bc79271aB29A53591363Ee30a89",
+        "pair": "WETH/USDC",
+        "dex": "SushiswapV3",
+        "fee_tier": 100,
+        "reason": "Tiny liquidity: 3.008e13. Quote would revert at trade size.",
+        "added": "2026-01-31"
+      },
+      {
+        "address": "0x6fa08690355261b5360b2302bbF78f63e2B014f5",
+        "pair": "WETH/USDC",
+        "dex": "SushiswapV3",
+        "fee_tier": 10000,
+        "reason": "Dead pool: liquidity 1.869e12.",
+        "added": "2026-01-31"
+      }
+    ],
+    "fee_tiers": [
+      {
+        "tier": 10000,
+        "reason": "1% fee tier — too expensive for arb. Round-trip 2% minimum."
+      }
+    ],
+    "pairs": []
+  }
+}

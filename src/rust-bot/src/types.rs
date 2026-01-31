@@ -445,6 +445,19 @@ pub struct BotConfig {
     pub rpc_url: String,
     pub chain_id: u64,
 
+    // Chain identification (multi-chain support)
+    // "polygon", "base", etc. Used for log messages and data path defaults.
+    pub chain_name: String,
+
+    // Quote token address (USDC or equivalent per chain)
+    // Polygon: USDC.e (0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174)
+    // Base: native USDC (0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913)
+    pub quote_token_address: Address,
+
+    // Estimated gas cost per trade in USD (chain-specific)
+    // Polygon: ~$0.05, Base: ~$0.02
+    pub estimated_gas_cost_usd: f64,
+
     // Wallet
     pub private_key: String,
 
@@ -479,6 +492,13 @@ pub struct BotConfig {
     pub quickswap_v3_router: Option<Address>,
     pub quickswap_v3_quoter: Option<Address>,
 
+    // Uniswap V3 Quoter version flag (multi-chain compatibility)
+    // Polygon deploys QuoterV1 (flat params), Base deploys QuoterV2 (struct params).
+    // When true, Uniswap V3 quoter calls use QuoterV2 ABI in both
+    // multicall_quoter.rs (batch pre-screen) and executor.rs (per-leg safety check).
+    // Default: false (QuoterV1 — Polygon backwards compat)
+    pub uniswap_v3_quoter_is_v2: bool,
+
     // Trading pairs to monitor
     pub pairs: Vec<TradingPairConfig>,
 
@@ -510,6 +530,12 @@ pub struct BotConfig {
     // When set, the bot executes both swap legs in a single atomic transaction
     // via the deployed ArbExecutor.sol contract. Reverts on loss.
     pub arb_executor_address: Option<Address>,
+
+    // Skip Multicall3 batch Quoter pre-screen (default false)
+    // When true, detected opportunities bypass batch_verify() and go straight
+    // to the executor (which still has its own Quoter + eth_estimateGas checks).
+    // Saves ~12ms per scan cycle by eliminating redundant on-chain verification.
+    pub skip_multicall_prescreen: bool,
 }
 
 #[cfg(test)]

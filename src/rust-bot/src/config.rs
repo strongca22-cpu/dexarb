@@ -6,6 +6,7 @@
 //! - load_config_from_file(): loads from a specific env file (live bot uses .env.live)
 //!
 //! Modified: 2026-01-29 - Added load_config_from_file() for live/dev config separation
+//! Modified: 2026-01-31 - Multi-chain: chain_name, quote_token_address, estimated_gas_cost_usd
 
 use crate::types::TradingPairConfig;
 use anyhow::{Context, Result};
@@ -88,9 +89,27 @@ fn load_config_inner() -> Result<BotConfig> {
         .ok()
         .and_then(|s| Address::from_str(&s).ok());
 
+    // Multi-chain fields with backwards-compatible defaults (Polygon)
+    let chain_name = std::env::var("CHAIN_NAME")
+        .unwrap_or_else(|_| "polygon".to_string());
+
+    // Default: Polygon USDC.e (0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174)
+    let quote_token_address = std::env::var("QUOTE_TOKEN_ADDRESS")
+        .ok()
+        .and_then(|s| Address::from_str(&s).ok())
+        .unwrap_or_else(|| Address::from_str("0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174").unwrap());
+
+    let estimated_gas_cost_usd: f64 = std::env::var("ESTIMATED_GAS_COST_USD")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0.05);
+
     Ok(BotConfig {
         rpc_url: std::env::var("RPC_URL")?,
         chain_id: std::env::var("CHAIN_ID")?.parse()?,
+        chain_name,
+        quote_token_address,
+        estimated_gas_cost_usd,
         private_key: std::env::var("PRIVATE_KEY")?,
 
         min_profit_usd: std::env::var("MIN_PROFIT_USD")?.parse()?,
@@ -116,6 +135,11 @@ fn load_config_inner() -> Result<BotConfig> {
         quickswap_v3_factory,
         quickswap_v3_router,
         quickswap_v3_quoter,
+
+        // Base uses QuoterV2 for Uniswap V3; Polygon uses QuoterV1
+        uniswap_v3_quoter_is_v2: std::env::var("UNISWAP_V3_QUOTER_IS_V2")
+            .map(|v| v.to_lowercase() == "true")
+            .unwrap_or(false),
 
         pairs,
 
@@ -153,5 +177,10 @@ fn load_config_inner() -> Result<BotConfig> {
         arb_executor_address: std::env::var("ARB_EXECUTOR_ADDRESS")
             .ok()
             .and_then(|s| Address::from_str(&s).ok()),
+
+        // Skip Multicall3 batch pre-screen (default false — existing behavior preserved)
+        skip_multicall_prescreen: std::env::var("SKIP_MULTICALL_PRESCREEN")
+            .map(|v| v.to_lowercase() == "true")
+            .unwrap_or(false),
     })
 }

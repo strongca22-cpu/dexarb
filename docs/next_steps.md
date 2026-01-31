@@ -1,11 +1,11 @@
 # Next Steps - DEX Arbitrage Bot
 
-## Status: LIVE — Atomic V2↔V3 + V3↔V3, 23 Pools, WS Block Sub
+## Status: LIVE Polygon + Base Phase 2 (data collection prep)
 
 **Date:** 2026-01-31
-**Pools:** 23 active (16 V3 + 7 V2), 1 V3 monitoring, 2 V2 observation
-**Execution:** Atomic via `ArbExecutorV3` (`0x7761f012a0EFa05eac3e717f93ad39cC4e2474F7`) — V3↔V3, V2↔V3, V2↔V2
-**Build:** 51/51 Rust tests, 10/10 Solidity fork tests, clean release build
+**Polygon:** 23 active pools (16 V3 + 7 V2), atomic via `ArbExecutorV3` (`0x7761...`), WS block sub
+**Base:** 4 active V3 pools discovered, `.env.base` + whitelist created, QuoterV2 fix merged — BLOCKED on wallet funding + Alchemy key
+**Build:** 51/51 Rust tests, clean release build
 **Mode:** WS block subscription (~2s Polygon blocks), 3 tmux sessions (livebot, botstatus, botwatch)
 **Steady state:** DAI/USDC V2→V3 0.14% spread detected every block — correctly filtered by quoter (below 0.31% RT fee). Waiting for transient volatility spikes.
 
@@ -62,6 +62,8 @@ Detector (reserve/tick prices) → min_profit gate ($0.10)
 | **V2↔V3 atomic execution** | **01-31** | **V2 syncer, V2 DexType, atomic_fee(), ArbExecutorV3 deployed** |
 | **Profit reporting fix** | **01-31** | **Quote token decimals instead of wei_to_usd()** |
 | **Discord log fix** | **01-31** | **Dynamic log file resolution (newest livebot*.log)** |
+| **Multi-chain Phase 1** | **01-31** | **`--chain` CLI, config-based quote token + gas cost, chain-aware dirs** |
+| **Multi-chain Phase 2 (partial)** | **01-31** | **Base pool discovery, QuoterV2 fix, `.env.base`, whitelist, verify script multi-chain** |
 
 ---
 
@@ -97,6 +99,22 @@ Detector (reserve/tick prices) → min_profit gate ($0.10)
 **V2 Observation (2):** SushiSwapV2 WMATIC/USDC ($255K), QuickSwapV2 WBTC/USDC ($184K).
 **Blacklisted:** 22 V3 pools (dead/marginal), 3 V2 dead, 1% fee tier banned.
 
+### Base Whitelist (v1.0 — WETH/USDC only)
+
+**Active (4):**
+
+| DEX | Pair | Fee | Liquidity | Pool |
+|-----|------|-----|-----------|------|
+| UniswapV3 | WETH/USDC | 0.05% | 1.241e18 | `0xd0b53D92...` |
+| UniswapV3 | WETH/USDC | 0.30% | 6.942e18 | `0x6c561B44...` |
+| UniswapV3 | WETH/USDC | 0.01% | 4.818e16 | `0xb4CB8009...` |
+| SushiswapV3 | WETH/USDC | 0.05% | 1.096e16 | `0x57713F77...` |
+
+**Observation (2):** UniV3 1.00% (`0x0b1C2DCb...`), SushiV3 0.30% (`0x41595326...`).
+**Blacklisted (2):** SushiV3 0.01% (dust liq), SushiV3 1.00% (dust liq). 1% fee tier banned.
+
+**Key discovery:** Uniswap V3 on Base uses **QuoterV2** (struct params), not QuoterV1 (flat params). Added `UNISWAP_V3_QUOTER_IS_V2=true` config flag — routes both multicall pre-screener and executor safety check to V2 ABI.
+
 ---
 
 ## Contracts
@@ -111,12 +129,22 @@ Detector (reserve/tick prices) → min_profit gate ($0.10)
 
 ## Roadmap — Priority Order
 
+### Tier 0: Multi-Chain (ACTIVE)
+
+**P0: Multi-Chain Architecture — Base Integration**
+- Architecture doc revised with codebase-grounded plan: `docs/MULTI_CHAIN_ARCHITECTURE.md` v2.0
+- **Phase 1 — DONE:** `clap` + `--chain` flag, `QUOTE_TOKEN_ADDRESS` + `ESTIMATED_GAS_COST_USD` in `.env`, chain-aware data paths, `.env.polygon`, `config/polygon/`, `data/polygon/`
+- **Phase 2 — IN PROGRESS:** Pool discovery done (4 active, 2 observation, 2 blacklisted). `.env.base` created. QuoterV2 fix merged (types.rs, config.rs, multicall_quoter.rs, executor.rs). `verify_whitelist.py --chain base` working. **BLOCKED:** wallet has 0 ETH on Base (need funding for ArbExecutor deploy + gas), need Alchemy WS key for Base.
+- **Phase 3 — Parallel operation:** Base data collection (dry run 48h+), analyze spreads, go live if viable
+- **Phase 4 — DONE:** `config/{arbitrum,optimism}/.gitkeep`, `data/{arbitrum,optimism}/.gitkeep`
+- Polygon stays live throughout. Base starts in data-collection mode.
+
 ### Tier 1: Data-Driven (collect before acting)
 
-**P1: Collect Price History Data (1-3 days)**
-- Bot is running, logging all spreads. Let data accumulate.
+**P1: Collect Price History Data (ongoing)**
+- Polygon bot running, logging all spreads. Let data accumulate.
 - Analyze: when do transient spikes occur? Which pairs? Time-of-day patterns?
-- Informs all decisions below (trade size, pairs, thresholds).
+- Base data collection starts after P0 Phase 2.
 
 **P2: Increase Trade Size ($140 → $500)**
 - $500 at 0.33% net spread = $1.65 vs $0.46 at $140
@@ -150,8 +178,9 @@ Detector (reserve/tick prices) → min_profit gate ($0.10)
 - Profit = gross - gas (no capital at risk)
 - Adds ~100k gas overhead
 
-**P8: Additional Chains**
-- Arbitrum, Base, Optimism — same architecture, different RPCs
+**P8: Additional Chains (Arbitrum, Optimism)**
+- Placeholder dirs created in P0 Phase 4
+- Same pattern as Base: .env.{chain}, whitelist, deploy executor, data collect, go live
 
 ---
 
@@ -184,8 +213,11 @@ Real opportunities are **transient** — large swaps, liquidations, or volatilit
 # Build
 source ~/.cargo/env && cd ~/bots/dexarb/src/rust-bot && cargo build --release
 
-# Start live bot
-tmux new-session -d -s livebot "cd ~/bots/dexarb/src/rust-bot && RUST_LOG=dexarb_bot=info,warn cargo run --release --bin dexarb-bot -- --env .env.live 2>&1 | tee ~/bots/dexarb/data/logs/livebot_$(date +%Y%m%d_%H%M%S).log"
+# Start Polygon live bot (--chain polygon loads .env.polygon)
+tmux new-session -d -s dexarb-polygon "cd ~/bots/dexarb/src/rust-bot && ./target/release/dexarb-bot --chain polygon 2>&1 | tee ~/bots/dexarb/data/polygon/logs/livebot_$(date +%Y%m%d_%H%M%S).log"
+
+# Start Base bot (Phase 2 — after .env.base + whitelist + executor deployed)
+# tmux new-session -d -s dexarb-base "cd ~/bots/dexarb/src/rust-bot && ./target/release/dexarb-bot --chain base 2>&1 | tee ~/bots/dexarb/data/base/logs/livebot_$(date +%Y%m%d_%H%M%S).log"
 
 # Bot watch (kills on first trade)
 tmux new-session -d -s botwatch "bash ~/bots/dexarb/scripts/bot_watch.sh"
@@ -207,9 +239,14 @@ tmux new-session -d -s botstatus "bash ~/bots/dexarb/scripts/bot_status_discord.
 | `src/pool/v2_syncer.rs` | V2 reserve sync (getReserves) |
 | `src/types.rs` | DexType, V2_FEE_SENTINEL, atomic_fee() |
 | `contracts/src/ArbExecutor.sol` | Atomic arb V3 (V2+Algebra+V3 routing) |
-| `.env.live` | Live config (ARB_EXECUTOR_ADDRESS, LIVE_MODE=true) |
-| `config/pools_whitelist.json` | v1.4: 23 active + 22 blacklisted |
+| `.env.polygon` | Polygon live config (replaces .env.live, loaded via --chain polygon) |
+| `.env.live` | Legacy config (kept for backwards compat, identical to .env.polygon) |
+| `config/polygon/pools_whitelist.json` | v1.4: 23 active + 22 blacklisted (chain-specific path) |
+| `config/base/pools_whitelist.json` | v1.0: 4 active, 2 observation, 2 blacklisted (WETH/USDC) |
+| `.env.base` | Base config (QuoterV2, USDC native, placeholder Alchemy key) |
+| `scripts/verify_whitelist.py` | Multi-chain pool verifier (`--chain polygon` / `--chain base`) |
+| `docs/MULTI_CHAIN_ARCHITECTURE.md` | Multi-chain plan v2.0 (codebase-grounded) |
 
 ---
 
-*Last updated: 2026-01-31 session 5 — V2↔V3 atomic execution deployed and live. ArbExecutorV3 at 0x7761...4F7. Profit reporting fixed (quote token decimals). Bot running: 23 pools (16 V3 + 7 V2), WS block sub, steady-state spreads filtered correctly. Next: collect data, analyze spread patterns, then scale trade size.*
+*Last updated: 2026-01-31 session 8 — Phase 2 multi-chain (partial): Base pool discovery (4 active WETH/USDC pools on UniV3+SushiV3), QuoterV2 fix (types.rs, config.rs, multicall_quoter.rs, executor.rs), `.env.base` created, `config/base/pools_whitelist.json` v1.0, `verify_whitelist.py --chain` multi-chain support. 51/51 tests pass. BLOCKED: wallet has 0 ETH on Base (need funding), need Alchemy WS key for Base. Polygon live bot unchanged and running.*

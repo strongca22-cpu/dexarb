@@ -12,26 +12,16 @@
 //! Modified: 2026-01-29 - Added V3 pool support
 //! Modified: 2026-01-29 - V3-only: drop V2 from scan, exclude 1% fee tier
 //! Modified: 2026-01-29 - Phase 1.1: whitelist/blacklist filtering
+//! Modified: 2026-01-31 - Multi-chain: quote token + gas cost from config instead of constants
 
 use crate::filters::WhitelistFilter;
 use crate::pool::{PoolStateManager, PriceCalculator};
 use crate::types::{ArbitrageOpportunity, BotConfig, DexType, PoolState, TradingPair};
 use ethers::types::{Address, U256};
-use std::str::FromStr;
 use tracing::{debug, info, warn};
-
-/// USDC.e (bridged) on Polygon — the quote token for all trading pairs.
-/// Used to determine swap direction: if USDC is V3 token0 vs token1.
-const USDC_ADDRESS: &str = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
 
 /// Minimum spread percentage to consider (covers fees)
 const MIN_SPREAD_PERCENT: f64 = 0.3;
-
-/// Estimated gas cost in USD for two V3 swaps on Polygon
-/// Polygon gas: ~30-100 gwei, V3 swap ~200k gas, two swaps ~400k gas
-/// At 100 gwei: 400k * 100 * 1e-9 MATIC * $0.50/MATIC = ~$0.02
-/// Conservative: $0.05 to cover gas spikes
-const ESTIMATED_GAS_COST_USD: f64 = 0.05;
 
 /// V2 DEX fee percentage (Quickswap, Sushiswap, Apeswap)
 const V2_FEE_PERCENT: f64 = 0.30;
@@ -217,11 +207,11 @@ impl OpportunityDetector {
         let mut results: Vec<ArbitrageOpportunity> = Vec::new();
 
         // Determine if the quote token (USDC) is V3 token0 or token1.
-        // V3 sorts tokens by address; USDC.e = 0x2791...
+        // V3 sorts tokens by address. Quote token address comes from config
+        // (Polygon: USDC.e 0x2791..., Base: native USDC 0x8335...).
         // This controls buy/sell assignment and swap direction.
-        let usdc_addr = Address::from_str(USDC_ADDRESS).unwrap_or_default();
         let quote_is_token0 = unified_pools.first()
-            .map(|p| p.pair.token0 == usdc_addr)
+            .map(|p| p.pair.token0 == self.config.quote_token_address)
             .unwrap_or(true);
 
         for i in 0..unified_pools.len() {
@@ -277,7 +267,7 @@ impl OpportunityDetector {
                 // Estimate profit
                 let gross = executable_spread * self.config.max_trade_size_usd;
                 let slippage_estimate = gross * 0.01;  // 1% slippage estimate (V3 concentrated liquidity has <0.01% at $140-500)
-                let net_profit = gross - ESTIMATED_GAS_COST_USD - slippage_estimate;
+                let net_profit = gross - self.config.estimated_gas_cost_usd - slippage_estimate;
 
                 if net_profit < self.config.min_profit_usd {
                     continue;
@@ -373,8 +363,8 @@ impl OpportunityDetector {
         let (trade_size, profit_usd) =
             self.calculate_profit(&buy_pool, &sell_pool, pair_symbol)?;
 
-        // Net profit after gas
-        let net_profit_usd = profit_usd - ESTIMATED_GAS_COST_USD;
+        // Net profit after gas (chain-specific gas cost from config)
+        let net_profit_usd = profit_usd - self.config.estimated_gas_cost_usd;
 
         // Filter by minimum profit threshold
         if net_profit_usd < self.config.min_profit_usd {
@@ -556,9 +546,13 @@ mod tests {
     }
 
     fn create_test_config() -> BotConfig {
+        use std::str::FromStr;
         BotConfig {
             rpc_url: String::new(),
             chain_id: 137,
+            chain_name: "polygon".to_string(),
+            quote_token_address: Address::from_str("0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174").unwrap(),
+            estimated_gas_cost_usd: 0.05,
             private_key: String::new(),
             min_profit_usd: 5.0,
             max_trade_size_usd: 500.0,
@@ -578,6 +572,7 @@ mod tests {
             quickswap_v3_factory: None,
             quickswap_v3_router: None,
             quickswap_v3_quoter: None,
+            uniswap_v3_quoter_is_v2: false,
             pairs: vec![],
             poll_interval_ms: 1000,
             max_gas_price_gwei: 100,

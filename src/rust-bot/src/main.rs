@@ -25,8 +25,10 @@
 //! Modified: 2026-01-30 - QuickSwap V3 (Algebra): tri-quoter, Algebra sync, fee=0 sentinel
 //! Modified: 2026-01-30 - WS block subscription: subscribe_blocks() replaces 3s polling
 //! Modified: 2026-01-30 - V2↔V3 cross-protocol: V2PoolSyncer, decimal-adjusted pricing
+//! Modified: 2026-01-31 - Multi-chain: --chain CLI arg, chain-aware .env + data paths
 
 use anyhow::Result;
+use clap::Parser;
 use dexarb_bot::arbitrage::{MulticallQuoter, OpportunityDetector, TradeExecutor, VerifiedOpportunity};
 use dexarb_bot::config::load_config_from_file;
 use dexarb_bot::filters::WhitelistFilter;
@@ -39,6 +41,15 @@ use std::sync::Arc;
 use tracing::{error, info, warn, Level};
 use tracing_subscriber;
 
+/// DEX Arbitrage Bot — Multi-Chain (Polygon, Base)
+#[derive(Parser)]
+#[command(name = "dexarb-bot")]
+struct Args {
+    /// Chain to run on (polygon, base)
+    #[arg(short, long, env = "CHAIN", default_value = "polygon")]
+    chain: String,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Initialize logging
@@ -47,19 +58,32 @@ async fn main() -> Result<()> {
         .with_target(false)
         .init();
 
-    info!("Phase 1 DEX Arbitrage Bot Starting (monolithic, V3+V2 cross-protocol arb)...");
+    // Parse CLI args (--chain polygon|base, or CHAIN env var)
+    let args = Args::parse();
+    let chain = args.chain.to_lowercase();
 
-    // Load configuration from .env.live (separate from dev/paper .env)
-    let config = load_config_from_file(".env.live")?;
-    info!("Configuration loaded from .env.live");
+    // Validate chain
+    match chain.as_str() {
+        "polygon" | "base" => {},
+        _ => anyhow::bail!("Unsupported chain: '{}'. Supported: polygon, base", chain),
+    }
+
+    info!("DEX Arbitrage Bot Starting — chain: {} (V3+V2 cross-protocol arb)...", chain);
+
+    // Load chain-specific .env file (e.g., .env.polygon, .env.base)
+    let env_file = format!(".env.{}", chain);
+    let config = load_config_from_file(&env_file)?;
+    info!("Configuration loaded from {} (chain_id: {})", env_file, config.chain_id);
     info!("RPC URL: {}", &config.rpc_url[..40.min(config.rpc_url.len())]);
+    info!("Quote token: {:?}", config.quote_token_address);
+    info!("Gas cost estimate: ${:.3}", config.estimated_gas_cost_usd);
     info!("Trading pairs: {}", config.pairs.len());
     info!("Poll interval: {}ms", config.poll_interval_ms);
 
     // Initialize providers (two WS connections to avoid subscription contention)
     // Provider 1: RPC calls (sync, Quoter, execution)
     // Provider 2: Block subscription only (dedicated reader for newHeads)
-    info!("Connecting to Polygon via WebSocket (RPC + subscription)...");
+    info!("Connecting to {} via WebSocket (RPC + subscription)...", config.chain_name);
     let provider = Provider::<Ws>::connect(&config.rpc_url).await?;
     let provider = Arc::new(provider);
     let sub_provider = Provider::<Ws>::connect(&config.rpc_url).await?;
@@ -68,9 +92,10 @@ async fn main() -> Result<()> {
     let block = provider.get_block_number().await?;
     info!("Connected! Current block: {} (2 WS connections)", block);
 
-    // Load whitelist
+    // Load whitelist (chain-specific default: config/{chain}/pools_whitelist.json)
+    let default_whitelist = format!("/home/botuser/bots/dexarb/config/{}/pools_whitelist.json", config.chain_name);
     let whitelist_path = config.whitelist_file.as_deref()
-        .unwrap_or("/home/botuser/bots/dexarb/config/pools_whitelist.json");
+        .unwrap_or(&default_whitelist);
     let whitelist = WhitelistFilter::load(whitelist_path)?;
     info!("Whitelist loaded: {} active pools from {}", whitelist.active_pool_count(), whitelist_path);
 
@@ -270,7 +295,7 @@ async fn main() -> Result<()> {
     // Enable tax logging for IRS compliance
     if config.tax_log_enabled {
         let tax_dir = config.tax_log_dir.clone()
-            .unwrap_or_else(|| "/home/botuser/bots/dexarb/data/tax".to_string());
+            .unwrap_or_else(|| format!("/home/botuser/bots/dexarb/data/{}/tax", config.chain_name));
         match executor.enable_tax_logging(&tax_dir) {
             Ok(_) => info!("Tax logging enabled: {}", tax_dir),
             Err(e) => warn!("Failed to enable tax logging: {} - trades will NOT be logged for taxes!", e),
@@ -282,7 +307,7 @@ async fn main() -> Result<()> {
     // Initialize historical price logger (research)
     let mut price_logger: Option<PriceLogger> = if config.price_log_enabled {
         let log_dir = config.price_log_dir.clone()
-            .unwrap_or_else(|| "/home/botuser/bots/dexarb/data/price_history".to_string());
+            .unwrap_or_else(|| format!("/home/botuser/bots/dexarb/data/{}/price_history", config.chain_name));
         info!("Price logging enabled: {}", log_dir);
         Some(PriceLogger::new(&log_dir))
     } else {
@@ -295,6 +320,13 @@ async fn main() -> Result<()> {
         info!("⚡ Atomic executor ENABLED: {:?}", addr);
     } else {
         info!("Atomic executor disabled (legacy two-tx mode)");
+    }
+
+    // Log multicall pre-screen status
+    if config.skip_multicall_prescreen {
+        info!("Multicall pre-screen DISABLED — opportunities go direct to executor");
+    } else {
+        info!("Multicall pre-screen enabled (batch Quoter verification)");
     }
 
     info!("Bot initialized successfully (monolithic mode)");
@@ -379,44 +411,68 @@ async fn main() -> Result<()> {
                     );
                 }
 
-                // Multicall3 batch pre-screen: verify all opportunities in 1 RPC call
-                let verified = match multicall_quoter.batch_verify(&opportunities, &config).await {
-                    Ok(v) => v,
-                    Err(e) => {
-                        warn!("Multicall batch verify failed: {} — falling back to unfiltered", e);
-                        // Fallback: pass all opps through (executor's own Quoter checks still apply)
-                        opportunities.iter().enumerate()
-                            .map(|(i, _)| VerifiedOpportunity::passthrough(i))
-                            .collect()
+                // Build execution order: either multicall-verified or estimated-profit-sorted
+                // Vec of (original_index, optional quoted_profit_raw for logging)
+                let execution_order: Vec<(usize, Option<i128>)> = if config.skip_multicall_prescreen {
+                    // Direct path: skip batch_verify(), sort by estimated_profit descending
+                    // Executor's own Quoter + eth_estimateGas still protects capital.
+                    let mut indices: Vec<usize> = (0..opportunities.len()).collect();
+                    indices.sort_by(|a, b| {
+                        opportunities[*b].estimated_profit
+                            .partial_cmp(&opportunities[*a].estimated_profit)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                    info!(
+                        "Multicall pre-screen SKIPPED — {} opportunities sorted by est. profit, direct to executor",
+                        indices.len()
+                    );
+                    indices.into_iter().map(|i| (i, None)).collect()
+                } else {
+                    // Multicall3 batch pre-screen: verify all opportunities in 1 RPC call
+                    let verified = match multicall_quoter.batch_verify(&opportunities, &config).await {
+                        Ok(v) => v,
+                        Err(e) => {
+                            warn!("Multicall batch verify failed: {} — falling back to unfiltered", e);
+                            // Fallback: pass all opps through (executor's own Quoter checks still apply)
+                            opportunities.iter().enumerate()
+                                .map(|(i, _)| VerifiedOpportunity::passthrough(i))
+                                .collect()
+                        }
+                    };
+
+                    // Filter to verified-only AND quoted-profitable, rank by quoted profit
+                    let mut ranked: Vec<&VerifiedOpportunity> = verified.iter()
+                        .filter(|v| v.both_legs_valid && v.quoted_profit_raw > 0)
+                        .collect();
+                    ranked.sort_by(|a, b| b.quoted_profit_raw.cmp(&a.quoted_profit_raw));
+
+                    let filtered_count = opportunities.len() - ranked.len();
+                    if filtered_count > 0 {
+                        info!(
+                            "Multicall pre-screen: {}/{} verified, {} filtered out",
+                            ranked.len(), opportunities.len(), filtered_count
+                        );
                     }
+
+                    ranked.into_iter().map(|v| (v.original_index, Some(v.quoted_profit_raw))).collect()
                 };
 
-                // Filter to verified-only AND quoted-profitable, rank by quoted profit
-                let mut ranked: Vec<&VerifiedOpportunity> = verified.iter()
-                    .filter(|v| v.both_legs_valid && v.quoted_profit_raw > 0)
-                    .collect();
-                ranked.sort_by(|a, b| b.quoted_profit_raw.cmp(&a.quoted_profit_raw));
-
-                let filtered_count = opportunities.len() - ranked.len();
-                if filtered_count > 0 {
-                    info!(
-                        "Multicall pre-screen: {}/{} verified, {} filtered out",
-                        ranked.len(), opportunities.len(), filtered_count
-                    );
-                }
-
-                // Try verified opportunities (best quoted profit first, fall through on Quoter rejections)
-                for (rank, verified_opp) in ranked.iter().enumerate() {
-                    let opp = &opportunities[verified_opp.original_index];
-                    info!(
-                        "TRY #{}: {} - Buy {:?} Sell {:?} - ${:.2} (quoted_profit_raw={})",
-                        rank + 1,
-                        opp.pair.symbol,
-                        opp.buy_dex,
-                        opp.sell_dex,
-                        opp.estimated_profit,
-                        verified_opp.quoted_profit_raw
-                    );
+                // Try opportunities in ranked order (best first, fall through on Quoter rejections)
+                for (rank, (idx, quoted_profit)) in execution_order.iter().enumerate() {
+                    let opp = &opportunities[*idx];
+                    if let Some(qp) = quoted_profit {
+                        info!(
+                            "TRY #{}: {} - Buy {:?} Sell {:?} - ${:.2} (quoted_profit_raw={})",
+                            rank + 1, opp.pair.symbol, opp.buy_dex, opp.sell_dex,
+                            opp.estimated_profit, qp
+                        );
+                    } else {
+                        info!(
+                            "TRY #{}: {} - Buy {:?} Sell {:?} - ${:.2} (est, direct to executor)",
+                            rank + 1, opp.pair.symbol, opp.buy_dex, opp.sell_dex,
+                            opp.estimated_profit
+                        );
+                    }
 
                     match executor.execute(opp).await {
                         Ok(result) => {

@@ -1,0 +1,37 @@
+Summary: Two Upcoming Bot Improvements
+1. Remove Multicall Pre-Screen
+What it does: Eliminates the batch on-chain quote verification step between the detector and executor. Opportunities go straight from detection to eth_estimateGas simulation.
+
+Why: The multicall adds ~12ms latency per scan cycle and is redundant — the executor doesn't use any of its output data. The atomic contract + eth_estimateGas already provide the same protection for free.
+
+Risk: Essentially zero. Capital protected by atomic contract revert. Failed gas simulations are free. Failed on-chain txs cost ~$0.0001 on Polygon. Historical evidence: 6 trade attempts across all sessions, all caught by eth_estimateGas (free), 0 reached the chain.
+
+Changes (4 files):
+
+types.rs — Add skip_multicall_prescreen: bool to BotConfig
+config.rs — Load SKIP_MULTICALL_PRESCREEN from env (default false)
+main.rs (~line 408) — When flag is set, skip batch_verify(), sort opportunities by estimated_profit descending, pass directly to executor
+.env.live — Add SKIP_MULTICALL_PRESCREEN=true
+Latency improvement: ~12ms saved per cycle (72ms → 60ms pipeline, ~17% faster to chain).
+
+Rollback: Set SKIP_MULTICALL_PRESCREEN=false — all existing multicall code stays intact.
+
+2. Private Mempool (Polygon Fastlane)
+What it does: Submits transactions through a private relay instead of the public mempool. Transactions are not visible to other MEV bots or searchers until they're included in a block.
+
+Why: Prevents frontrunning and sandwich attacks on your arb transactions. No-downside improvement — no added latency, no added cost, strictly better than public submission.
+
+Risk: Near zero. If the private relay is down, can fall back to public mempool. Polygon Fastlane is free to use.
+
+Changes (2 files):
+
+executor.rs — Replace provider.send_transaction() with Fastlane RPC submission. The change is at the tx submission point (after eth_estimateGas passes). Instead of sending to the standard RPC, send to the Fastlane endpoint (e.g., https://polygon-rpc.fastlane.xyz)
+config.rs / .env.live — Add PRIVATE_RPC_URL config for the Fastlane endpoint, separate from the read-only RPC used for pool syncing
+Implementation approach: Simplest path is a second provider instance pointed at the Fastlane RPC, used only for send_raw_transaction. All reads (pool sync, estimateGas) stay on the existing Alchemy WS connection.
+
+Rollback: Point PRIVATE_RPC_URL back to the standard RPC.
+
+Implementation order
+Multicall bypass first — directly addresses the observed failure mode (opportunities dying during verification), small code change, config-toggleable
+Private mempool second — protects txs once they start reaching the chain, independent change, also config-toggleable
+Both changes are additive and non-destructive — existing code stays in place, toggled by env vars.
