@@ -23,6 +23,11 @@ impl TradingPair {
     }
 }
 
+/// Fee sentinel for V2 routers in ArbExecutor.sol.
+/// type(uint24).max = 16777215. Signals swapExactTokensForTokens instead of V3 exactInputSingle.
+/// fee=0 → Algebra (QuickSwap V3), fee=1..65535 → standard V3, fee=16777215 → V2.
+pub const V2_FEE_SENTINEL: u32 = 16_777_215;
+
 /// DEX types we support
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum DexType {
@@ -38,6 +43,8 @@ pub enum DexType {
     SushiV3_005,   // SushiSwap V3 0.05% fee tier (cross-DEX arb)
     SushiV3_030,   // SushiSwap V3 0.30% fee tier (cross-DEX arb)
     QuickswapV3,   // QuickSwap V3 (Algebra) — dynamic fees, single pool per pair
+    QuickSwapV2,   // QuickSwap V2 (constant product, 0.30% fee) — V2↔V3 cross-protocol arb
+    SushiSwapV2,   // SushiSwap V2 (constant product, 0.30% fee) — V2↔V3 cross-protocol arb
 }
 
 impl DexType {
@@ -48,6 +55,26 @@ impl DexType {
             DexType::SushiV3_001 | DexType::SushiV3_005 | DexType::SushiV3_030 |
             DexType::QuickswapV3
         )
+    }
+
+    /// Returns true if this is a V2 DEX (constant product AMM, 0.30% fee)
+    pub fn is_v2(&self) -> bool {
+        matches!(self,
+            DexType::Uniswap | DexType::Sushiswap | DexType::Quickswap | DexType::Apeswap |
+            DexType::QuickSwapV2 | DexType::SushiSwapV2
+        )
+    }
+
+    /// Returns the fee percentage for any DEX type.
+    /// V2: always 0.30%. V3: from fee tier. Algebra: dynamic (returns None).
+    pub fn fee_percent(&self) -> Option<f64> {
+        if self.is_v2() {
+            Some(0.30)
+        } else if self.is_quickswap_v3() {
+            None // Dynamic fee — read from pool state
+        } else {
+            self.v3_fee_bps().map(|bps| bps as f64 / 100.0)
+        }
     }
 
     /// Returns true if this is a QuickSwap V3 (Algebra) DEX
@@ -75,6 +102,7 @@ impl DexType {
 
     /// Get V3 fee tier (for factory queries and router calls)
     /// QuickswapV3 returns Some(0) — sentinel value meaning "Algebra, no fee param"
+    /// Returns None for V2 dex types — use atomic_fee() for ArbExecutor routing.
     pub fn v3_fee_tier(&self) -> Option<u32> {
         match self {
             DexType::UniswapV3_001 | DexType::SushiV3_001 => Some(100),
@@ -83,6 +111,19 @@ impl DexType {
             DexType::UniswapV3_100 => Some(10000),
             DexType::QuickswapV3 => Some(0), // Sentinel: Algebra has no fixed fee tier
             _ => None,
+        }
+    }
+
+    /// Fee value for ArbExecutor.sol atomic execution.
+    /// Routes each leg to the correct on-chain swap path:
+    ///   V2 → V2_FEE_SENTINEL (type(uint24).max = 16777215) → swapExactTokensForTokens
+    ///   Algebra → 0 → Algebra exactInputSingle (no fee param)
+    ///   V3 → actual fee tier (100, 500, 3000, 10000) → standard exactInputSingle
+    pub fn atomic_fee(&self) -> u32 {
+        if self.is_v2() {
+            V2_FEE_SENTINEL
+        } else {
+            self.v3_fee_tier().unwrap_or(0)
         }
     }
 }
@@ -102,11 +143,13 @@ impl fmt::Display for DexType {
             DexType::SushiV3_005 => write!(f, "SushiV3_0.05%"),
             DexType::SushiV3_030 => write!(f, "SushiV3_0.30%"),
             DexType::QuickswapV3 => write!(f, "QuickswapV3"),
+            DexType::QuickSwapV2 => write!(f, "QuickSwapV2"),
+            DexType::SushiSwapV2 => write!(f, "SushiSwapV2"),
         }
     }
 }
 
-/// DEX pool state
+/// DEX pool state (V2 constant-product AMM)
 #[derive(Debug, Clone)]
 pub struct PoolState {
     pub address: Address,
@@ -115,10 +158,16 @@ pub struct PoolState {
     pub reserve0: U256,
     pub reserve1: U256,
     pub last_updated: u64, // block number
+    /// Token0 decimals (required for cross-protocol V2↔V3 price comparison)
+    pub token0_decimals: u8,
+    /// Token1 decimals (required for cross-protocol V2↔V3 price comparison)
+    pub token1_decimals: u8,
 }
 
 impl PoolState {
-    /// Calculate price of token0 in terms of token1
+    /// Calculate raw price of token0 in terms of token1 (NO decimal adjustment).
+    /// WARNING: This is the raw reserve ratio. For cross-protocol comparison
+    /// with V3 prices, use `price_adjusted()` instead.
     pub fn price(&self) -> f64 {
         let reserve0_f = self.reserve0.low_u128() as f64;
         let reserve1_f = self.reserve1.low_u128() as f64;
@@ -130,13 +179,45 @@ impl PoolState {
         reserve1_f / reserve0_f
     }
 
+    /// Calculate decimal-adjusted price: token1 per token0 in human-readable units.
+    /// This produces the SAME format as V3PoolState::price() (tick-based),
+    /// allowing direct comparison between V2 and V3 pool prices.
+    ///
+    /// Formula: (reserve1 / reserve0) * 10^(decimals0 - decimals1)
+    ///
+    /// Example: USDC(6)/WETH(18) pool with 100 USDC and 0.042 WETH:
+    ///   raw reserves: 100_000_000 / 42_000_000_000_000_000
+    ///   raw ratio: 4.2e8
+    ///   * 10^(6-18) = * 10^(-12)
+    ///   = 0.00042 WETH per USDC ✓ (matches V3 tick-based price)
+    pub fn price_adjusted(&self) -> f64 {
+        let reserve0_f = self.reserve0.low_u128() as f64;
+        let reserve1_f = self.reserve1.low_u128() as f64;
+
+        if reserve0_f == 0.0 {
+            return 0.0;
+        }
+
+        let raw_ratio = reserve1_f / reserve0_f;
+        let decimal_adjustment =
+            10_f64.powi(self.token0_decimals as i32 - self.token1_decimals as i32);
+
+        raw_ratio * decimal_adjustment
+    }
+
     /// Calculate output amount for given input (constant product formula)
+    /// amountOut = (amountIn * 997 * reserveOut) / (reserveIn * 1000 + amountIn * 997)
+    /// The 997/1000 factor is the 0.3% V2 swap fee.
     pub fn get_amount_out(&self, amount_in: U256, token_in: Address) -> U256 {
         let (reserve_in, reserve_out) = if token_in == self.pair.token0 {
             (self.reserve0, self.reserve1)
         } else {
             (self.reserve1, self.reserve0)
         };
+
+        if reserve_in.is_zero() || reserve_out.is_zero() {
+            return U256::zero();
+        }
 
         // x * y = k formula with 0.3% fee
         let amount_in_with_fee = amount_in * U256::from(997);
@@ -429,4 +510,45 @@ pub struct BotConfig {
     // When set, the bot executes both swap legs in a single atomic transaction
     // via the deployed ArbExecutor.sol contract. Reverts on loss.
     pub arb_executor_address: Option<Address>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_v2_fee_sentinel() {
+        assert_eq!(V2_FEE_SENTINEL, 16_777_215);
+        assert_eq!(V2_FEE_SENTINEL, (1u32 << 24) - 1); // type(uint24).max
+    }
+
+    #[test]
+    fn test_atomic_fee_v2() {
+        assert_eq!(DexType::QuickSwapV2.atomic_fee(), V2_FEE_SENTINEL);
+        assert_eq!(DexType::SushiSwapV2.atomic_fee(), V2_FEE_SENTINEL);
+        assert_eq!(DexType::Uniswap.atomic_fee(), V2_FEE_SENTINEL);
+        assert_eq!(DexType::Sushiswap.atomic_fee(), V2_FEE_SENTINEL);
+    }
+
+    #[test]
+    fn test_atomic_fee_v3() {
+        assert_eq!(DexType::UniswapV3_001.atomic_fee(), 100);
+        assert_eq!(DexType::UniswapV3_005.atomic_fee(), 500);
+        assert_eq!(DexType::UniswapV3_030.atomic_fee(), 3000);
+        assert_eq!(DexType::UniswapV3_100.atomic_fee(), 10000);
+        assert_eq!(DexType::SushiV3_001.atomic_fee(), 100);
+        assert_eq!(DexType::SushiV3_005.atomic_fee(), 500);
+        assert_eq!(DexType::SushiV3_030.atomic_fee(), 3000);
+        assert_eq!(DexType::QuickswapV3.atomic_fee(), 0); // Algebra sentinel
+    }
+
+    #[test]
+    fn test_v3_fee_tier_unchanged() {
+        // Verify v3_fee_tier() still returns None for V2 types (legacy path compatibility)
+        assert_eq!(DexType::QuickSwapV2.v3_fee_tier(), None);
+        assert_eq!(DexType::SushiSwapV2.v3_fee_tier(), None);
+        // And correct values for V3 types
+        assert_eq!(DexType::UniswapV3_005.v3_fee_tier(), Some(500));
+        assert_eq!(DexType::QuickswapV3.v3_fee_tier(), Some(0));
+    }
 }

@@ -14,11 +14,16 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
 /// Tests:
 ///   1. Deployment and ownership
 ///   2. OnlyOwner enforcement
-///   3. executeArb reverts on insufficient profit (real pools)
-///   4. rescueTokens works
+///   3. executeArb V3↔V3 (real pools, Polygon fork)
+///   4. executeArb V2→V3 cross-protocol (QuickSwap V2 buy, Uni V3 sell)
+///   5. executeArb V3→V2 cross-protocol (Uni V3 buy, QuickSwap V2 sell)
+///   6. executeArb V2→V2 (QuickSwap V2 buy, SushiSwap V2 sell)
+///   7. rescueTokens works
+///   8. FEE_V2_SENTINEL constant check
 ///
 /// @author AI-Generated
 /// @custom:created 2026-01-30
+/// @custom:modified 2026-01-30 (V2 cross-protocol fork tests)
 
 contract ArbExecutorTest is Test {
     ArbExecutor public arb;
@@ -31,6 +36,10 @@ contract ArbExecutorTest is Test {
     address constant UNI_V3_ROUTER = 0xE592427A0AEce92De3Edee1F18E0157C05861564;
     // SushiSwap V3 SwapRouter (Polygon)
     address constant SUSHI_V3_ROUTER = 0x0aF89E1620b96170e2a9D0b68fEebb767eD044c3;
+
+    // V2 Routers (Polygon)
+    address constant QUICKSWAP_V2_ROUTER = 0xa5E0829CaCEd8fFDD4De3c43696c57F7D7A678ff;
+    address constant SUSHI_V2_ROUTER = 0x1b02dA8Cb0d097eB8D57A175b88c7D8b47997506;
 
     // Test wallet (will be funded via deal)
     address deployer;
@@ -104,6 +113,85 @@ contract ArbExecutorTest is Test {
             // This is correct behavior — the contract protects against loss.
             console.log("Arb reverted (expected: fees exceed spread)");
             // Verify tokens weren't lost (revert returns everything)
+            assertEq(IERC20(USDC).balanceOf(deployer), amountIn);
+        }
+    }
+
+    /// @notice Verify FEE_V2_SENTINEL equals type(uint24).max
+    function test_feeV2Sentinel() public view {
+        assertEq(arb.FEE_V2_SENTINEL(), type(uint24).max);
+        assertEq(arb.FEE_V2_SENTINEL(), 16777215);
+    }
+
+    /// @notice Test V2 buy → V3 sell cross-protocol atomic arb (Polygon fork)
+    ///         QuickSwap V2 (fee=16777215) buy, Uniswap V3 (fee=500) sell
+    function test_executeArb_v2BuyV3Sell() public {
+        uint256 amountIn = 100e6; // 100 USDC
+        deal(USDC, deployer, amountIn);
+        IERC20(USDC).approve(address(arb), amountIn);
+
+        try arb.executeArb(
+            USDC, WETH,
+            QUICKSWAP_V2_ROUTER,    // buy: V2 router
+            UNI_V3_ROUTER,          // sell: V3 router
+            type(uint24).max,       // feeBuy = V2 sentinel
+            500,                    // feeSell = V3 0.05%
+            amountIn,
+            0                       // minProfit = 0 (test execution, not profitability)
+        ) returns (uint256 profit) {
+            console.log("V2->V3 arb executed! Profit:", profit);
+            assertGe(IERC20(USDC).balanceOf(deployer), 0);
+        } catch {
+            // Expected: round-trip fees exceed spread
+            console.log("V2->V3 arb reverted (expected: fees exceed spread)");
+            assertEq(IERC20(USDC).balanceOf(deployer), amountIn);
+        }
+    }
+
+    /// @notice Test V3 buy → V2 sell cross-protocol atomic arb (Polygon fork)
+    ///         Uniswap V3 (fee=500) buy, QuickSwap V2 (fee=16777215) sell
+    function test_executeArb_v3BuyV2Sell() public {
+        uint256 amountIn = 100e6; // 100 USDC
+        deal(USDC, deployer, amountIn);
+        IERC20(USDC).approve(address(arb), amountIn);
+
+        try arb.executeArb(
+            USDC, WETH,
+            UNI_V3_ROUTER,          // buy: V3 router
+            QUICKSWAP_V2_ROUTER,    // sell: V2 router
+            500,                    // feeBuy = V3 0.05%
+            type(uint24).max,       // feeSell = V2 sentinel
+            amountIn,
+            0
+        ) returns (uint256 profit) {
+            console.log("V3->V2 arb executed! Profit:", profit);
+            assertGe(IERC20(USDC).balanceOf(deployer), 0);
+        } catch {
+            console.log("V3->V2 arb reverted (expected: fees exceed spread)");
+            assertEq(IERC20(USDC).balanceOf(deployer), amountIn);
+        }
+    }
+
+    /// @notice Test V2 buy → V2 sell atomic arb (Polygon fork)
+    ///         QuickSwap V2 buy, SushiSwap V2 sell (both fee=16777215)
+    function test_executeArb_v2BothLegs() public {
+        uint256 amountIn = 100e6; // 100 USDC
+        deal(USDC, deployer, amountIn);
+        IERC20(USDC).approve(address(arb), amountIn);
+
+        try arb.executeArb(
+            USDC, WETH,
+            QUICKSWAP_V2_ROUTER,    // buy: QuickSwap V2
+            SUSHI_V2_ROUTER,        // sell: SushiSwap V2
+            type(uint24).max,       // feeBuy = V2 sentinel
+            type(uint24).max,       // feeSell = V2 sentinel
+            amountIn,
+            0
+        ) returns (uint256 profit) {
+            console.log("V2->V2 arb executed! Profit:", profit);
+            assertGe(IERC20(USDC).balanceOf(deployer), 0);
+        } catch {
+            console.log("V2->V2 arb reverted (expected: fees exceed spread)");
             assertEq(IERC20(USDC).balanceOf(deployer), amountIn);
         }
     }

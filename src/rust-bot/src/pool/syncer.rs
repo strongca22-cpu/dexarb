@@ -197,15 +197,16 @@ impl<P: Middleware + 'static> PoolSyncer<P> {
             reserve0: U256::from(reserve0),
             reserve1: U256::from(reserve1),
             last_updated: current_block,
+            token0_decimals: 18, // Legacy V2 syncer — decimals not fetched
+            token1_decimals: 18,
         })
     }
 
     /// Get pool address from factory contract (V2 pools only)
     async fn get_pool_address(&self, dex: DexType, pair: &TradingPair) -> Result<Address> {
         let factory_address = match dex {
-            DexType::Uniswap => self.config.uniswap_factory,
-            DexType::Sushiswap => self.config.sushiswap_factory,
-            DexType::Quickswap => self.config.uniswap_factory, // Quickswap == Uniswap slot on Polygon
+            DexType::Uniswap | DexType::Quickswap | DexType::QuickSwapV2 => self.config.uniswap_factory,
+            DexType::Sushiswap | DexType::SushiSwapV2 => self.config.sushiswap_factory,
             DexType::Apeswap => {
                 self.config.apeswap_factory
                     .ok_or_else(|| anyhow::anyhow!("ApeSwap factory not configured"))?
@@ -284,6 +285,8 @@ impl<P: Middleware + 'static> PoolSyncer<P> {
             reserve0: U256::from(reserve0),
             reserve1: U256::from(reserve1),
             last_updated: current_block,
+            token0_decimals: 18, // Legacy V2 syncer — decimals not fetched
+            token1_decimals: 18,
         };
 
         self.state_manager.update_pool(pool_state.clone());

@@ -122,7 +122,7 @@ impl OpportunityDetector {
     ///
     /// Execute flow: token0 → token1 on buy_pool, then token1 → token0 on sell_pool.
     fn check_pair_unified(&self, pair_symbol: &str) -> Vec<ArbitrageOpportunity> {
-        // Collect V3 pools only (V2 excluded - price format incompatible)
+        // Collect ALL pools (V3 + V2) into unified format for cross-protocol comparison
         let mut unified_pools: Vec<UnifiedPool> = Vec::new();
 
         // Add V3 pools with whitelist + liquidity filtering (Phase 1.1)
@@ -162,6 +162,49 @@ impl OpportunityDetector {
                 token0_decimals: pool.token0_decimals,
                 token1_decimals: pool.token1_decimals,
                 liquidity: pool.liquidity,
+            });
+        }
+
+        // Add V2 pools (V2↔V3 cross-protocol arbitrage).
+        // V2 price uses decimal-adjusted reserves → same format as V3 tick-based price.
+        // V2 fee is always 0.30% (hardcoded in constant-product formula).
+        for pool in self.state_manager.get_pools_for_pair(pair_symbol) {
+            // Only include new V2 DEX types (QuickSwapV2, SushiSwapV2)
+            // Legacy Uniswap/Sushiswap/Quickswap/Apeswap variants are not V2↔V3 aware
+            if !matches!(pool.dex, DexType::QuickSwapV2 | DexType::SushiSwapV2) {
+                continue;
+            }
+
+            // Whitelist check (V2 pools use fee_tier=3000 in whitelist JSON)
+            if !self.whitelist.is_pool_allowed(&pool.address, 3000, pair_symbol) {
+                continue;
+            }
+
+            // Decimal-adjusted price — same format as V3 tick-based price.
+            // CRITICAL: Uses price_adjusted(), NOT price() (raw ratio without decimals).
+            // This is what makes V2↔V3 cross-protocol comparison correct.
+            let price = pool.price_adjusted();
+            if price <= 0.0 || price >= 1e15 {
+                continue; // Sanity check
+            }
+
+            // V2 "liquidity" proxy: smaller raw reserve value.
+            // V2 pools are pre-verified by verify_v2_pools.py (whitelist v2_ready),
+            // so this is a rough floor check only.
+            let liquidity = std::cmp::min(
+                pool.reserve0.low_u128(),
+                pool.reserve1.low_u128(),
+            );
+
+            unified_pools.push(UnifiedPool {
+                dex: pool.dex,
+                price,
+                fee_percent: V2_FEE_PERCENT, // 0.30 = 0.30% (same format as V3: 500bps → 0.05)
+                address: pool.address,
+                pair: pool.pair.clone(),
+                token0_decimals: pool.token0_decimals,
+                token1_decimals: pool.token1_decimals,
+                liquidity,
             });
         }
 
@@ -507,6 +550,8 @@ mod tests {
             reserve0: U256::from(reserve0),
             reserve1: U256::from(reserve1),
             last_updated: 100,
+            token0_decimals: 18,
+            token1_decimals: 18,
         }
     }
 

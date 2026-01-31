@@ -169,9 +169,23 @@ impl<M: Middleware + 'static> MulticallQuoter<M> {
 
         // Build all sub-calls: 2 per opportunity (buy leg + sell leg)
         // Each sub-call is (target_address, encoded_calldata)
+        // V2 legs are passed through — V2 output is deterministic from reserves,
+        // so on-chain quoter verification is unnecessary. Only V3 legs need quoter.
         let mut sub_calls: Vec<(Address, Vec<u8>)> = Vec::with_capacity(opportunities.len() * 2);
 
-        for opp in opportunities {
+        // Track which opportunities are V3-only vs have V2 legs
+        // V2 opportunities get passthrough results (executor handles its own validation)
+        let mut v2_passthrough_indices: Vec<usize> = Vec::new();
+
+        for (idx, opp) in opportunities.iter().enumerate() {
+            // V2 legs: passthrough — V2 output is deterministic from reserves (x*y=k).
+            // No on-chain quoter needed. The executor's own min_out slippage check
+            // protects V2 legs during execution.
+            if opp.buy_dex.is_v2() || opp.sell_dex.is_v2() {
+                v2_passthrough_indices.push(idx);
+                continue;
+            }
+
             let buy_fee = opp
                 .buy_dex
                 .v3_fee_tier()
@@ -218,11 +232,21 @@ impl<M: Middleware + 'static> MulticallQuoter<M> {
         }
 
         let num_subcalls = sub_calls.len();
+        let v2_count = v2_passthrough_indices.len();
         debug!(
-            "Multicall batch: {} opportunities → {} sub-calls",
+            "Multicall batch: {} opportunities → {} V3 sub-calls + {} V2 passthroughs",
             opportunities.len(),
-            num_subcalls
+            num_subcalls,
+            v2_count
         );
+
+        // If ALL opportunities have V2 legs, skip multicall entirely
+        if sub_calls.is_empty() {
+            debug!("All {} opportunities have V2 legs — returning passthroughs", opportunities.len());
+            return Ok(opportunities.iter().enumerate()
+                .map(|(i, _)| VerifiedOpportunity::passthrough(i))
+                .collect());
+        }
 
         // Build Multicall3 aggregate3 calldata
         let calldata = Self::build_aggregate3_calldata(&sub_calls);
@@ -250,12 +274,28 @@ impl<M: Middleware + 'static> MulticallQuoter<M> {
             ));
         }
 
-        // Process results in pairs (buy, sell) for each opportunity
+        // Process results: merge V3 decoded results with V2 passthroughs.
+        // V2-passthrough indices were skipped during sub-call encoding,
+        // so we track a separate running index into the multicall results.
         let mut verified = Vec::with_capacity(opportunities.len());
+        let v2_set: std::collections::HashSet<usize> = v2_passthrough_indices.iter().copied().collect();
+        let mut v3_result_idx: usize = 0; // Running index into multicall result pairs
 
         for (i, opp) in opportunities.iter().enumerate() {
-            let buy_idx = i * 2;
-            let sell_idx = i * 2 + 1;
+            if v2_set.contains(&i) {
+                // V2 leg: passthrough — executor validates via min_out slippage check
+                debug!(
+                    "Multicall passthrough [{}]: {} — V2 leg ({:?}/{:?})",
+                    i, opp.pair.symbol, opp.buy_dex, opp.sell_dex
+                );
+                verified.push(VerifiedOpportunity::passthrough(i));
+                continue;
+            }
+
+            // V3-only: decode from multicall results
+            let buy_idx = v3_result_idx * 2;
+            let sell_idx = v3_result_idx * 2 + 1;
+            v3_result_idx += 1;
 
             let (buy_success, ref buy_data) = results[buy_idx];
             let (sell_success, ref sell_data) = results[sell_idx];

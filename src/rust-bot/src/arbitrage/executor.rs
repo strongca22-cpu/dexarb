@@ -9,7 +9,9 @@
 //! Execution modes:
 //!   - Atomic (preferred): Single tx via ArbExecutor.sol contract. Both swaps
 //!     execute atomically — reverts on loss. Zero leg risk.
-//!     fee=0 sentinel signals Algebra router interface (no fee in swap params).
+//!     Supports V3↔V3, V2↔V3, and V2↔V2 via fee sentinel routing:
+//!       fee=0 → Algebra (QuickSwap V3), fee=1..65535 → standard V3,
+//!       fee=16777215 (type(uint24).max) → V2 swapExactTokensForTokens.
 //!   - Legacy two-tx: Separate buy + sell transactions (has leg risk).
 //!     Used as fallback if ARB_EXECUTOR_ADDRESS is not configured.
 //!
@@ -185,8 +187,9 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
             return self.simulate_execution(opportunity, start_time).await;
         }
 
-        // Route to atomic execution if ArbExecutor contract is configured
-        if self.config.arb_executor_address.is_some() && opportunity.buy_dex.is_v3() && opportunity.sell_dex.is_v3() {
+        // Route to atomic execution if ArbExecutor contract is configured.
+        // Supports V3↔V3, V2↔V3, and V2↔V2 — all via fee sentinel routing in the contract.
+        if self.config.arb_executor_address.is_some() {
             return self.execute_atomic(opportunity, start_time).await;
         }
 
@@ -418,9 +421,14 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
         let pair_symbol = &opportunity.pair.symbol;
         let arb_address = self.config.arb_executor_address.unwrap();
 
+        let mode = if opportunity.buy_dex.is_v2() || opportunity.sell_dex.is_v2() {
+            "V2↔V3"
+        } else {
+            "V3↔V3"
+        };
         info!(
-            "⚡ ATOMIC execution: {} | Buy {:?} → Sell {:?} via ArbExecutor {:?}",
-            pair_symbol, opportunity.buy_dex, opportunity.sell_dex, arb_address
+            "⚡ ATOMIC {} execution: {} | Buy {:?} → Sell {:?} via ArbExecutor {:?}",
+            mode, pair_symbol, opportunity.buy_dex, opportunity.sell_dex, arb_address
         );
 
         // Gas cap removed: on Polygon, gas costs fractions of a penny even at
@@ -438,13 +446,12 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
         };
         let trade_size = opportunity.trade_size;
 
-        // Get router addresses and fee tiers
+        // Get router addresses and fee sentinels.
+        // atomic_fee() returns: V2 → 16777215 (V2 sentinel), Algebra → 0, V3 → fee tier
         let router_buy = self.get_router_address(opportunity.buy_dex);
         let router_sell = self.get_router_address(opportunity.sell_dex);
-        let fee_buy = opportunity.buy_dex.v3_fee_tier()
-            .ok_or_else(|| anyhow!("Buy DEX {:?} is not V3", opportunity.buy_dex))?;
-        let fee_sell = opportunity.sell_dex.v3_fee_tier()
-            .ok_or_else(|| anyhow!("Sell DEX {:?} is not V3", opportunity.sell_dex))?;
+        let fee_buy = opportunity.buy_dex.atomic_fee();
+        let fee_sell = opportunity.sell_dex.atomic_fee();
 
         // minProfit in token0 raw units
         // Convert min_profit_usd to token0 units (USDC = 6 dec, 1 USDC = 1e6)
@@ -553,7 +560,14 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
             }
         }
 
-        let profit_usd = self.wei_to_usd(profit_raw, pair_symbol);
+        // profit_raw is in token0 (quote token = USDC) raw units.
+        // Use actual quote token decimals instead of wei_to_usd() which assumes 18-dec WETH.
+        let quote_decimals = if opportunity.quote_token_is_token0 {
+            opportunity.token0_decimals
+        } else {
+            opportunity.token1_decimals
+        };
+        let profit_usd = profit_raw.low_u128() as f64 / 10_f64.powi(quote_decimals as i32);
         // Actual gas from receipt
         let gas_used = receipt.gas_used.unwrap_or(U256::from(400_000u64));
         let effective_gas_price = receipt.effective_gas_price.unwrap_or(gas_price);
@@ -1005,8 +1019,9 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
     /// Get router address for a DEX
     fn get_router_address(&self, dex: DexType) -> Address {
         match dex {
-            DexType::Uniswap | DexType::Quickswap => self.config.uniswap_router,
-            DexType::Sushiswap => self.config.sushiswap_router,
+            // V2 DEX types — QuickSwapV2 uses same router as legacy Quickswap/Uniswap on Polygon
+            DexType::Uniswap | DexType::Quickswap | DexType::QuickSwapV2 => self.config.uniswap_router,
+            DexType::Sushiswap | DexType::SushiSwapV2 => self.config.sushiswap_router,
             DexType::Apeswap => self.config.apeswap_router.unwrap_or(self.config.uniswap_router),
             // Uniswap V3 DEX types
             DexType::UniswapV3_001 | DexType::UniswapV3_005 | DexType::UniswapV3_030 | DexType::UniswapV3_100 => {

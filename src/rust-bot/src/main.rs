@@ -1,13 +1,16 @@
-//! Phase 1 DEX Arbitrage Bot (V3-only, monolithic architecture)
+//! Phase 1 DEX Arbitrage Bot (V3 + V2↔V3 cross-protocol, monolithic architecture)
 //!
 //! Main entry point for the arbitrage bot.
-//! Syncs V3 pool state directly via RPC, detects cross-fee-tier and cross-DEX
-//! arbitrage opportunities, and executes via Quoter+swap — all in one process.
+//! Syncs V3 and V2 pool state directly via RPC, detects cross-fee-tier,
+//! cross-DEX, and V2↔V3 cross-protocol arbitrage opportunities,
+//! and executes via Quoter+swap — all in one process.
 //!
 //! Architecture:
-//! - Loads whitelist at startup, initial sync via sync_pool_by_address()
-//! - Supports Uniswap V3 + SushiSwap V3 pools (cross-DEX arb)
-//! - Main loop: WS subscribe_blocks() → sync_known_pools_parallel() → detect → execute
+//! - Loads whitelist at startup: "active" → V3, "v2_ready" → V2
+//! - V3: Uniswap V3 + SushiSwap V3 + QuickSwap V3 (Algebra)
+//! - V2: QuickSwap V2 + SushiSwap V2 (constant product, 0.30% fee)
+//! - Main loop: WS subscribe_blocks() → sync V3+V2 parallel → detect → execute
+//! - V2↔V3 opportunities use legacy two-tx execution (ArbExecutor is V3-only)
 //! - ~100ms block notification (vs 3s polling), auto-reconnect on WS drop
 //! - Data collector preserved separately for paper trading / research
 //!
@@ -21,15 +24,15 @@
 //! Modified: 2026-01-30 - Historical price logging + gas estimate fix ($0.50→$0.05)
 //! Modified: 2026-01-30 - QuickSwap V3 (Algebra): tri-quoter, Algebra sync, fee=0 sentinel
 //! Modified: 2026-01-30 - WS block subscription: subscribe_blocks() replaces 3s polling
+//! Modified: 2026-01-30 - V2↔V3 cross-protocol: V2PoolSyncer, decimal-adjusted pricing
 
 use anyhow::Result;
 use dexarb_bot::arbitrage::{MulticallQuoter, OpportunityDetector, TradeExecutor, VerifiedOpportunity};
 use dexarb_bot::config::load_config_from_file;
 use dexarb_bot::filters::WhitelistFilter;
-use dexarb_bot::pool::{PoolStateManager, V3PoolSyncer, SUSHI_V3_FEE_TIERS, V3_FEE_TIERS};
-use dexarb_bot::types::DexType;
+use dexarb_bot::pool::{PoolStateManager, V2PoolSyncer, V3PoolSyncer, SUSHI_V3_FEE_TIERS, V3_FEE_TIERS};
+use dexarb_bot::types::{DexType, PoolState, V3PoolState};
 use dexarb_bot::price_logger::PriceLogger;
-use dexarb_bot::types::V3PoolState;
 use ethers::prelude::*;
 use futures::StreamExt;
 use std::sync::Arc;
@@ -44,7 +47,7 @@ async fn main() -> Result<()> {
         .with_target(false)
         .init();
 
-    info!("Phase 1 DEX Arbitrage Bot Starting (monolithic, cross-DEX UniV3+SushiV3+QuickSwapV3)...");
+    info!("Phase 1 DEX Arbitrage Bot Starting (monolithic, V3+V2 cross-protocol arb)...");
 
     // Load configuration from .env.live (separate from dev/paper .env)
     let config = load_config_from_file(".env.live")?;
@@ -126,12 +129,117 @@ async fn main() -> Result<()> {
     }
     info!("Initial V3 sync complete: {}/{} pools discovered", v3_pools.len(), active_pools.len());
 
+    // Initial V2 sync: discover full state for each v2_ready whitelisted pool
+    // V2 pools use constant-product AMM with 0.30% fee. Syncs token0, token1,
+    // decimals, and reserves. Enables V2↔V3 cross-protocol arbitrage detection.
+    let v2_syncer = V2PoolSyncer::new(Arc::clone(&provider));
+    let mut v2_pools: Vec<PoolState> = Vec::new();
+    let v2_ready_whitelist: Vec<_> = whitelist.raw.whitelist.pools.iter()
+        .filter(|p| p.status == "v2_ready")
+        .collect();
+
+    if !v2_ready_whitelist.is_empty() {
+        info!("Initial V2 sync: {} v2_ready pools to discover...", v2_ready_whitelist.len());
+
+        for wl_pool in &v2_ready_whitelist {
+            // Map whitelist dex field → DexType
+            let dex_type = match wl_pool.dex.as_str() {
+                "QuickSwapV2" => DexType::QuickSwapV2,
+                "SushiSwapV2" => DexType::SushiSwapV2,
+                other => {
+                    warn!("Unknown V2 dex '{}' for {} — skipping", other, wl_pool.pair);
+                    continue;
+                }
+            };
+
+            let pool_address: Address = match wl_pool.address.parse() {
+                Ok(addr) => addr,
+                Err(e) => {
+                    warn!("Invalid V2 address '{}' for {} — skipping: {}", wl_pool.address, wl_pool.pair, e);
+                    continue;
+                }
+            };
+
+            match v2_syncer.sync_pool_by_address(pool_address, dex_type).await {
+                Ok(mut pool_state) => {
+                    pool_state.pair.symbol = wl_pool.pair.clone();
+                    info!(
+                        "  V2 synced: {} on {:?} | dec=({},{}) reserves=({}, {})",
+                        wl_pool.pair, dex_type,
+                        pool_state.token0_decimals, pool_state.token1_decimals,
+                        pool_state.reserve0, pool_state.reserve1
+                    );
+                    v2_pools.push(pool_state);
+                }
+                Err(e) => {
+                    warn!("  V2 failed: {} ({}): {}", wl_pool.pair, wl_pool.address, e);
+                }
+            }
+        }
+        info!("Initial V2 sync complete: {}/{} pools discovered", v2_pools.len(), v2_ready_whitelist.len());
+    }
+
     // Initialize pool state manager and populate with initial sync data
     let state_manager = PoolStateManager::new();
     for pool in &v3_pools {
         state_manager.update_v3_pool(pool.clone());
     }
-    info!("Pool state manager initialized with {} V3 pools (monolithic mode)", v3_pools.len());
+    for pool in &v2_pools {
+        state_manager.update_pool(pool.clone());
+    }
+    info!(
+        "Pool state manager initialized: {} V3 + {} V2 pools",
+        v3_pools.len(), v2_pools.len()
+    );
+
+    // Startup cross-check: compare V2 and V3 prices for same pairs.
+    // Catches wrong pool addresses, unexpected token ordering, or decimal issues.
+    // V2 price_adjusted() and V3 price() should produce similar values for the
+    // same pair at the same block. Divergence > 5% is a red flag.
+    if !v2_pools.is_empty() && !v3_pools.is_empty() {
+        info!("=== V2↔V3 Price Cross-Check (startup validation) ===");
+        for v2_pool in &v2_pools {
+            let pair_sym = &v2_pool.pair.symbol;
+            let v2_price = v2_pool.price_adjusted();
+            // Find a V3 pool with the same pair symbol for comparison
+            let v3_match = v3_pools.iter()
+                .filter(|p| p.pair.symbol == *pair_sym)
+                .min_by(|a, b| {
+                    // Pick the V3 pool with the most liquidity as reference
+                    b.liquidity.cmp(&a.liquidity)
+                });
+            if let Some(v3_pool) = v3_match {
+                let v3_price = v3_pool.price();
+                let divergence = if v3_price > 0.0 {
+                    ((v2_price - v3_price) / v3_price * 100.0).abs()
+                } else {
+                    f64::MAX
+                };
+                let status = if divergence < 1.0 {
+                    "OK"
+                } else if divergence < 5.0 {
+                    "WARN"
+                } else {
+                    "ALERT"
+                };
+                info!(
+                    "  [{}] {} | V2({:?})={:.8} | V3({:?})={:.8} | div={:.2}% | t0={:?} t1={:?}",
+                    status, pair_sym, v2_pool.dex, v2_price,
+                    v3_pool.dex, v3_price, divergence,
+                    v2_pool.pair.token0, v2_pool.pair.token1
+                );
+                if divergence > 5.0 {
+                    warn!(
+                        "V2↔V3 price divergence {:.2}% for {} — check pool address or token ordering!",
+                        divergence, pair_sym
+                    );
+                }
+            } else {
+                info!("  [SKIP] {} | V2({:?})={:.8} | No V3 match found", pair_sym, v2_pool.dex, v2_price);
+            }
+        }
+        info!("=== End cross-check ===");
+    }
 
     // Initialize opportunity detector
     let detector = OpportunityDetector::new(config.clone(), state_manager.clone());
@@ -214,10 +322,10 @@ async fn main() -> Result<()> {
 
             // Log status periodically
             if iteration % 100 == 0 {
-                let (_, v3_count, min_block, max_block) = state_manager.combined_stats();
+                let (v2_count, v3_count, min_block, max_block) = state_manager.combined_stats();
                 info!(
-                    "Iteration {} (WS) | {} V3 pools | blocks {}-{} | {} opps found / {} scans | block {}",
-                    iteration, v3_count, min_block, max_block, total_opportunities, total_scans, current_block
+                    "Iteration {} (WS) | {} V3 + {} V2 pools | blocks {}-{} | {} opps found / {} scans | block {}",
+                    iteration, v3_count, v2_count, min_block, max_block, total_opportunities, total_scans, current_block
                 );
             }
 
@@ -242,6 +350,17 @@ async fn main() -> Result<()> {
             } else {
                 warn!("Parallel V3 sync returned empty — keeping previous state");
                 continue;
+            }
+
+            // Sync V2 pools concurrently (reserves only — 1 RPC call per pool)
+            // V2 reserves change less frequently than V3 ticks but must stay current
+            // for accurate V2↔V3 cross-protocol price comparison.
+            if !v2_pools.is_empty() {
+                let updated_v2 = v2_syncer.sync_known_pools_parallel(&v2_pools).await;
+                v2_pools = updated_v2;
+                for pool in &v2_pools {
+                    state_manager.update_pool(pool.clone());
+                }
             }
 
             // Scan for opportunities

@@ -189,6 +189,8 @@ mod tests {
             reserve0: U256::from(reserve0),
             reserve1: U256::from(reserve1),
             last_updated: 100,
+            token0_decimals: 18,
+            token1_decimals: 18,
         }
     }
 

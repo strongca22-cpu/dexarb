@@ -10,9 +10,11 @@
 pub mod calculator;
 pub mod state;
 pub mod syncer;
+pub mod v2_syncer;
 pub mod v3_syncer;
 
 pub use calculator::PriceCalculator;
 pub use state::PoolStateManager;
 pub use syncer::PoolSyncer;
+pub use v2_syncer::V2PoolSyncer;
 pub use v3_syncer::{V3PoolSyncer, SUSHI_V3_FEE_TIERS, V3_FEE_TIERS};

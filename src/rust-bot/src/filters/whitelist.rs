@@ -180,12 +180,12 @@ impl WhitelistFilter {
 
     /// Build from an already-parsed config.
     pub fn from_config(raw: PoolWhitelist) -> Self {
-        // Whitelisted addresses
+        // Whitelisted addresses (both "active" V3 pools and "v2_ready" V2 pools)
         let whitelisted_addrs: HashSet<String> = raw
             .whitelist
             .pools
             .iter()
-            .filter(|p| p.status == "active")
+            .filter(|p| p.status == "active" || p.status == "v2_ready")
             .map(|p| normalize_addr(&p.address))
             .collect();
 

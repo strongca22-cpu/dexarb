@@ -1,26 +1,29 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-/// @title ArbExecutor — Atomic DEX Arbitrage (V2: Algebra support)
-/// @notice Executes two V3 swaps atomically in a single transaction.
-///         If the second swap fails or net profit < minProfit, the entire tx reverts.
-///         Supports Uniswap V3, SushiSwap V3 (same ABI), and QuickSwap V3 (Algebra, different ABI).
+/// @title ArbExecutor — Atomic DEX Arbitrage (V3 + V2 cross-protocol)
+/// @notice Executes two swaps atomically in a single transaction.
+///         Supports V3↔V3, V2↔V3, and V2↔V2 arbitrage — all zero leg risk.
+///         If either swap fails or net profit < minProfit, the entire tx reverts.
+///
+/// @dev Supported router types (routed via fee parameter sentinel):
+///   - fee = 0                → Algebra SwapRouter (QuickSwap V3, dynamic fees)
+///   - fee = 1..65535         → Standard V3 SwapRouter (Uniswap V3, SushiSwap V3)
+///   - fee = type(uint24).max → V2 Router (QuickSwap V2, SushiSwap V2, swapExactTokensForTokens)
 ///
 /// @dev Token flow:
 ///   1. transferFrom(caller, this, amountIn)          — pull input tokens
-///   2. SwapRouter A: exactInputSingle(token0→token1)  — buy leg
-///   3. SwapRouter B: exactInputSingle(token1→token0)  — sell leg
+///   2. Router A: swap(token0→token1)                  — buy leg (V2 or V3)
+///   3. Router B: swap(token1→token0)                  — sell leg (V2 or V3)
 ///   4. require(balance >= amountIn + minProfit)        — profit check
 ///   5. transfer(caller, balance)                       — return all tokens
 ///
 ///   If any step fails, the entire transaction reverts — zero risk.
 ///
-///   Algebra (QuickSwap V3) routing: fee=0 signals Algebra SwapRouter
-///   (no fee parameter in ExactInputSingleParams). Otherwise uses standard V3 ABI.
-///
 /// @author AI-Generated
 /// @custom:created 2026-01-30
 /// @custom:modified 2026-01-30 (V2: Algebra SwapRouter support via fee=0 sentinel)
+/// @custom:modified 2026-01-30 (V3: V2 router support via fee=type(uint24).max sentinel)
 
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
@@ -64,6 +67,18 @@ interface IAlgebraSwapRouter {
         returns (uint256 amountOut);
 }
 
+/// @notice Minimal Uniswap V2 Router interface (swapExactTokensForTokens)
+///         Works for QuickSwap V2, SushiSwap V2, and all Uniswap V2 forks.
+interface IUniswapV2Router02 {
+    function swapExactTokensForTokens(
+        uint256 amountIn,
+        uint256 amountOutMin,
+        address[] calldata path,
+        address to,
+        uint256 deadline
+    ) external returns (uint256[] memory amounts);
+}
+
 contract ArbExecutor {
     /// @notice Contract owner (only address that can execute arbs and rescue tokens)
     address public immutable owner;
@@ -81,6 +96,10 @@ contract ArbExecutor {
 
     /// @notice Emitted when tokens are rescued by the owner
     event TokensRescued(address indexed token, uint256 amount);
+
+    /// @notice Fee sentinel: type(uint24).max signals V2 router (swapExactTokensForTokens)
+    ///         fee=0 → Algebra, fee=1..65535 → standard V3, fee=16777215 → V2
+    uint24 public constant FEE_V2_SENTINEL = type(uint24).max; // 16777215
 
     error OnlyOwner();
     error InsufficientProfit(uint256 got, uint256 required);
@@ -100,8 +119,8 @@ contract ArbExecutor {
     /// @param token1      The intermediate token (e.g., WETH) — held only within this tx
     /// @param routerBuy   SwapRouter address for buy leg (token0→token1)
     /// @param routerSell  SwapRouter address for sell leg (token1→token0)
-    /// @param feeBuy      V3 fee tier for buy pool (e.g., 500 = 0.05%). fee=0 → Algebra router (no fee param)
-    /// @param feeSell     V3 fee tier for sell pool (e.g., 3000 = 0.30%). fee=0 → Algebra router (no fee param)
+    /// @param feeBuy      Fee routing: 0 → Algebra, 1-65535 → V3 fee tier, 16777215 → V2 router
+    /// @param feeSell     Fee routing: 0 → Algebra, 1-65535 → V3 fee tier, 16777215 → V2 router
     /// @param amountIn    Amount of token0 to use
     /// @param minProfit   Minimum profit in token0 units (revert if not met)
     /// @return profit     Net profit in token0 units
@@ -151,8 +170,10 @@ contract ArbExecutor {
         );
     }
 
-    /// @dev Route a single swap to either standard V3 SwapRouter or Algebra SwapRouter
-    ///      based on the fee parameter. fee=0 → Algebra (no fee in params).
+    /// @dev Route a single swap based on the fee parameter sentinel:
+    ///      fee = FEE_V2_SENTINEL (type(uint24).max) → V2 swapExactTokensForTokens
+    ///      fee = 0 → Algebra SwapRouter (QuickSwap V3, no fee in params)
+    ///      fee = 1..65535 → Standard V3 SwapRouter (Uniswap V3 / SushiSwap V3)
     function _swapSingle(
         address router,
         uint24 fee,
@@ -161,7 +182,20 @@ contract ArbExecutor {
         uint256 amountIn,
         uint256 amountOutMin
     ) internal returns (uint256 amountOut) {
-        if (fee == 0) {
+        if (fee == FEE_V2_SENTINEL) {
+            // V2 Router (QuickSwap V2 / SushiSwap V2) — swapExactTokensForTokens
+            address[] memory path = new address[](2);
+            path[0] = tokenIn;
+            path[1] = tokenOut;
+            uint256[] memory amounts = IUniswapV2Router02(router).swapExactTokensForTokens(
+                amountIn,
+                amountOutMin,
+                path,
+                address(this),
+                block.timestamp + 120
+            );
+            amountOut = amounts[amounts.length - 1];
+        } else if (fee == 0) {
             // Algebra SwapRouter (QuickSwap V3) — no fee parameter
             amountOut = IAlgebraSwapRouter(router).exactInputSingle(
                 IAlgebraSwapRouter.ExactInputSingleParams({

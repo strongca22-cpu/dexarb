@@ -24,6 +24,9 @@ readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly BOT_DIR="$(dirname "$SCRIPT_DIR")"
 readonly LOG_FILE="$BOT_DIR/data/logs/livebot_ws.log"
 readonly WEBHOOK_URL="$(grep 'DISCORD_WEBHOOK=' "$BOT_DIR/src/rust-bot/.env" 2>/dev/null | cut -d'=' -f2-)"
+readonly WALLET="0xa532eb528ae17efc881fce6894a08b5b70ff21e2"
+readonly USDC_ADDR="0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+readonly RPC_URL="https://polygon-mainnet.g.alchemy.com/v2/jwcuVSA1FrZ97ftmb8id8"
 
 send_discord() {
     local msg="$1"
@@ -70,12 +73,22 @@ build_report() {
     halts=$(grep -c "HALT" "$LOG_FILE" 2>/dev/null || true)
     halts=${halts:-0}
 
+    # Wallet balances (via cast, with timeout to avoid hanging)
+    local usdc_bal matic_bal
+    local usdc_raw
+    usdc_raw=$(timeout 10 cast call "$USDC_ADDR" "balanceOf(address)(uint256)" "$WALLET" --rpc-url "$RPC_URL" 2>/dev/null | head -1 | awk '{print $1}' || echo "0")
+    usdc_bal=$(python3 -c "print(f'{int(\"${usdc_raw}\") / 1e6:.2f}')" 2>/dev/null || echo "?")
+    matic_bal=$(timeout 10 cast balance "$WALLET" --rpc-url "$RPC_URL" --ether 2>/dev/null | head -1 || echo "?")
+    # Trim MATIC to 2 decimal places
+    matic_bal=$(python3 -c "print(f'{float(\"${matic_bal}\"):.2f}')" 2>/dev/null || echo "$matic_bal")
+
     # Build message
     cat <<EOF
 **Bot Status Report** — \`$now\`
 \`\`\`
 Sessions:  $sessions
 Process:   $status
+Wallet:    $usdc_bal USDC | $matic_bal MATIC
 Log lines: $log_lines
 Attempts:  $attempts  Completed: $completed  HALTs: $halts
 Latest:    $latest_status

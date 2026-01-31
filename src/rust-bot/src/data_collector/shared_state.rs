@@ -73,6 +73,8 @@ impl SerializablePoolState {
             reserve0: U256::from_dec_str(&self.reserve0).unwrap_or(U256::zero()),
             reserve1: U256::from_dec_str(&self.reserve1).unwrap_or(U256::zero()),
             last_updated: self.last_updated,
+            token0_decimals: 18, // Legacy shared state — decimals not stored
+            token1_decimals: 18,
         })
     }
 }
@@ -320,6 +322,8 @@ mod tests {
             reserve0: U256::from(1000000),
             reserve1: U256::from(2000000),
             last_updated: 12345,
+            token0_decimals: 18,
+            token1_decimals: 18,
         };
 
         state.update_pool(&pool);
