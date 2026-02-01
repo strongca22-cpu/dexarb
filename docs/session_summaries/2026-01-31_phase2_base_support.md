@@ -1,8 +1,8 @@
-# Session Summary: Phase 2 Base Support (2026-01-31, Sessions 8-9)
+# Session Summary: Phase 2 Base Support (2026-01-31, Sessions 8-10)
 
 ## Overview
 
-Implemented Phase 2 (Base chain support) from `docs/MULTI_CHAIN_ARCHITECTURE.md` v2.0. Session 8: discovered pools, created `.env.base` and whitelist, fixed QuoterV1/V2 compatibility, adapted `verify_whitelist.py` for multi-chain. Session 9: resolved blockers — generated dedicated Base wallet, funded with ETH from Coinbase, enabled Base Mainnet on Alchemy, configured `.env.base` with real WS key. Ready for ArbExecutor deployment.
+Implemented Phase 2 (Base chain support) from `docs/MULTI_CHAIN_ARCHITECTURE.md` v2.0. Session 8: discovered pools, created `.env.base` and whitelist, fixed QuoterV1/V2 compatibility, adapted `verify_whitelist.py` for multi-chain. Session 9: resolved blockers — funded Base wallet, enabled Alchemy WS. Session 10: deployed ArbExecutor to Base, ran enhanced pool verification (promoted SushiV3 0.30% to active), fixed whitelist JSON schema, ran 5hr dry-run collecting 45K price points and 25 simulated trades, disabled multicall pre-screen (same latency rationale as Polygon).
 
 ## Context
 
@@ -143,10 +143,70 @@ Queried Uniswap V3 factory (`0x33128a8f...`) and SushiSwap V3 factory (`0xc35DAD
 - Updated `.env.base`: `RPC_URL=wss://base-mainnet.g.alchemy.com/v2/<key>`
 - Verified: `cast block-number` returns block 41,530,272
 
+## Session 10: Deploy, Verify, Dry-Run
+
+### ArbExecutor Deployed to Base
+- Contract: `0x90545f20fd9877667Ce3a7c80D5f1C63CF6AE079`
+- Tx: `0x0ce97d4ea6b2e89acf90395f2d976066e9f3de74547229ff43d5ec0c88731588`
+- Owner: `0x48091E0ee0427A7369c7732f779a09A0988144fa`
+- Deployment cost: ~0.000021 ETH (~$0.05). Remaining: 0.00569 ETH.
+- No constructor args (parameterless, `owner = msg.sender`)
+
+### Enhanced Pool Verification
+- Added `--chain base` to `verify_whitelist_enhanced.py` (chain configs, QuoterV2 routing, chain-aware RPC)
+- Ran full depth analysis on all 8 Base pools ($1/$10/$100/$1k/$5k quote matrix)
+- Results:
+
+| Pool | Fee | Score | Impact@$5k | Category |
+|------|-----|-------|-----------|----------|
+| UniV3 `0xd0b5..` | 0.05% | 100 | 0.0% | **active** |
+| UniV3 `0x6c56..` | 0.30% | 100 | 0.0% | **active** |
+| UniV3 `0xb4CB..` | 0.01% | 100 | 0.2% | **active** |
+| SushiV3 `0x5771..` | 0.05% | 100 | 1.3% | **active** |
+| SushiV3 `0x4159..` | 0.30% | 90 | 4.7% | **active** (promoted from observation) |
+| UniV3 `0x0b1C..` | 1.00% | 100 | 1.8% | observation (1% fee banned) |
+| SushiV3 `0x482F..` | 0.01% | 60 | 75.3% | blacklist |
+| SushiV3 `0x6fa0..` | 1.00% | 60 | 99.5% | blacklist |
+
+- Whitelist updated v1.0→v1.1: 5 active (was 4), 1 observation (was 2), 2 blacklisted
+
+### Whitelist JSON Schema Fix
+- `ObservationPool` struct requires `concern` field — was missing
+- `BlacklistPool` struct requires `date_added` — Base used `added`
+- `BlacklistTier` struct requires `applies_to` + `date_added` — were missing
+
+### 5-Hour Dry Run Results
+- **Duration**: 09:19–14:23 UTC (5h04m)
+- **Price data**: 45,580 rows (7.9MB) across 5 pools
+- **Opportunities detected**: 98
+- **Simulated trades**: 25 (profit range $0.06–$0.27 at $100 trade size)
+- **Top route**: Buy UniV3 0.01%/0.05% → Sell SushiV3 0.30% (cross-DEX)
+- **Death cause**: Alchemy WS outage (error 1011) → non-JSONRPC reconnect message → exhausted 5 retries
+
+### Multicall Pre-Screen Disabled
+- Base gas: 0.019 Gwei → ~$0.05/failed tx (negligible)
+- Pre-screen rejected ALL opportunities 65% of the time (false negatives from estimated sell amounts)
+- Same rationale as Polygon: `estimateGas` already catches failures, 200-500ms latency not worth it
+- Added `SKIP_MULTICALL_PRESCREEN=true` to `.env.base`
+
+### Build & Tests
+- 58/58 Rust tests pass (up from 51 in sessions 8-9)
+- Clean release build
+
+## Files Changed (Session 10)
+
+| File | Action | Details |
+|------|--------|---------|
+| `src/rust-bot/.env.base` | Modified | ARB_EXECUTOR_ADDRESS, SKIP_MULTICALL_PRESCREEN=true |
+| `config/base/pools_whitelist.json` | Modified | v1.1: schema fix, promoted SushiV3 0.30% |
+| `scripts/verify_whitelist_enhanced.py` | Modified | --chain base support, QuoterV2 routing |
+| `docs/next_steps.md` | Updated | Phase 2 progress, Base executor, whitelist v1.1 |
+| `docs/session_summaries/2026-01-31_phase2_base_support.md` | Updated | Session 10 additions |
+
 ## Next Steps
 
-1. Deploy ArbExecutor.sol to Base: `forge create --rpc-url <base_rpc> --private-key <key> src/ArbExecutor.sol:ArbExecutor --constructor-args <wallet_addr> <usdc_addr>`
-2. Update `.env.base` with `ARB_EXECUTOR_ADDRESS=<deployed_address>`
-3. Approve USDC for executor on Base (when trading phase begins)
-4. Start Base bot in dry-run: `--chain base` with `LIVE_MODE=false`
-5. Collect price data for 48h+ before considering live trading
+1. Restart Base bot with auto-restart mechanism (bot_watch.sh or supervisor)
+2. Collect 24-48h continuous dry-run data (need WS reconnection resilience)
+3. Analyze opportunity frequency, time-of-day patterns, pair/route distribution
+4. Approve USDC for executor on Base when ready for live trading
+5. Consider additional Base trading pairs (cbETH/USDC, DAI/USDC) if pools exist

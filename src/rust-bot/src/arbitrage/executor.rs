@@ -35,6 +35,7 @@ use ethers::prelude::*;
 use rust_decimal::Decimal;
 use std::path::PathBuf;
 use std::str::FromStr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tracing::{debug, error, info, warn};
@@ -119,6 +120,18 @@ pub struct TradeExecutor<M: Middleware> {
     tax_logger: Option<TaxLogger>,
     /// Price oracle for USD conversions
     tax_record_builder: Option<TaxRecordBuilder>,
+    /// Optional HTTP provider for private mempool tx submission.
+    /// When set, atomic arb transactions are signed via WS (estimateGas, nonce,
+    /// gas price all use Alchemy), then ONLY the raw signed bytes are sent
+    /// through this provider. This avoids burning rate limits on reads.
+    tx_client: Option<Arc<Provider<Http>>>,
+    /// Cached base_fee_per_gas from latest block header (A1: eliminates get_gas_price RPC).
+    /// Set by set_base_fee() from main.rs on each new block.
+    cached_base_fee: Option<U256>,
+    /// Locally tracked nonce (A2: eliminates nonce lookup from fill_transaction).
+    /// Initialized on first use, incremented after each successful send.
+    cached_nonce: Arc<AtomicU64>,
+    nonce_initialized: bool,
 }
 
 impl<M: Middleware + 'static> TradeExecutor<M> {
@@ -131,7 +144,29 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
             dry_run: true, // Default to dry run for safety
             tax_logger: None,
             tax_record_builder: None,
+            tx_client: None,
+            cached_base_fee: None,
+            cached_nonce: Arc::new(AtomicU64::new(0)),
+            nonce_initialized: false,
         }
+    }
+
+    /// Enable private mempool for transaction submission.
+    /// Creates a bare HTTP provider pointed at the private RPC.
+    /// Only eth_sendRawTransaction goes through this — all reads (estimateGas,
+    /// nonce, gas price) stay on the main WS provider to avoid rate limits.
+    pub fn set_private_rpc(&mut self, url: &str) -> Result<()> {
+        let http_provider = Provider::<Http>::try_from(url)
+            .map_err(|e| anyhow!("Failed to create HTTP provider for {}: {}", url, e))?;
+        self.tx_client = Some(Arc::new(http_provider));
+        info!("Private mempool enabled: {}", url);
+        Ok(())
+    }
+
+    /// Update cached base fee from latest block header (A1).
+    /// Called from main.rs on each new block. Eliminates get_gas_price() RPC.
+    pub fn set_base_fee(&mut self, base_fee: U256) {
+        self.cached_base_fee = Some(base_fee);
     }
 
     /// Enable or disable dry run mode
@@ -431,10 +466,18 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
             mode, pair_symbol, opportunity.buy_dex, opportunity.sell_dex, arb_address
         );
 
-        // Gas cap removed: on Polygon, gas costs fractions of a penny even at
-        // high gwei values. The atomic contract reverts unprofitable trades,
-        // and the detector already filters by profit-after-gas.
-        let gas_price = self.provider.get_gas_price().await?;
+        // A0+A1: Gas priority bump + cached base fee from block header.
+        // On Polygon, gas is negligible (~$0.01 even at 5000 gwei). Atomic reverts protect capital.
+        // Priority fee of 5000 gwei targets top ~30 block position (median is ~2134 gwei).
+        let base_fee = match self.cached_base_fee {
+            Some(bf) => bf,
+            None => {
+                // Fallback: fetch from RPC (only on first call before any block arrives)
+                self.provider.get_gas_price().await?
+            }
+        };
+        let priority_fee = U256::from(5_000_000_000_000u64); // 5000 gwei
+        let max_fee = base_fee + priority_fee;
 
         // ArbExecutor.sol token0 = "base token" (start & end) = USDC (quote token)
         // ArbExecutor.sol token1 = "intermediate token" (bought & sold)
@@ -463,31 +506,82 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
             router_buy, fee_buy, router_sell, fee_sell, trade_size, min_profit_raw
         );
 
-        // Create signer client
-        let client = SignerMiddleware::new(
+        // Build + sign via WS provider. Gas price and nonce are pre-set (A0-A2)
+        // so fill_transaction only needs to call estimateGas.
+        // If private RPC is configured, send only the raw signed bytes through it.
+        let ws_signer = Arc::new(SignerMiddleware::new(
             self.provider.clone(),
             self.wallet.clone().with_chain_id(self.config.chain_id),
-        );
-        let client = Arc::new(client);
-
-        // Call ArbExecutor.executeArb()
-        let arb_contract = IArbExecutor::new(arb_address, client.clone());
-        let tx = arb_contract.execute_arb(
-            token0,
-            token1,
-            router_buy,
-            router_sell,
-            fee_buy.into(),  // u32 → u32, but abigen expects the right type
-            fee_sell.into(),
-            trade_size,
-            min_profit_raw,
+        ));
+        let contract = IArbExecutor::new(arb_address, ws_signer.clone());
+        let call = contract.execute_arb(
+            token0, token1, router_buy, router_sell,
+            fee_buy.into(), fee_sell.into(), trade_size, min_profit_raw,
         );
 
-        let pending_tx = match tx.send().await {
-            Ok(pt) => pt,
-            Err(e) => {
-                let err_msg = format!("Atomic tx send failed: {}", e);
-                // Check if this is an InsufficientProfit revert
+        // A2: Initialize nonce on first use, then track locally
+        if !self.nonce_initialized {
+            let nonce = self.provider.get_transaction_count(
+                self.wallet.address(), Some(BlockNumber::Pending.into())
+            ).await?;
+            self.cached_nonce.store(nonce.as_u64(), Ordering::SeqCst);
+            self.nonce_initialized = true;
+            info!("Nonce initialized: {}", nonce);
+        }
+        let current_nonce = U256::from(self.cached_nonce.load(Ordering::SeqCst));
+
+        let send_result: Result<TxHash, String> = if let Some(ref tx_client) = self.tx_client {
+            // Private RPC path: pre-set gas + nonce on tx, fill only does estimateGas.
+            // Then sign via WS signer, send raw bytes via private RPC.
+            info!("📡 Sending via private mempool (priority=5000gwei, nonce={})", current_nonce);
+            let mut tx = call.tx.clone();
+            // A0+A1+A2: Pre-set EIP-1559 gas fields and nonce to skip RPC lookups.
+            // fill_transaction will still call estimateGas but skip gas/nonce fetches
+            // since these fields are already populated.
+            tx.set_nonce(current_nonce);
+            tx.as_eip1559_mut().map(|inner| {
+                inner.max_fee_per_gas = Some(max_fee);
+                inner.max_priority_fee_per_gas = Some(priority_fee);
+            });
+            match ws_signer.fill_transaction(&mut tx, None).await {
+                Err(e) => Err(format!("Atomic tx fill failed (WS): {}", e)),
+                Ok(()) => {
+                    match ws_signer.signer().sign_transaction(&tx).await {
+                        Err(e) => Err(format!("Atomic tx sign failed: {}", e)),
+                        Ok(signature) => {
+                            let raw_tx = tx.rlp_signed(&signature);
+                            match tx_client.send_raw_transaction(raw_tx).await {
+                                Ok(pending) => {
+                                    // A2: Increment nonce on successful send
+                                    self.cached_nonce.fetch_add(1, Ordering::SeqCst);
+                                    Ok(pending.tx_hash())
+                                }
+                                Err(e) => Err(format!("Atomic tx send failed (private): {}", e))
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            // Public WS path: set gas fields on the contract call, then send.
+            let call = call
+                .gas_price(max_fee)  // Legacy gas price fallback
+                .nonce(current_nonce);
+            // Save result in local var to ensure PendingTransaction borrow
+            // is dropped before `call` goes out of scope.
+            let result = match call.send().await {
+                Ok(pending) => {
+                    self.cached_nonce.fetch_add(1, Ordering::SeqCst);
+                    Ok(pending.tx_hash())
+                }
+                Err(e) => Err(format!("Atomic tx send failed: {}", e))
+            };
+            result
+        };
+
+        let tx_hash = match send_result {
+            Ok(hash) => hash,
+            Err(err_msg) => {
                 if err_msg.contains("InsufficientProfit") || err_msg.contains("execution reverted") {
                     info!("Atomic arb reverted (expected: insufficient profit or pool conditions changed)");
                 } else {
@@ -510,14 +604,39 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
             }
         };
 
-        let tx_hash = pending_tx.tx_hash();
         info!("⚡ Atomic arb tx submitted: {:?}", tx_hash);
 
-        // Wait for confirmation
-        let receipt = pending_tx
-            .await
-            .map_err(|e| anyhow!("Atomic tx confirmation failed: {}", e))?
-            .ok_or_else(|| anyhow!("No receipt returned for atomic tx"))?;
+        // Wait for receipt using main provider (WS — fast block notifications).
+        // Polls get_transaction_receipt since PendingTransaction types differ
+        // between WS and HTTP providers (Rust generics constraint).
+        // Timeout after 30s (~15 Polygon blocks) to avoid blocking the main loop.
+        let receipt_deadline = Instant::now() + Duration::from_secs(30);
+        let receipt = loop {
+            match self.provider.get_transaction_receipt(tx_hash).await {
+                Ok(Some(r)) => break r,
+                Ok(None) => {
+                    if Instant::now() > receipt_deadline {
+                        error!("Receipt timeout (30s) for tx {:?} — tx may still confirm later", tx_hash);
+                        return Ok(TradeResult {
+                            opportunity: pair_symbol.clone(),
+                            tx_hash: Some(format!("{:?}", tx_hash)),
+                            block_number: None,
+                            success: false,
+                            profit_usd: 0.0,
+                            gas_cost_usd: 0.0,
+                            gas_used_native: 0.0,
+                            net_profit_usd: 0.0,
+                            execution_time_ms: start_time.elapsed().as_millis() as u64,
+                            error: Some("Receipt timeout — tx submitted but unconfirmed".to_string()),
+                            amount_in: Some(trade_size.to_string()),
+                            amount_out: None,
+                        });
+                    }
+                    tokio::time::sleep(tokio::time::Duration::from_millis(250)).await;
+                }
+                Err(e) => return Err(anyhow!("Failed to fetch receipt for {:?}: {}", tx_hash, e)),
+            }
+        };
 
         let block_number = receipt.block_number.map(|bn| bn.as_u64()).unwrap_or(0);
 
@@ -570,7 +689,7 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
         let profit_usd = profit_raw.low_u128() as f64 / 10_f64.powi(quote_decimals as i32);
         // Actual gas from receipt
         let gas_used = receipt.gas_used.unwrap_or(U256::from(400_000u64));
-        let effective_gas_price = receipt.effective_gas_price.unwrap_or(gas_price);
+        let effective_gas_price = receipt.effective_gas_price.unwrap_or(max_fee);
         let gas_cost_wei = gas_used * effective_gas_price;
         let gas_used_native = gas_cost_wei.low_u128() as f64 / 1e18;
         let gas_cost_usd = gas_used_native * 0.50; // MATIC ~$0.50

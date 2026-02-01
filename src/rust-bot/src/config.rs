@@ -188,5 +188,8 @@ fn load_config_inner() -> Result<BotConfig> {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(10),
+
+        // Private RPC for tx submission (Polygon Fastlane — optional)
+        private_rpc_url: std::env::var("PRIVATE_RPC_URL").ok(),
     })
 }

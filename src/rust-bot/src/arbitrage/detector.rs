@@ -586,6 +586,7 @@ mod tests {
             arb_executor_address: None,
             skip_multicall_prescreen: false,
             route_cooldown_blocks: 10,
+            private_rpc_url: None,
         }
     }
 

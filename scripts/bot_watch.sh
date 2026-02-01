@@ -14,30 +14,36 @@
 # Trade *attempts* (TRY #, gas rejections, quoter rejections) are allowed
 # to proceed without interruption.
 #
-# Detected patterns (on-chain activity only):
-#   - "Trade complete" = successful trade executed and confirmed
-#   - "HALT"           = on-chain tx submitted (capital committed, even if failed)
-#   - "PROFIT"         = trade completed with profit/loss result
+# Trigger: "Trade complete" only (main.rs:520)
+#   Logged AFTER: receipt confirmed, profit computed, tax record written.
+#   Only fires on result.success == true (profitable trade).
+#
+# NOT triggered by:
+#   - "ATOMIC PROFIT"  = fires before tax logging (race risk), now ignored
+#   - "ATOMIC LOSS"    = gas-negative trade, bot keeps running to recover
+#   - "HALT"           = receipt timeout or legacy mode failure
+#   - Quoter rejections, estimateGas reverts, atomic on-chain reverts
+#   - Atomic reverts are safe: contract revert protects capital, only gas burned
 #
 
 set -euo pipefail
 
-LOG_FILE="/home/botuser/bots/dexarb/data/logs/livebot_ws.log"
+LOG_FILE="/home/botuser/bots/dexarb/data/polygon/logs/livebot_ws.log"
 TMUX_SESSION="livebot_polygon"
 
 echo "=== Bot Watch ==="
 echo "Monitoring: $LOG_FILE"
 echo "Kill target: tmux session '$TMUX_SESSION'"
-echo "Trigger: first completed trade (Trade complete, HALT, or PROFIT)"
+echo "Trigger: first profitable trade (\"Trade complete\" — after tax log)"
 echo "Started: $(date)"
 echo ""
 echo "Waiting for on-chain trade activity (attempts are allowed)..."
 
 # Follow log file, grep for completion patterns, kill on first match
 tail -n 0 -f "$LOG_FILE" | while IFS= read -r line; do
-    if echo "$line" | grep -qE "Trade complete|HALT|PROFIT"; then
+    if echo "$line" | grep -qF "Trade complete"; then
         echo ""
-        echo "!!! TRADE COMPLETED at $(date) !!!"
+        echo "!!! PROFITABLE TRADE at $(date) !!!"
         echo "Line: $line"
         echo ""
         echo "Killing tmux session '$TMUX_SESSION'..."

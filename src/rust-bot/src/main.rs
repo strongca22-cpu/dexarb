@@ -10,7 +10,7 @@
 //! - V3: Uniswap V3 + SushiSwap V3 + QuickSwap V3 (Algebra)
 //! - V2: QuickSwap V2 + SushiSwap V2 (constant product, 0.30% fee)
 //! - Main loop: WS subscribe_blocks() → sync V3+V2 parallel → detect → execute
-//! - V2↔V3 opportunities use legacy two-tx execution (ArbExecutor is V3-only)
+//! - V2↔V3 opportunities execute atomically via ArbExecutor (fee sentinel routing)
 //! - ~100ms block notification (vs 3s polling), auto-reconnect on WS drop
 //! - Data collector preserved separately for paper trading / research
 //!
@@ -34,7 +34,8 @@ use dexarb_bot::arbitrage::{MulticallQuoter, OpportunityDetector, RouteCooldown,
 use dexarb_bot::config::load_config_from_file;
 use dexarb_bot::filters::WhitelistFilter;
 use dexarb_bot::pool::{PoolStateManager, V2PoolSyncer, V3PoolSyncer, SUSHI_V3_FEE_TIERS, V3_FEE_TIERS};
-use dexarb_bot::types::{DexType, PoolState, V3PoolState};
+use dexarb_bot::types::{DexType, PoolState, TradingPair, V3PoolState};
+use std::collections::HashMap;
 use dexarb_bot::price_logger::PriceLogger;
 use ethers::prelude::*;
 use futures::StreamExt;
@@ -288,6 +289,11 @@ async fn main() -> Result<()> {
         info!("Trade executor initialized (DRY RUN mode)");
     }
 
+    // Enable private mempool (Fastlane) for transaction submission if configured
+    if let Some(ref private_url) = config.private_rpc_url {
+        executor.set_private_rpc(private_url)?;
+    }
+
     // Initialize Multicall3 batch Quoter pre-screener (Phase 2.1)
     // Batch-verifies all detected opportunities in 1 RPC call before execution.
     // Falls back to unfiltered execution if Multicall fails.
@@ -330,6 +336,13 @@ async fn main() -> Result<()> {
         info!("Multicall pre-screen enabled (batch Quoter verification)");
     }
 
+    // Log private mempool status
+    if let Some(ref url) = config.private_rpc_url {
+        info!("🔒 Private mempool ENABLED: {}", url);
+    } else {
+        info!("Private mempool disabled (transactions sent via public RPC)");
+    }
+
     info!("Bot initialized successfully (monolithic mode)");
     info!("Starting opportunity detection loop (WS block subscription)...");
 
@@ -340,6 +353,60 @@ async fn main() -> Result<()> {
               config.route_cooldown_blocks);
     } else {
         info!("Route cooldown DISABLED (ROUTE_COOLDOWN_BLOCKS=0)");
+    }
+
+    // A3: Event-driven pool state — setup
+    // Build lookup map from pool address → metadata for event parsing.
+    // V3 Swap events give us (sqrtPriceX96, liquidity, tick) directly.
+    // V2 Sync events give us (reserve0, reserve1) directly.
+    // One eth_getLogs call per block replaces ~21 per-pool RPC calls.
+    let v3_swap_topic: H256 = ethers::utils::keccak256(
+        b"Swap(address,address,int256,int256,uint160,uint128,int24)"
+    ).into();
+    let v2_sync_topic: H256 = ethers::utils::keccak256(
+        b"Sync(uint112,uint112)"
+    ).into();
+
+    struct PoolMeta {
+        dex: DexType,
+        pair: TradingPair,
+        token0_decimals: u8,
+        token1_decimals: u8,
+        fee: u32,
+        is_v3: bool,
+    }
+
+    let mut pool_lookup: HashMap<Address, PoolMeta> = HashMap::new();
+    for pool in &v3_pools {
+        pool_lookup.insert(pool.address, PoolMeta {
+            dex: pool.dex,
+            pair: pool.pair.clone(),
+            token0_decimals: pool.token0_decimals,
+            token1_decimals: pool.token1_decimals,
+            fee: pool.fee,
+            is_v3: true,
+        });
+    }
+    for pool in &v2_pools {
+        pool_lookup.insert(pool.address, PoolMeta {
+            dex: pool.dex,
+            pair: pool.pair.clone(),
+            token0_decimals: pool.token0_decimals,
+            token1_decimals: pool.token1_decimals,
+            fee: 0,
+            is_v3: false,
+        });
+    }
+    let pool_addresses: Vec<Address> = pool_lookup.keys().cloned().collect();
+
+    let use_event_sync = std::env::var("EVENT_SYNC")
+        .map(|v| v.to_lowercase() == "true")
+        .unwrap_or(false);
+    if use_event_sync {
+        info!("Event-driven sync ENABLED (A3): {} pools via eth_getLogs (~50ms vs ~400ms poll)",
+              pool_addresses.len());
+    } else {
+        info!("Event-driven sync disabled: poll-based sync (~400ms/block). Set EVENT_SYNC=true to enable.");
     }
 
     // Statistics tracking
@@ -379,31 +446,130 @@ async fn main() -> Result<()> {
             }
             last_block = current_block;
 
-            // Sync all V3 pools concurrently (~21 RPC calls, ~400ms wall-clock)
-            let updated = v3_syncer.sync_known_pools_parallel(&v3_pools).await;
-            if !updated.is_empty() {
-                v3_pools = updated;
-                for pool in &v3_pools {
-                    state_manager.update_v3_pool(pool.clone());
-                }
-
-                // Log price snapshots (research — no RPC cost, just CSV writes)
-                if let Some(ref mut logger) = price_logger {
-                    logger.log_prices(current_block, &v3_pools);
-                }
-            } else {
-                warn!("Parallel V3 sync returned empty — keeping previous state");
-                continue;
+            // A1: Update executor's cached base fee from block header.
+            // Eliminates get_gas_price() RPC call during execution (~50ms savings).
+            if let Some(base_fee) = block.base_fee_per_gas {
+                executor.set_base_fee(base_fee);
             }
 
-            // Sync V2 pools concurrently (reserves only — 1 RPC call per pool)
-            // V2 reserves change less frequently than V3 ticks but must stay current
-            // for accurate V2↔V3 cross-protocol price comparison.
-            if !v2_pools.is_empty() {
-                let updated_v2 = v2_syncer.sync_known_pools_parallel(&v2_pools).await;
-                v2_pools = updated_v2;
-                for pool in &v2_pools {
-                    state_manager.update_pool(pool.clone());
+            // --- Pool state sync ---
+            // A3: Event-driven sync uses single eth_getLogs call (~50ms, 75 CU)
+            // Poll fallback uses per-pool RPC calls (~400ms, ~1100 CU).
+            // Toggle: EVENT_SYNC=true in .env to enable event-driven mode.
+            let sync_ok = if use_event_sync {
+                let filter = Filter::new()
+                    .from_block(current_block)
+                    .to_block(current_block)
+                    .address(pool_addresses.clone())
+                    .topic0(vec![v3_swap_topic, v2_sync_topic]);
+
+                match provider.get_logs(&filter).await {
+                    Ok(logs) => {
+                        let mut v3_updated = 0u32;
+                        let mut v2_updated = 0u32;
+
+                        for log in &logs {
+                            if let Some(meta) = pool_lookup.get(&log.address) {
+                                if meta.is_v3 && !log.topics.is_empty() && log.topics[0] == v3_swap_topic {
+                                    // V3 Swap event data layout (160 bytes):
+                                    //   [0..32]   amount0 (int256)
+                                    //   [32..64]  amount1 (int256)
+                                    //   [64..96]  sqrtPriceX96 (uint160)
+                                    //   [96..128] liquidity (uint128)
+                                    //   [128..160] tick (int24 as int256)
+                                    if log.data.len() >= 160 {
+                                        let sqrt_price_x96 = U256::from_big_endian(&log.data[64..96]);
+                                        let liquidity = U256::from_big_endian(&log.data[96..128]).low_u128();
+                                        // tick: int24 sign-extended to int256; last 4 bytes = valid i32
+                                        let tick = i32::from_be_bytes([
+                                            log.data[156], log.data[157],
+                                            log.data[158], log.data[159],
+                                        ]);
+
+                                        state_manager.update_v3_pool(V3PoolState {
+                                            address: log.address,
+                                            dex: meta.dex,
+                                            pair: meta.pair.clone(),
+                                            sqrt_price_x96,
+                                            tick,
+                                            fee: meta.fee,
+                                            liquidity,
+                                            token0_decimals: meta.token0_decimals,
+                                            token1_decimals: meta.token1_decimals,
+                                            last_updated: current_block,
+                                        });
+                                        v3_updated += 1;
+                                    }
+                                } else if !meta.is_v3 && !log.topics.is_empty() && log.topics[0] == v2_sync_topic {
+                                    // V2 Sync event data layout (64 bytes):
+                                    //   [0..32]  reserve0 (uint112)
+                                    //   [32..64] reserve1 (uint112)
+                                    if log.data.len() >= 64 {
+                                        let reserve0 = U256::from_big_endian(&log.data[0..32]);
+                                        let reserve1 = U256::from_big_endian(&log.data[32..64]);
+
+                                        state_manager.update_pool(PoolState {
+                                            address: log.address,
+                                            dex: meta.dex,
+                                            pair: meta.pair.clone(),
+                                            reserve0,
+                                            reserve1,
+                                            last_updated: current_block,
+                                            token0_decimals: meta.token0_decimals,
+                                            token1_decimals: meta.token1_decimals,
+                                        });
+                                        v2_updated += 1;
+                                    }
+                                }
+                            }
+                        }
+
+                        if v3_updated > 0 || v2_updated > 0 {
+                            info!(
+                                "Event sync: {} V3 + {} V2 pools updated ({} logs, block {})",
+                                v3_updated, v2_updated, logs.len(), current_block
+                            );
+                        }
+
+                        // Price logging (research) — read current state from manager
+                        if let Some(ref mut logger) = price_logger {
+                            let current_pools = state_manager.get_all_v3_pools();
+                            logger.log_prices(current_block, &current_pools);
+                        }
+
+                        true
+                    }
+                    Err(e) => {
+                        warn!("eth_getLogs failed: {} — falling back to poll sync this block", e);
+                        false
+                    }
+                }
+            } else {
+                false // poll sync path
+            };
+
+            if !sync_ok {
+                // Poll-based sync (original path, or fallback when eth_getLogs fails)
+                let updated = v3_syncer.sync_known_pools_parallel(&v3_pools).await;
+                if !updated.is_empty() {
+                    v3_pools = updated;
+                    for pool in &v3_pools {
+                        state_manager.update_v3_pool(pool.clone());
+                    }
+                    if let Some(ref mut logger) = price_logger {
+                        logger.log_prices(current_block, &v3_pools);
+                    }
+                } else {
+                    warn!("Parallel V3 sync returned empty — keeping previous state");
+                    continue;
+                }
+
+                if !v2_pools.is_empty() {
+                    let updated_v2 = v2_syncer.sync_known_pools_parallel(&v2_pools).await;
+                    v2_pools = updated_v2;
+                    for pool in &v2_pools {
+                        state_manager.update_pool(pool.clone());
+                    }
                 }
             }
 
@@ -515,10 +681,46 @@ async fn main() -> Result<()> {
                             } else {
                                 let error_msg = result.error.unwrap_or_else(|| "Unknown".to_string());
 
-                                // CRITICAL: If a transaction was submitted on-chain, capital is
-                                // committed. HALT immediately — do NOT try next opportunity.
-                                // This catches: buy succeeded but sell Quoter rejected (holding tokens).
+                                // On-chain tx was submitted — distinguish safe (atomic) from dangerous (legacy).
                                 if result.tx_hash.is_some() {
+                                    // Receipt timeout: tx submitted but unconfirmed — unknown state, stop.
+                                    if error_msg.contains("Receipt timeout") {
+                                        error!(
+                                            "HALT: Receipt timeout for {} | TX: {} — tx may still confirm",
+                                            result.opportunity,
+                                            result.tx_hash.as_deref().unwrap_or("?")
+                                        );
+                                        error!("Unknown tx state — manual check needed. Stopping all trading.");
+                                        break;
+                                    }
+
+                                    // Atomic mode: on-chain reverts and gas-negative trades are SAFE.
+                                    // The atomic contract's revert protects capital — only gas is lost.
+                                    // Gas-negative trades: tokens were swapped and returned, just gas > profit.
+                                    if config.arb_executor_address.is_some() {
+                                        route_cooldown.record_failure(&opp.pair.symbol, opp.buy_dex, opp.sell_dex, current_block);
+                                        if error_msg.contains("reverted") {
+                                            // Atomic revert: no trade happened, only gas burned. Try next route.
+                                            info!(
+                                                "Atomic tx reverted on-chain (safe, gas only): {} | TX: {}",
+                                                result.opportunity,
+                                                result.tx_hash.as_deref().unwrap_or("?")
+                                            );
+                                            continue;
+                                        } else {
+                                            // Gas-negative completed trade: arb executed but gas > profit.
+                                            // Market state changed from our trade — wait for next block.
+                                            warn!(
+                                                "Atomic trade gas-negative: {} | TX: {} | Error: {}",
+                                                result.opportunity,
+                                                result.tx_hash.as_deref().unwrap_or("?"),
+                                                error_msg
+                                            );
+                                            break;
+                                        }
+                                    }
+
+                                    // Legacy two-tx mode: capital genuinely at risk (buy on-chain, sell failed).
                                     error!(
                                         "HALT: On-chain tx submitted but trade failed: {} | Error: {} | TX: {}",
                                         result.opportunity, error_msg,

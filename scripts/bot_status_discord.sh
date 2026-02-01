@@ -43,7 +43,7 @@ send_discord() {
 build_report() {
     # Resolve newest log file each call (not at startup — bot restarts create new logs)
     local LOG_FILE
-    LOG_FILE="$(ls -t "$BOT_DIR"/data/logs/livebot*.log 2>/dev/null | head -1)"
+    LOG_FILE="$(ls -t "$BOT_DIR"/data/polygon/logs/livebot*.log "$BOT_DIR"/data/logs/livebot*.log 2>/dev/null | head -1)"
 
     local now
     now=$(date -u '+%Y-%m-%d %H:%M:%S UTC')

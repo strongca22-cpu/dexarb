@@ -543,6 +543,13 @@ pub struct BotConfig {
     // Eliminates hammering of structurally dead spreads. Set to 0 to disable.
     // Default: 10 blocks (~20s on Polygon).
     pub route_cooldown_blocks: u64,
+
+    // Private RPC URL for transaction submission (Polygon Fastlane).
+    // When set, atomic arb transactions are sent through this endpoint instead
+    // of the main WS provider. Transactions are invisible to other MEV bots
+    // until block inclusion. All reads stay on the Alchemy WS connection.
+    // Rollback: remove this env var to fall back to public mempool.
+    pub private_rpc_url: Option<String>,
 }
 
 #[cfg(test)]
