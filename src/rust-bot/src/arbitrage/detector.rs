@@ -592,6 +592,7 @@ mod tests {
             mempool_gas_limit: 500_000,
             mempool_min_priority_gwei: 1000,
             mempool_gas_profit_cap: 0.50,
+            native_token_price_usd: 0.50,
         }
     }
 

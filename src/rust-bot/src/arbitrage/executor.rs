@@ -398,8 +398,8 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
 
         // Estimate gas cost (actual cost would require receipt analysis)
         // Polygon: ~400k gas for two V3 swaps, ~50 gwei avg = 0.02 MATIC = ~$0.01
-        let gas_used_native = 0.02; // ~400k gas at 50 gwei = 0.02 MATIC
-        let gas_cost_usd = 0.01; // ~$0.01 at MATIC ~$0.50
+        let gas_used_native = 0.02; // ~400k gas at 50 gwei = 0.02 native
+        let gas_cost_usd = gas_used_native * self.config.native_token_price_usd;
         let net_profit_usd = profit_usd - gas_cost_usd;
 
         let success = net_profit_usd > 0.0;
@@ -692,7 +692,7 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
         let effective_gas_price = receipt.effective_gas_price.unwrap_or(max_fee);
         let gas_cost_wei = gas_used * effective_gas_price;
         let gas_used_native = gas_cost_wei.low_u128() as f64 / 1e18;
-        let gas_cost_usd = gas_used_native * 0.50; // MATIC ~$0.50
+        let gas_cost_usd = gas_used_native * self.config.native_token_price_usd;
         let net_profit_usd = profit_usd - gas_cost_usd;
 
         let success = net_profit_usd > 0.0;
@@ -984,7 +984,7 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
         let effective_gas_price = receipt.effective_gas_price.unwrap_or(max_fee);
         let gas_cost_wei = gas_used * effective_gas_price;
         let gas_used_native = gas_cost_wei.low_u128() as f64 / 1e18;
-        let gas_cost_usd = gas_used_native * 0.50;
+        let gas_cost_usd = gas_used_native * self.config.native_token_price_usd;
         let net_profit_usd = profit_usd - gas_cost_usd;
 
         let success = net_profit_usd > 0.0;
@@ -1060,11 +1060,11 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
         // * 1.05 = * 105 / 100
         let match_trigger = trigger_priority * U256::from(105u64) / U256::from(100u64);
 
-        // 2. Profit cap: max gas spend = est_profit * gas_profit_cap / MATIC_price / gas_limit
-        // Convert: profit_usd * cap → max_gas_cost_usd → max_gas_cost_matic → max_gas_per_unit
-        // MATIC ~$0.50
+        // 2. Profit cap: max gas spend = est_profit * gas_profit_cap / native_token_price / gas_limit
+        // Convert: profit_usd * cap → max_gas_cost_usd → max_gas_cost_native → max_gas_per_unit
+        let native_price = self.config.native_token_price_usd;
         let max_gas_budget_usd = est_profit_usd * gas_profit_cap;
-        let max_gas_budget_matic = max_gas_budget_usd / 0.50; // MATIC price ~$0.50
+        let max_gas_budget_matic = max_gas_budget_usd / native_price;
         let max_gas_budget_wei = (max_gas_budget_matic * 1e18) as u128;
         let profit_cap = if gas_limit > 0 {
             U256::from(max_gas_budget_wei) / U256::from(gas_limit)
@@ -1230,8 +1230,8 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
             tx_hash: Some("DRY_RUN_NO_TX".to_string()),
             block_number: Some(0),
             success: true,
-            profit_usd: opportunity.estimated_profit + 0.50, // Add back gas for simulation
-            gas_cost_usd: 0.50,
+            profit_usd: opportunity.estimated_profit + self.config.native_token_price_usd, // Add back gas for simulation
+            gas_cost_usd: self.config.native_token_price_usd,
             gas_used_native: 0.001,
             net_profit_usd: opportunity.estimated_profit,
             execution_time_ms: start_time.elapsed().as_millis() as u64,
@@ -1729,7 +1729,7 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
         if pair_symbol.starts_with("WETH") {
             (wei_f / 1e18) * 3300.0
         } else if pair_symbol.starts_with("WMATIC") {
-            (wei_f / 1e18) * 0.50
+            (wei_f / 1e18) * self.config.native_token_price_usd
         } else {
             wei_f / 1e18
         }

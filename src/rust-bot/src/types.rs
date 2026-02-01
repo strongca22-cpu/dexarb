@@ -566,6 +566,11 @@ pub struct BotConfig {
     pub mempool_min_priority_gwei: u64,
     // Max fraction of estimated profit to spend on gas (default 0.50 = 50%)
     pub mempool_gas_profit_cap: f64,
+
+    // Native token price in USD (MATIC on Polygon, ETH on Base/Ethereum)
+    // Used for gas cost calculations everywhere. Default 0.50 (MATIC).
+    // Set via NATIVE_TOKEN_PRICE_USD env var.
+    pub native_token_price_usd: f64,
 }
 
 #[cfg(test)]

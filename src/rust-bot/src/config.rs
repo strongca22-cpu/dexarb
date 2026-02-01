@@ -104,6 +104,18 @@ fn load_config_inner() -> Result<BotConfig> {
         .and_then(|v| v.parse().ok())
         .unwrap_or(0.05);
 
+    // Native token price — must resolve before chain_name is moved into BotConfig
+    let native_token_price_usd: f64 = std::env::var("NATIVE_TOKEN_PRICE_USD")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or_else(|| {
+            match chain_name.as_str() {
+                "polygon" => 0.50,
+                "base" | "ethereum" => 3300.0,
+                _ => 1.0,
+            }
+        });
+
     Ok(BotConfig {
         rpc_url: std::env::var("RPC_URL")?,
         chain_id: std::env::var("CHAIN_ID")?.parse()?,
@@ -213,5 +225,7 @@ fn load_config_inner() -> Result<BotConfig> {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(0.50),
+
+        native_token_price_usd,
     })
 }
