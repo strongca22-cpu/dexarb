@@ -1,19 +1,21 @@
 # Next Steps - DEX Arbitrage Bot
 
-## Status: A4 Phase 3 DEPLOYED — Mempool Execution Pipeline LIVE
+## Status: PIVOT TO NODE MIGRATION — Hetzner Bor Node + alloy + Micro-Latency
 
-**Date:** 2026-02-01
-**Polygon:** 23 active pools (16 V3 + 7 V2), atomic via `ArbExecutorV3` (`0x7761...`), WS block sub, private RPC (1RPC)
+**Date:** 2026-02-01 (updated)
+**Polygon:** 32 active pools (25 V3 + 7 V2), atomic via `ArbExecutorV3` (`0x7761...`), WS block sub, private RPC (1RPC)
 **Base:** 5 active V3 pools (whitelist v1.1), ArbExecutor deployed (`0x9054...`), EVENT_SYNC=true, dry-run (no mempool)
-**Build:** 72/72 Rust tests, clean release build. A4 mempool module (2,500+ LOC, 14 tests).
-**Whitelist:** v1.5 — 23 active + 9 native USDC candidates + 22 blacklisted. AAVE/USDC added to TRADING_PAIRS (8 pairs).
+**Build:** 73/73 Rust tests, clean release build. A4 mempool module (2,500+ LOC, 14 tests).
+**Whitelist:** v1.6 — 32 active (23 original + 9 native USDC) + 22 blacklisted. Dual-USDC support deployed.
 **Mode:** 3 tmux sessions (livebot_polygon, botstatus, botwatch). Base offline pending A4 port.
-**A0-A3:** Deployed 2026-02-01. Diagnostic: 97.1% revert rate → mempool competition confirmed.
-**A4 Phase 1:** DEPLOYED. 100% confirmation rate, 6.0s median lead time.
-**A4 Phase 2:** DEPLOYED. AMM simulator: 0.04% median prediction error, 12 cross-DEX opps in 45min, median $0.45 est. profit.
-**A4 Phase 3:** DEPLOYED. Mempool execution: mpsc channel → main loop → execute_from_mempool(). Skip estimateGas, dynamic gas (profit-capped), 500K gas limit. Dual pipeline (block-reactive + mempool).
-**Base mempool:** 0 pending txs — sequencer model has no public mempool via Alchemy.
-**Next:** Monitor Phase 3 results (2-24h), analyze mempool_executions CSV, tune gas/thresholds. If >5% success rate → profitable. If <1% → investigate timing/gas. Port A4 to Base if Polygon viable.
+**A4 Phase 3:** DEPLOYED + ANALYZED. 3 on-chain txs submitted. All reverted — **transaction ordering problem** confirmed (our tx lands before trigger in same block, spread doesn't exist yet).
+**Key finding:** Polygon has no Flashbots-equivalent. Mempool backrunning without validator-level access is structurally limited. Code/latency is fine (263ms same-block delivery). Market structure (no ordered bundles) is the barrier.
+**Strategic pivot:** Own Bor node on Hetzner dedicated server → eliminate 250ms RPC latency → hybrid mempool-informed block-reactive strategy → long-tail pool expansion → micro-latency optimizations.
+**Next:** Order Hetzner, set up Bor node, migrate ethers-rs → alloy, expand pool coverage to 200+, collect long-tail data.
+
+### Bugs Fixed This Session (uncommitted)
+1. **PoolStateManager key collision** — `DashMap<(DexType, String)>` → `DashMap<Address>`. Native USDC pools were overwriting USDC.e pools. Fixed: 25 V3 pools now active (was 19).
+2. **chain_id=0 in mempool tx signing** — `execute_from_mempool()` skips `fill_transaction()` but forgot to set chain_id on EIP-1559 tx. Added `inner.chain_id = Some(self.config.chain_id.into())` in both RPC paths.
 
 ---
 
@@ -73,14 +75,18 @@ Total: ~200-250ms from block to attempt.
 
 **Savings: ~450ms (64% reduction).** Whether this is enough depends on whether competitors react to confirmed blocks (speed issue → A3 fixes it) or backrun from mempool (latency irrelevant → A4 needed).
 
-### Network Latency (Already Good)
+### Network Latency (WAS "good" — now understood as the primary bottleneck)
 
-| Metric | Value |
-|--------|-------|
-| VPS location | Kent, WA (Vultr) |
-| RTT to Alchemy | **5ms** |
-| Co-location benefit | ~30ms savings (4% of pipeline) |
-| Verdict | **Not the bottleneck** |
+| Metric | Current (Vultr + Alchemy) | Target (Hetzner + Bor) |
+|--------|--------------------------|------------------------|
+| VPS location | Kent, WA (Vultr) | Frankfurt, DE (Hetzner) |
+| Block arrival | ~250ms (Alchemy WS) | <10ms (P2P, validator-peered) |
+| Mempool access | Filtered (Alchemy partial view) | Unfiltered (P2P gossip) |
+| RPC round-trip | ~250ms (network) | <1ms (IPC/localhost) |
+| Tx submission | ~250ms (to Alchemy, relay to network) | <1ms (direct P2P to validators) |
+| **Verdict** | **THE bottleneck** | **Eliminated** |
+
+**Revised understanding:** The 5ms RTT to Alchemy was misleading. The actual bottleneck is the full round-trip through Alchemy's infrastructure — we measured 250ms signal-to-submit on mempool txs. A local Bor node with IPC eliminates this entirely.
 
 ---
 
@@ -182,34 +188,96 @@ Total: ~700ms from block to revert
 
 ---
 
-## Immediate Next Steps — Monitor Phase 3 Results + Tune
+## Immediate Next Steps — Hetzner Node Migration + alloy Port
 
-**A4 Phase 3 is deployed and executing from mempool signals.**
+### Strategic Context
 
-### Phase 3 Architecture (deployed)
+A4 Phase 3 mempool execution is live but structurally limited on Polygon:
+- **3 on-chain txs submitted**, all reverted ("Too little received")
+- Our tx at index 25, trigger at index 106 in same block — we landed BEFORE the trigger
+- Polygon has no Flashbots-equivalent for guaranteed bundle ordering
+- 250ms Alchemy RPC round-trip dominates our latency budget
+- **Conclusion:** Need own node + long-tail pool expansion strategy
+
+### The Plan (3 phases)
+
+**Phase A: Infrastructure (Hetzner + Bor node)**
+- Order Hetzner AX52 or AX62 dedicated server (Frankfurt/Helsinki datacenter)
+- Recommended: Ryzen 7 5800X+ for single-core boost, 64GB RAM, 2x1TB NVMe
+- Install Bor + Heimdall, download Polygon snapshot (~400GB), sync to chain tip
+- Configure Bor for low-latency local RPC: HTTP (8545) + WebSocket (8546) + IPC
+- Enable `txpool` API for unfiltered mempool access
+- Optimize P2P peering: add Polygon validator nodes as static/trusted peers
+- See: Separate Claude chat prompt for Hetzner setup walkthrough
+
+**Phase B: alloy Migration (during Bor sync dead time)**
+- Full ethers-rs → alloy migration on feature branch
+- 8 phases: types → U256 API → ABI → contracts → providers → tx building → IPC → validation
+- **Detailed plan:** `docs/alloy_port_plan.md`
+- Key wins: IPC transport to local node, `sol!` compile-time ABI, fewer allocations
+- Micro-latency savings: ~1-2ms (10-15% of hot path when network latency is <1ms)
+
+**Phase C: Long-Tail Pool Expansion + Hybrid Pipeline**
+- Build pool discovery script (query factory contracts for all Polygon pools)
+- Expand whitelist from 32 → 200+ pools with sufficient liquidity
+- Implement hybrid pipeline: mempool pre-builds → block-confirmed execution
+- Target: uncaptured opportunities on lower-competition pairs
+- Collect data for 1 week to validate long-tail thesis
+
+### Hybrid Pipeline Architecture (target)
 
 ```
-Monitor (tokio::spawn)     mpsc::channel(8)     Main Loop (select!)
-  SIM OPP detected  ---------> MempoolSignal  ---------> execute_from_mempool()
-                                                          (skip estimateGas,
-                                                           dynamic gas,
-                                                           fixed 500K gas limit)
+Mempool (P2P via Bor node)
+  Pending swap detected on Pool A
+    → Simulator predicts post-swap state
+    → Pre-build arb route (Pool A → Pool B)
+    → Pre-sign tx (amounts estimated, deadline set)
+    → Cache in pending_mempool_opps
+
+Block N confirmed (via IPC, <1ms)
+  → Check: did Block N contain the trigger tx?
+    → YES: submit pre-built tx immediately (~5-10ms)
+    → NO: discard stale pre-build
+  → ALSO: run normal block-reactive scan for non-mempool opps
 ```
 
-### Monitoring Checklist
+**Latency budget comparison:**
 
-1. **2h check:** Review `data/polygon/mempool/mempool_executions_*.csv`. Check signal count, success rate, gas spend.
-2. **Success rate assessment:**
-   - **>5% success** → Profitable. Leave running, tune thresholds.
-   - **1-5% success** → Marginal. Check if gas tuning can improve.
-   - **<1% success (all reverts)** → Investigate: are we too slow? Wrong gas? Stale state?
-3. **Gas spend audit:** Sum gas cost column. Should be <$1/hr at current rates (~$0.01/revert).
-4. **Analyze with:** `python3 scripts/analyze_mempool.py` (existing script covers simulation data).
-5. **Tuning levers:**
-   - `MEMPOOL_MIN_PROFIT_USD` — raise to reduce revert count (fewer, higher-quality signals)
-   - `MEMPOOL_MIN_PRIORITY_GWEI` — raise/lower to adjust gas competitiveness
-   - `MEMPOOL_GAS_PROFIT_CAP` — lower to reduce gas spend per attempt
-6. **Base strategy:** Alchemy mempool not viable on Base (0 pending txs, centralized sequencer). Port A4 only if Polygon proves viable.
+| Component | Current (Alchemy) | Hetzner + alloy |
+|-----------|-------------------|-----------------|
+| Block/mempool arrival | ~120ms network | <1ms (IPC) |
+| Detection | ~5ms | ~0.5ms (cache lookup) |
+| Route evaluation | ~3ms | ~0.5ms (pre-computed) |
+| Tx building | ~3ms | ~0.5ms (template) |
+| Signing | ~1.5ms | ~0.5ms (optimized lib) |
+| Submit to network | ~120ms network | <1ms (local P2P) |
+| **Total** | **~253ms** | **~3-7ms** |
+
+### Micro-Latency Optimization Stack (post-migration)
+
+| Tier | Optimization | Savings | Priority |
+|------|-------------|---------|----------|
+| **1** | IPC Unix socket to Bor | 0.5-1ms/call | Do with alloy port |
+| **1** | Pre-built tx templates | 1-2ms | After alloy |
+| **1** | In-memory state cache (always current) | 2-3ms detection | After alloy |
+| **2** | CPU pinning (`taskset -c 4 ./bot`) | 0.1-0.5ms variance | After deploy |
+| **2** | Kernel network tuning (io_uring) | 0.2-0.5ms | After deploy |
+| **2** | Huge pages for DashMap | 0.1-0.3ms | After deploy |
+| **3** | alloy over ethers-rs | 1-2ms | Part of port |
+| **3** | Pre-computed ABI calldata | 0.5-1ms | After alloy |
+| **3** | Custom secp256k1 (C lib) | 0.5-0.7ms | Optional |
+| **3** | Arena allocation for hot path | 0.3-0.5ms | Optional |
+| **4** | Bor peering optimization (validator peers) | 50-200ms block arrival | Critical — do first |
+| **4** | Multi-path tx submission | Variable | After peering |
+| **4** | Local nonce tracking (no query) | 0.3-0.5ms | Already done (A2) |
+
+### Monitoring Checklist (current VPS — keep running)
+
+The current ethers-rs bot continues running on the Vultr VPS during migration:
+1. Review `data/polygon/mempool/mempool_executions_*.csv` periodically
+2. Gas spend is negligible (~$0.00/revert for reverts, ~$0.0002/on-chain revert)
+3. Bot serves as data collection baseline for comparison with Hetzner
+4. Do NOT shut down until Hetzner bot is validated end-to-end
 
 ---
 
@@ -250,7 +318,7 @@ The 99.1% revert rate is structural. A3 is the diagnostic: if speed alone is the
 - **Phase 1 (Observation):** DONE. 100% confirmation rate, 6.0s median lead time, ~4 decoded/min.
 - **Phase 2 (Simulation):** DONE. V2 constant product + V3 sqrtPriceX96 math. 0.04% median error. 12 cross-DEX opps in 45min.
 - **Phase 3 (Execution):** DEPLOYED. mpsc channel → main loop → `execute_from_mempool()`. Skip estimateGas, dynamic gas (profit-capped), 500K gas limit. Dual pipeline (block-reactive + mempool).
-- **Phase 4 (conditional):** Own Bor node ($80-100/mo) if Alchemy visibility degrades. Currently not needed (100% confirmation).
+- **Phase 4:** Own Bor node → NOW PLANNED as A6. Hetzner dedicated server. See "Immediate Next Steps" section above.
 - **Cross-chain:** Architecture is 100% reusable on Base, Arbitrum, Ethereum, BSC. Same ABIs, same AMM math.
 - **CU budget:** V3 monitoring ~3.5M CU/month. Total with A3: ~14.2M CU/month. Within free tier.
 - **Files:** `src/mempool/{mod,monitor,decoder,types,simulator}.rs`, `main.rs`, `executor.rs`.
@@ -271,51 +339,88 @@ The 99.1% revert rate is structural. A3 is the diagnostic: if speed alone is the
 - **Config:** `MEMPOOL_MIN_PRIORITY_GWEI=1000`, `MEMPOOL_GAS_PROFIT_CAP=0.50` in `.env.polygon`.
 - **Risk:** On-chain reverts cost ~$0.01. Break-even if >5% of mempool signals succeed.
 
-### Tier 2: Further Optimizations (after Tier 1 proves viable)
+### Tier 2: Hetzner Node + alloy Migration — NEXT
 
-**A6: Parallel Opportunity Submission**
+**A6: Hetzner Dedicated Server + Bor Node**
+- **What:** Own Polygon full node on dedicated hardware, co-located with the bot
+- **Why:** Eliminates 250ms Alchemy RPC round-trip. Unfiltered P2P mempool. No rate limits.
+- **Cost:** ~$80-150/mo (Hetzner AX52/AX62)
+- **Setup guide:** Separate Claude chat session (prompt saved)
+- **Key config:** Enable txpool API, IPC endpoint, optimize P2P peering with validators
+
+**A7: ethers-rs → alloy Migration**
+- **What:** Full migration from ethers-rs 2.0 to alloy (successor library)
+- **Why:** IPC transport support, 1-2ms hot-path savings, maintained library, sol! macro
+- **Scope:** ~20 files, 14 abigen! → sol! conversions, all provider/signer patterns
+- **Plan:** `docs/alloy_port_plan.md` (8 phases, phase-by-phase build+test)
+- **Timing:** During Bor sync dead time on Hetzner
+
+**A8: Hybrid Mempool-Informed Block-Reactive Pipeline**
+- **What:** Use mempool signals to pre-build txs, execute on block confirmation
+- **Why:** Solves the ordering problem — we wait for block confirmation (trigger confirmed) then submit pre-built tx instantly
+- **Files:** `main.rs` (pending_mempool_opps cache), `executor.rs` (execute_prebuilt)
+
+**A9: Long-Tail Pool Expansion (200+ pools)**
+- **What:** Expand coverage from 32 pools/2 pairs to 200+ pools across 20+ pairs
+- **Why:** Competition is concentrated on WETH/USDC. Long-tail pairs have uncaptured opportunities.
+- **Dependencies:** Own node (no RPC rate limits), alloy port (IPC for performance)
+- **Files:** Pool discovery script, whitelist expansion, detector updates
+
+**A10: Parallel Opportunity Submission**
 - **What:** Submit top 2-3 opportunities simultaneously instead of sequentially.
 - **Why:** Current loop in `main.rs:500` tries one, waits for result, tries next. Atomic revert protection ensures only profitable ones succeed.
 - **Files:** `main.rs` — `tokio::join!` on top N executions.
 
-**A7: Dynamic Trade Sizing**
+**A11: Dynamic Trade Sizing**
 - **What:** Size per-opportunity based on pool depth and spread width.
 - **Why:** $500 fixed size creates unnecessary slippage in thin pools, and leaves money on the table in deep pools.
 - **Files:** `detector.rs`, `executor.rs`.
 
-**A8: Pre-built Transaction Templates**
+**A12: Pre-built Transaction Templates**
 - **What:** Pre-construct and pre-sign tx skeletons for common routes. Only fill in amounts at execution time.
-- **Saves:** 10-20ms signing overhead.
+- **Saves:** 1-2ms on local node (was 10-20ms — most savings were network, not compute).
 - **Files:** `executor.rs` — add tx template cache.
+- **Part of:** Micro-latency optimization stack (Tier 3 in optimization table above)
 
-### Tier 3: Strategy Expansion (only if Tier 1 produces results)
+### Tier 3: Strategy Expansion (after node + alloy are validated)
 
-**A9: Triangular Arbitrage (Multi-Hop)**
+**A13: Triangular Arbitrage (Multi-Hop)**
 - USDC→WETH→WMATIC→USDC across 3 pools
 - Multiplicatively more paths, finds circular arbs
 - High complexity
 
-**A10: Flash Loans (Zero-Capital)**
+**A14: Flash Loans (Zero-Capital)**
 - Aave/Balancer flash loans for $50K+ trades
 - Profit = gross - gas (no capital at risk)
 - Adds ~100k gas overhead
 
-**A11: Additional Chains (Base, Arbitrum, Optimism)**
+**A15: Additional Chains (Base, Arbitrum, Optimism)**
 - Base: ArbExecutor deployed, dry-run collecting data, WS resilience added. **Decision: wait for A4 to port.** Analysis shows same structural problem (block-reactive can't close). Base sequencer feed gives better mempool visibility than Polygon's Alchemy partial view.
 - Arbitrum/Optimism: placeholder dirs created
 - Same pattern: .env.{chain}, whitelist, deploy executor, data collect, go live
 
 ---
 
-## What Won't Help
+## What Won't Help (at current infrastructure level)
 
-| Approach | Why |
-|----------|-----|
-| **Co-location** | 5ms RTT already. Saves ~30ms (4% of 700ms pipeline). |
-| **Faster VPS CPU** | Computation is <10ms. All latency is I/O. |
-| **More trading pairs** | More detection, same execution failure. |
-| **Lower MIN_PROFIT** | Smaller spreads are even more contested. |
-| **Better private RPC** | No MEV auction exists on Polygon. FastLane dead. |
+| Approach | Why | Revisit? |
+|----------|-----|----------|
+| **Lower MIN_PROFIT** | Smaller spreads are even more contested. | No |
+| **Better private RPC** | No MEV auction exists on Polygon. FastLane dead. | No |
+| **ethers-rs tuning alone** | 1-2ms savings irrelevant at 250ms RPC latency. | YES — matters on local node |
+| **More pairs on Alchemy** | Rate-limited at 30M CU/month. | YES — no limits on own node |
+| **Co-location near exchange** | DEX arb isn't centralized exchange HFT. Co-locate near validators instead. | YES — Hetzner Frankfurt |
+
+## What WILL Help (new strategy)
+
+| Approach | Expected Impact | Status |
+|----------|----------------|--------|
+| **Own Bor node** | 250ms → <1ms block/mempool | PLANNED (A6) |
+| **Validator peering** | 50-200ms faster block arrival | PLANNED (A6 config) |
+| **alloy + IPC** | 1-2ms compute savings (now 10-15% of total) | PLANNED (A7) |
+| **Hybrid pipeline** | Pre-built txs, 5-10ms total execution | PLANNED (A8) |
+| **200+ pool coverage** | Access long-tail uncaptured opportunities | PLANNED (A9) |
+| **Micro-latency stack** | CPU pinning, huge pages, arena alloc | AFTER migration |
 
 ---
 
@@ -499,7 +604,8 @@ tmux new-session -d -s dexarb-base "cd ~/bots/dexarb/src/rust-bot && ./target/re
 | `docs/session_summaries/2026-02-01_pool_expansion_scan.md` | Pool expansion: factory scan, native USDC discovery, whitelist v1.5 |
 | `docs/session_summaries/2026-02-01_a4_phase3_execution.md` | A4 Phase 3: mempool execution pipeline, dynamic gas, deploy |
 | `docs/pool_expansion_catalog.md` | Full pool expansion catalog: tiers, addresses, implementation roadmap |
+| `docs/alloy_port_plan.md` | **NEW** — ethers-rs → alloy migration plan: 8 phases, file-by-file mapping, type conversion tables |
 
 ---
 
-*Last updated: 2026-02-01 (A4 Phase 3 deployed) — Mempool execution pipeline live on Polygon. mpsc channel architecture, tokio::select!, execute_from_mempool() with skip-estimateGas + dynamic gas pricing. A5 merged into Phase 3. Dual pipeline: block-reactive + mempool-sourced trades run simultaneously. Monitor mempool_executions CSV for results.*
+*Last updated: 2026-02-01 (strategic pivot to Hetzner node) — A4 Phase 3 analyzed: 3 on-chain txs, all reverted due to Polygon tx ordering (no Flashbots equivalent). Key collision fix (DashMap Address-keyed) + chain_id fix deployed. 32 pools active (25 V3 + 7 V2). Next: Hetzner dedicated server + Bor node + alloy migration + long-tail pool expansion. See `docs/alloy_port_plan.md` for migration details.*

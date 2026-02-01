@@ -850,6 +850,7 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
             tx.set_nonce(current_nonce);
             tx.set_gas(gas_limit); // Fixed gas limit — skip estimateGas
             tx.as_eip1559_mut().map(|inner| {
+                inner.chain_id = Some(self.config.chain_id.into());
                 inner.max_fee_per_gas = Some(max_fee);
                 inner.max_priority_fee_per_gas = Some(priority_fee);
             });
@@ -875,6 +876,7 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
             tx.set_nonce(current_nonce);
             tx.set_gas(gas_limit);
             tx.as_eip1559_mut().map(|inner| {
+                inner.chain_id = Some(self.config.chain_id.into());
                 inner.max_fee_per_gas = Some(max_fee);
                 inner.max_priority_fee_per_gas = Some(priority_fee);
             });

@@ -6,23 +6,27 @@
 //! Author: AI-Generated
 //! Created: 2026-01-27
 //! Modified: 2026-01-29 - Added V3 pool support
+//! Modified: 2026-02-01 - Key by pool Address (fixes collision for same-DexType dual-USDC pools)
 
 use crate::types::{DexType, PoolState, V3PoolState};
 use dashmap::DashMap;
+use ethers::types::Address;
 use std::sync::Arc;
 use tracing::debug;
 
 /// Thread-safe pool state manager
 ///
 /// Uses DashMap for concurrent read/write access to pool states.
-/// Key is (DexType, pair_symbol) tuple for fast lookups.
+/// Key is pool Address (globally unique) — avoids collisions when
+/// two pools share the same DexType + pair_symbol but have different
+/// token addresses (e.g. USDC.e vs native USDC pools).
 /// Supports both V2 and V3 pools.
 #[derive(Debug)]
 pub struct PoolStateManager {
-    /// V2 Pool states indexed by (DEX, pair_symbol)
-    pools: Arc<DashMap<(DexType, String), PoolState>>,
-    /// V3 Pool states indexed by (DEX, pair_symbol)
-    v3_pools: Arc<DashMap<(DexType, String), V3PoolState>>,
+    /// V2 Pool states indexed by pool address
+    pools: Arc<DashMap<Address, PoolState>>,
+    /// V3 Pool states indexed by pool address
+    v3_pools: Arc<DashMap<Address, V3PoolState>>,
 }
 
 impl PoolStateManager {
@@ -36,25 +40,29 @@ impl PoolStateManager {
 
     /// Add or update a pool state
     pub fn update_pool(&self, pool: PoolState) {
-        let key = (pool.dex, pool.pair.symbol.clone());
         debug!(
-            "Updating pool: {} on {:?} - reserves: ({}, {})",
-            pool.pair.symbol, pool.dex, pool.reserve0, pool.reserve1
+            "Updating pool: {} on {:?} @ {:?} - reserves: ({}, {})",
+            pool.pair.symbol, pool.dex, pool.address, pool.reserve0, pool.reserve1
         );
-        self.pools.insert(key, pool);
+        self.pools.insert(pool.address, pool);
     }
 
-    /// Get pool state for a specific DEX and pair
+    /// Get pool state for a specific DEX and pair (iterates; O(n) for ~30 pools)
     pub fn get_pool(&self, dex: DexType, pair_symbol: &str) -> Option<PoolState> {
-        let key = (dex, pair_symbol.to_string());
-        self.pools.get(&key).map(|entry| entry.clone())
+        self.pools
+            .iter()
+            .find(|entry| {
+                let p = entry.value();
+                p.dex == dex && p.pair.symbol == pair_symbol
+            })
+            .map(|entry| entry.value().clone())
     }
 
     /// Get all pools for a specific pair across all DEXs
     pub fn get_pools_for_pair(&self, pair_symbol: &str) -> Vec<PoolState> {
         self.pools
             .iter()
-            .filter(|entry| entry.key().1 == pair_symbol)
+            .filter(|entry| entry.value().pair.symbol == pair_symbol)
             .map(|entry| entry.value().clone())
             .collect()
     }
@@ -90,10 +98,9 @@ impl PoolStateManager {
         (count, min_block, max_block)
     }
 
-    /// Remove a pool from state
-    pub fn remove_pool(&self, dex: DexType, pair_symbol: &str) -> Option<PoolState> {
-        let key = (dex, pair_symbol.to_string());
-        self.pools.remove(&key).map(|(_, v)| v)
+    /// Remove a pool from state by address
+    pub fn remove_pool(&self, address: &Address) -> Option<PoolState> {
+        self.pools.remove(address).map(|(_, v)| v)
     }
 
     /// Clear all pool states
@@ -101,35 +108,43 @@ impl PoolStateManager {
         self.pools.clear();
     }
 
-    /// Check if a pool exists
+    /// Check if a pool exists by DEX and pair (iterates)
     pub fn contains(&self, dex: DexType, pair_symbol: &str) -> bool {
-        let key = (dex, pair_symbol.to_string());
-        self.pools.contains_key(&key)
+        self.pools
+            .iter()
+            .any(|entry| {
+                let p = entry.value();
+                p.dex == dex && p.pair.symbol == pair_symbol
+            })
     }
 
     // === V3 Pool Methods ===
 
     /// Add or update a V3 pool state
     pub fn update_v3_pool(&self, pool: V3PoolState) {
-        let key = (pool.dex, pool.pair.symbol.clone());
         debug!(
-            "Updating V3 pool: {} on {:?} - tick: {}, fee: {}",
-            pool.pair.symbol, pool.dex, pool.tick, pool.fee
+            "Updating V3 pool: {} on {:?} @ {:?} - tick: {}, fee: {}",
+            pool.pair.symbol, pool.dex, pool.address, pool.tick, pool.fee
         );
-        self.v3_pools.insert(key, pool);
+        self.v3_pools.insert(pool.address, pool);
     }
 
-    /// Get V3 pool state for a specific DEX and pair
+    /// Get V3 pool state for a specific DEX and pair (iterates; O(n) for ~30 pools)
     pub fn get_v3_pool(&self, dex: DexType, pair_symbol: &str) -> Option<V3PoolState> {
-        let key = (dex, pair_symbol.to_string());
-        self.v3_pools.get(&key).map(|entry| entry.clone())
+        self.v3_pools
+            .iter()
+            .find(|entry| {
+                let p = entry.value();
+                p.dex == dex && p.pair.symbol == pair_symbol
+            })
+            .map(|entry| entry.value().clone())
     }
 
     /// Get all V3 pools for a specific pair across all fee tiers
     pub fn get_v3_pools_for_pair(&self, pair_symbol: &str) -> Vec<V3PoolState> {
         self.v3_pools
             .iter()
-            .filter(|entry| entry.key().1 == pair_symbol)
+            .filter(|entry| entry.value().pair.symbol == pair_symbol)
             .map(|entry| entry.value().clone())
             .collect()
     }
@@ -182,8 +197,12 @@ mod tests {
     use ethers::types::{Address, U256};
 
     fn create_test_pool(dex: DexType, symbol: &str, reserve0: u64, reserve1: u64) -> PoolState {
+        // Use a deterministic address based on dex+symbol so each pool gets a unique address
+        let addr_seed = format!("{:?}:{}", dex, symbol);
+        let hash = ethers::utils::keccak256(addr_seed.as_bytes());
+        let address = Address::from_slice(&hash[..20]);
         PoolState {
-            address: Address::zero(),
+            address,
             dex,
             pair: TradingPair::new(Address::zero(), Address::zero(), symbol.to_string()),
             reserve0: U256::from(reserve0),
@@ -218,6 +237,45 @@ mod tests {
 
         let pools = manager.get_pools_for_pair("ETH/USDC");
         assert_eq!(pools.len(), 2);
+    }
+
+    #[test]
+    fn test_same_dex_pair_different_address_no_collision() {
+        // Regression: two pools with same DexType + pair_symbol but different addresses
+        // should NOT overwrite each other (the dual-USDC scenario).
+        let manager = PoolStateManager::new();
+
+        let addr_a = Address::from_low_u64_be(0xAAA);
+        let addr_b = Address::from_low_u64_be(0xBBB);
+
+        let pool_a = PoolState {
+            address: addr_a,
+            dex: DexType::Uniswap,
+            pair: TradingPair::new(Address::zero(), Address::zero(), "WETH/USDC".to_string()),
+            reserve0: U256::from(1000),
+            reserve1: U256::from(2000),
+            last_updated: 100,
+            token0_decimals: 18,
+            token1_decimals: 6,
+        };
+        let pool_b = PoolState {
+            address: addr_b,
+            dex: DexType::Uniswap,
+            pair: TradingPair::new(Address::zero(), Address::zero(), "WETH/USDC".to_string()),
+            reserve0: U256::from(3000),
+            reserve1: U256::from(4000),
+            last_updated: 100,
+            token0_decimals: 18,
+            token1_decimals: 6,
+        };
+
+        manager.update_pool(pool_a);
+        manager.update_pool(pool_b);
+
+        // Both should exist
+        let all = manager.get_pools_for_pair("WETH/USDC");
+        assert_eq!(all.len(), 2, "Both pools should coexist");
+        assert_eq!(manager.get_all_pools().len(), 2);
     }
 
     #[test]
