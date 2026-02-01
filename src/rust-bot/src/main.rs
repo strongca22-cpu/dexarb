@@ -27,12 +27,15 @@
 //! Modified: 2026-01-30 - V2↔V3 cross-protocol: V2PoolSyncer, decimal-adjusted pricing
 //! Modified: 2026-01-31 - Multi-chain: --chain CLI arg, chain-aware .env + data paths
 //! Modified: 2026-01-31 - Route cooldown: escalating backoff suppresses stale/dead spreads
+//! Modified: 2026-02-01 - WS timeout+reconnect: 30s timeout on block_stream.next(), auto-reconnect loop
+//! Modified: 2026-02-01 - A4 mempool monitor: observation mode (decode pending swaps, CSV log, cross-ref)
 
 use anyhow::Result;
 use clap::Parser;
 use dexarb_bot::arbitrage::{MulticallQuoter, OpportunityDetector, RouteCooldown, TradeExecutor, VerifiedOpportunity};
 use dexarb_bot::config::load_config_from_file;
 use dexarb_bot::filters::WhitelistFilter;
+use dexarb_bot::mempool::MempoolMode;
 use dexarb_bot::pool::{PoolStateManager, V2PoolSyncer, V3PoolSyncer, SUSHI_V3_FEE_TIERS, V3_FEE_TIERS};
 use dexarb_bot::types::{DexType, PoolState, TradingPair, V3PoolState};
 use std::collections::HashMap;
@@ -40,6 +43,7 @@ use dexarb_bot::price_logger::PriceLogger;
 use ethers::prelude::*;
 use futures::StreamExt;
 use std::sync::Arc;
+use tokio::time::{timeout, Duration};
 use tracing::{error, info, warn, Level};
 use tracing_subscriber;
 
@@ -82,17 +86,15 @@ async fn main() -> Result<()> {
     info!("Trading pairs: {}", config.pairs.len());
     info!("Poll interval: {}ms", config.poll_interval_ms);
 
-    // Initialize providers (two WS connections to avoid subscription contention)
-    // Provider 1: RPC calls (sync, Quoter, execution)
-    // Provider 2: Block subscription only (dedicated reader for newHeads)
-    info!("Connecting to {} via WebSocket (RPC + subscription)...", config.chain_name);
+    // Initialize provider for RPC calls (sync, Quoter, execution).
+    // A separate WS connection for block subscription is created in the reconnect loop below.
+    info!("Connecting to {} via WebSocket (RPC provider)...", config.chain_name);
     let provider = Provider::<Ws>::connect(&config.rpc_url).await?;
     let provider = Arc::new(provider);
-    let sub_provider = Provider::<Ws>::connect(&config.rpc_url).await?;
 
     // Verify connection
     let block = provider.get_block_number().await?;
-    info!("Connected! Current block: {} (2 WS connections)", block);
+    info!("Connected! Current block: {}", block);
 
     // Load whitelist (chain-specific default: config/{chain}/pools_whitelist.json)
     let default_whitelist = format!("/home/botuser/bots/dexarb/config/{}/pools_whitelist.json", config.chain_name);
@@ -346,6 +348,33 @@ async fn main() -> Result<()> {
     info!("Bot initialized successfully (monolithic mode)");
     info!("Starting opportunity detection loop (WS block subscription)...");
 
+    // A4: Mempool monitor — observe pending DEX swaps (async task, runs alongside block loop)
+    let mempool_mode = MempoolMode::from_env(&config.mempool_monitor_mode);
+    match &mempool_mode {
+        MempoolMode::Observe => {
+            let mempool_config = config.clone();
+            tokio::spawn(async move {
+                info!("A4: Mempool monitor starting (observation mode)...");
+                if let Err(e) = dexarb_bot::mempool::run_observation(mempool_config).await {
+                    error!("A4: Mempool monitor exited with error: {}", e);
+                }
+            });
+            info!("A4: Mempool monitor spawned (observation mode)");
+        }
+        MempoolMode::Execute => {
+            warn!("A4: Mempool execute mode not yet implemented (Phase 3). Running in observe mode instead.");
+            let mempool_config = config.clone();
+            tokio::spawn(async move {
+                if let Err(e) = dexarb_bot::mempool::run_observation(mempool_config).await {
+                    error!("A4: Mempool monitor exited with error: {}", e);
+                }
+            });
+        }
+        MempoolMode::Off => {
+            info!("A4: Mempool monitor DISABLED (MEMPOOL_MONITOR=off or unset)");
+        }
+    }
+
     // Route cooldown tracker — suppresses stale/dead spreads with escalating backoff
     let mut route_cooldown = RouteCooldown::new(config.route_cooldown_blocks);
     if config.route_cooldown_blocks > 0 {
@@ -418,19 +447,70 @@ async fn main() -> Result<()> {
     // If subscription drops, bot exits (restart via tmux/supervisor).
     let mut iteration = 0u64;
 
-    // Subscribe to new blocks via dedicated WS connection
-    info!("Subscribing to new blocks via WebSocket (dedicated connection)...");
-    let mut block_stream = sub_provider.subscribe_blocks().await?;
-    info!("WS block subscription active — reacting to blocks in real-time");
+    // Block subscription with timeout + reconnect.
+    // ethers-rs WS streams can silently stall (observed on Alchemy Base/Polygon).
+    // Timeout detects dead streams; outer loop reconnects the subscription provider.
+    let block_timeout = Duration::from_secs(30); // generous: Base=2s, Polygon=2s blocks
+    let mut ws_reconnects = 0u32;
+    const MAX_WS_RECONNECTS: u32 = 50; // ~25 min of retries before full exit
 
-    while let Some(block) = block_stream.next().await {
+    'reconnect: loop {
+    // Create a fresh WS connection for block subscription each reconnect cycle.
+    // Scoped to this loop iteration so borrow checker is satisfied when we `break`.
+    let sub_provider = match Provider::<Ws>::connect(&config.rpc_url).await {
+        Ok(p) => p,
+        Err(e) => {
+            ws_reconnects += 1;
+            if ws_reconnects > MAX_WS_RECONNECTS {
+                error!("WS connect failed after {} attempts: {} — exiting", ws_reconnects, e);
+                break 'reconnect;
+            }
+            warn!("WS connect failed (attempt {}): {} — retrying in 5s...", ws_reconnects, e);
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            continue 'reconnect;
+        }
+    };
+
+    info!("Subscribing to new blocks via WebSocket (dedicated connection)...");
+    let mut block_stream = match sub_provider.subscribe_blocks().await {
+        Ok(stream) => stream,
+        Err(e) => {
+            ws_reconnects += 1;
+            if ws_reconnects > MAX_WS_RECONNECTS {
+                error!("WS subscribe failed after {} attempts: {} — exiting", ws_reconnects, e);
+                break 'reconnect;
+            }
+            warn!("WS subscribe failed (attempt {}): {} — retrying in 5s...", ws_reconnects, e);
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            continue 'reconnect;
+        }
+    };
+    info!("WS block subscription active — reacting to blocks in real-time");
+    ws_reconnects = 0; // reset on successful subscribe
+
+    loop { // inner block-processing loop
+    let block = match timeout(block_timeout, block_stream.next()).await {
+        Ok(Some(block)) => block,
+        Ok(None) => {
+            // Stream ended gracefully (WS closed)
+            warn!("WS block stream ended (None) — reconnecting...");
+            break; // drop block_stream + sub_provider, continue 'reconnect
+        }
+        Err(_) => {
+            // Timeout — no block in 30s, WS is stale
+            warn!("No block received in {}s — WS stale, reconnecting...", block_timeout.as_secs());
+            break; // drop block_stream + sub_provider, continue 'reconnect
+        }
+    }; // end match timeout
+    {
             let current_block = block.number.map(|n| n.as_u64()).unwrap_or(last_block + 1);
 
             iteration += 1;
             total_scans += 1;
 
             // Log status periodically + cleanup expired cooldowns
-            if iteration % 100 == 0 {
+            // Early drop at iteration 10 to confirm bot is processing, then every 100
+            if iteration == 10 || iteration % 100 == 0 {
                 route_cooldown.cleanup(current_block);
                 let (v2_count, v3_count, min_block, max_block) = state_manager.combined_stats();
                 let cd_count = route_cooldown.active_count();
@@ -757,9 +837,11 @@ async fn main() -> Result<()> {
                     }
                 }
             }
-    } // end while let Some(block)
+    } // end block scope
+    } // end inner block-processing loop
+    } // end 'reconnect loop
 
-    // Stream ended — WS disconnected. Exit so supervisor can restart.
-    error!("WS block subscription stream ended — exiting for restart");
+    // All reconnects exhausted — exit so supervisor can restart the whole process.
+    error!("WS subscription loop exited — exiting for supervisor restart");
     Ok(())
 }

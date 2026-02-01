@@ -1,13 +1,15 @@
 # Next Steps - DEX Arbitrage Bot
 
-## Status: LIVE Polygon — A0-A3 Deployed, Diagnostic Running
+## Status: A4 Phase 1 Built — Deploy Observation Mode
 
 **Date:** 2026-02-01
 **Polygon:** 23 active pools (16 V3 + 7 V2), atomic via `ArbExecutorV3` (`0x7761...`), WS block sub, private RPC (1RPC)
-**Base:** 5 active V3 pools (whitelist v1.1), ArbExecutor deployed (`0x9054...`), 5hr dry-run done (25 simulated trades)
-**Build:** 58/58 Rust tests, clean release build
+**Base:** 5 active V3 pools (whitelist v1.1), ArbExecutor deployed (`0x9054...`), WS timeout+reconnect, dry-run collecting data
+**Build:** 61/61 Rust tests, clean release build. A4 mempool module added (660 LOC, 3 new tests).
 **Mode:** WS block subscription (~2s Polygon blocks), 3 tmux sessions (livebot, botstatus, botwatch)
-**A0-A3:** Deployed 2026-02-01. Event sync active, 5000 gwei priority, cached gas+nonce. Monitoring revert rate for diagnostic.
+**A0-A3:** Deployed 2026-02-01. Diagnostic complete: 97.1% revert rate confirms mempool-based competition.
+**A4 Phase 1:** Code complete. Mempool observer (decode pending V3 swaps, CSV log, cross-ref tracking). Ready for live deploy.
+**Next:** Build release, deploy, run 24h+ observation, analyze visibility + lead time.
 
 ---
 
@@ -165,6 +167,23 @@ Total: ~700ms from block to revert
 | **A1: Cache base fee** | **02-01** | **base_fee from block header → executor. Eliminates get_gas_price() RPC (~50ms).** |
 | **A2: Pre-cache nonce** | **02-01** | **AtomicU64 nonce tracking. Eliminates nonce lookup from fill_transaction (~50ms).** |
 | **A3: Event-driven sync** | **02-01** | **eth_getLogs (V3 Swap + V2 Sync) replaces 21 per-pool RPC calls. ~50ms vs ~400ms. ENV: EVENT_SYNC=true.** |
+| **A0-A3 diagnostic** | **02-01** | **2h45m session: 97.1% revert (was 99.1%), 11ms fill latency. Confirms mempool competition.** |
+| **A4 plan** | **02-01** | **Mempool monitor plan: 4 phases (observe→simulate→execute→own node). Full plan in docs/.** |
+| **Base diagnostic (S11)** | **02-01** | **Atomic verified, phantom spread audit (clean), WS timeout+reconnect, historical analysis, strategic: wait for A4** |
+| **A4 Phase 1 (code)** | **02-01** | **Mempool observer: 660 LOC, 11 selectors, Alchemy sub, CSV log, cross-ref tracker. ENV: MEMPOOL_MONITOR=observe.** |
+
+---
+
+## Immediate Next Steps — Deploy A4 Phase 1 + Analyze
+
+**A4 Phase 1 code is complete. Next: deploy live and collect data.**
+
+1. **Build release binary** — `cargo build --release` (A4 code is already integrated)
+2. **Restart Polygon live bot** — same tmux command, MEMPOOL_MONITOR=observe is already in .env.polygon. Monitor runs as async task alongside existing block-reactive arb.
+3. **Verify monitor is running** — look for `A4: Mempool monitor spawned (observation mode)` and `PENDING:` lines in logs
+4. **Run 24h+ observation** — collect CSV data at `data/polygon/mempool/pending_swaps_YYYYMMDD.csv`
+5. **Analyze observations** — check MEMPOOL STATS in log output (confirmation rate %, median lead time). Optionally write analysis script for CSV.
+6. **Decision gate** — If >30% visibility + >500ms lead time → proceed to Phase 2 (AMM simulation). If <20% → evaluate own Bor node ($80-100/mo).
 
 ---
 
@@ -199,20 +218,16 @@ The 99.1% revert rate is structural. A3 is the diagnostic: if speed alone is the
 - **Savings:** ~350ms per block (1 RPC call @ 75 CU vs ~21 calls @ ~1100 CU). Frees ~21M CU/month.
 - **Note:** Used `eth_getLogs` (synchronous, deterministic) instead of `eth_subscribe("logs")` (async stream) for simplicity. All events for the current block are guaranteed present before detection runs.
 
-**A4: Pending Mempool Monitoring (the strategic shift)**
-- **What:** Subscribe to `alchemy_pendingTransactions` to detect large DEX swaps before they confirm. Compute the post-swap price. Submit arb tx targeting the future state (backrunning).
-- **Why:** This is how professional MEV bots operate. They don't react to confirmed blocks — they react to pending transactions and submit arbs that land in the same block, immediately after the target swap.
-- **Requires:** Available on free tier (verified 2026-02-01). Full tx objects needed for calldata decoding — at ~200 DEX txs/min, costs ~346M CU/month ($152/mo PAYG). But after A3 frees ~21M CU, V3-only monitoring (~2 txs/min) fits in free tier (~3.5M CU/month). V2 routers can use hashesOnly + selective `eth_getTransactionByHash` for relevant pairs.
-- **Caveat:** Alchemy sees only its own Bor node mempool — partial view. On Polygon, validators run independent Bor nodes with separate mempools. We won't see every pending swap, but Alchemy is a major provider.
-- **Architecture change:**
-  1. Watch for pending txs to DEX router addresses (filter by `toAddress`).
-  2. Decode calldata to determine swap direction, token, and amount.
-  3. Simulate post-swap pool state (apply the swap to current reserves/liquidity).
-  4. If the resulting cross-DEX spread exceeds fee threshold, submit arb tx immediately.
-  5. Use high gas priority to land immediately after the target swap.
-- **Files:** New `src/mempool/monitor.rs`, new `src/mempool/decoder.rs` (swap calldata parsing), modify `main.rs` to run mempool monitor alongside block loop.
-- **Complexity:** High. Swap calldata decoding, state simulation, race conditions.
-- **Gate:** Only pursue if A3 diagnostic shows revert rate still >95% (proving competitors use mempool, not just speed).
+**A4: Pending Mempool Monitoring (the strategic shift)** — IN PROGRESS
+- **Gate passed:** A3 diagnostic shows 97.1% revert rate (>95%). Confirmed: competitors use mempool.
+- **Full plan:** `docs/a4_mempool_monitor_plan.md`
+- **Phase 1 (Observation):** Subscribe to pending V3 txs, decode calldata, log swaps, measure Alchemy visibility + lead time. Decision gate: >30% visibility, >500ms lead time.
+- **Phase 2 (Simulation):** Compute post-swap pool state from calldata (V2 constant product, V3 sqrt-price).
+- **Phase 3 (Execution):** Submit backrun txs targeting simulated state. Skip estimateGas (A5). Gas bid to match target tx.
+- **Phase 4 (conditional):** Own Bor node ($80-100/mo) if Alchemy visibility <30%.
+- **Cross-chain:** Architecture is 100% reusable on Base, Arbitrum, Ethereum, BSC. Same ABIs, same AMM math. Building once for Polygon (hardest case) means every other chain is easier.
+- **CU budget:** V3 monitoring ~3.5M CU/month. Total with A3: ~14.2M CU/month. Within free tier.
+- **Files:** New `src/mempool/{mod,monitor,decoder,types,simulator}.rs`. Modify `main.rs`, `executor.rs`.
 
 **A5: Skip estimateGas (combined with A4)**
 - **What:** When submitting from mempool signal, skip `fill_transaction` (estimateGas). Set gas limit to a fixed safe value (e.g., 500K). Sign and send immediately.
@@ -250,7 +265,7 @@ The 99.1% revert rate is structural. A3 is the diagnostic: if speed alone is the
 - Adds ~100k gas overhead
 
 **A11: Additional Chains (Base, Arbitrum, Optimism)**
-- Base: ArbExecutor deployed, dry-run done, needs same architecture fixes
+- Base: ArbExecutor deployed, dry-run collecting data, WS resilience added. **Decision: wait for A4 to port.** Analysis shows same structural problem (block-reactive can't close). Base sequencer feed gives better mempool visibility than Polygon's Alchemy partial view.
 - Arbitrum/Optimism: placeholder dirs created
 - Same pattern: .env.{chain}, whitelist, deploy executor, data collect, go live
 
@@ -268,13 +283,28 @@ The 99.1% revert rate is structural. A3 is the diagnostic: if speed alone is the
 
 ---
 
-## Decision Point
+## Decision Point — RESOLVED 2026-02-01
 
-A0-A3 deployed 2026-02-01. Run the bot for 4+ hours then re-run `analyze_bot_session.py`:
+A0-A3 deployed and measured (2h 45m session, 34 attempts):
 
-- **If revert rate drops below ~80%:** Event-driven sync alone is enough to compete. Proceed with gas bump tuning and A6-A8 optimizations.
-- **If revert rate stays >95%:** Confirmed that competitors are backrunning from mempool, not just faster at reacting to blocks. Proceed with A4 (mempool monitoring) or evaluate whether Polygon MEV is viable for our infrastructure class.
-- **If revert rate drops but 0 profitable trades:** Gas priority is the remaining bottleneck. Tune A0 upward.
+| Metric | Pre-A0-A3 | Post-A0-A3 | Change |
+|--------|-----------|------------|--------|
+| Revert rate | 99.1% | **97.1%** | -2pp (marginal) |
+| Fill latency | ~200ms | **11ms** | -95% (fast!) |
+| On-chain submissions | 0 | 0 | No change |
+| Opportunities/hr | 170.8 | 84.8 | Cooldown filtering |
+
+**Result: Revert rate stayed >95%.** This confirms competitors are backrunning from mempool, not just faster at reacting to confirmed blocks. The 11ms fill latency proves our execution is fast — the state is stale because others already captured the opportunity from pending txs.
+
+**Decision: Proceed with A4 (mempool monitoring).** See `docs/a4_mempool_monitor_plan.md` for full plan.
+
+**Viability assessment:**
+- Capital is NOT the bottleneck ($25k+ available, spreads $0.14-$0.95)
+- Latency is NOT the bottleneck (5ms RTT, 11ms fill)
+- Compute is NOT the bottleneck (Rust on 1 vCPU, microsecond math)
+- Information advantage IS the bottleneck — need to see pending txs
+- A4 architecture is 100% reusable across all EVM chains (same ABIs, same AMM math)
+- Infrastructure cost fits free tier; own Bor node ~$80-100/mo if needed later
 
 ---
 
@@ -321,6 +351,31 @@ A0-A3 deployed 2026-02-01. Run the bot for 4+ hours then re-run `analyze_bot_ses
 | UniswapV3 | WETH/USDC | 0.01% | 100 | 0.2% | `0xb4CB8009...` |
 | SushiswapV3 | WETH/USDC | 0.05% | 100 | 1.3% | `0x57713F77...` |
 | SushiswapV3 | WETH/USDC | 0.30% | 90 | 4.7% | `0x41595326...` |
+
+### Base Historical Analysis (Session 11, 2026-02-01)
+
+**Data: ~14hr across Jan 31 + Feb 1 (70K+ price rows, 5 pools, 2 DEXes)**
+
+| Metric | Value |
+|--------|-------|
+| Opportunities/hr | 14.8 |
+| Median estimated profit | $0.08 |
+| Max estimated profit | $0.27 |
+| Profitable routes | 13/20 combos |
+| Best route | SushiV3 0.30% → UniV3 0.01% |
+| Realistic $/hr at $100-$500 | $0.50–$5.00 (after slippage) |
+| Phantom spreads | None detected |
+| QuoterV2 verified | Live cast call matches market ($2,443/WETH) |
+
+**Midmarket projections (pre-slippage, pre-competition):**
+
+| Size | $/hr | $/day | Reality |
+|------|------|-------|---------|
+| $100 | $1.33–1.75 | $32–42 | Realistic |
+| $500 | $9.68–11.87 | $232–285 | Mostly realistic |
+| $1K+ | $20+ | $480+ | Slippage on SushiV3 eats margin |
+
+**Strategic conclusion:** Real spreads, but block-reactive architecture cannot close trades. Same dynamics as Polygon (97.1% revert). Base is a better A4 target (sequencer = full mempool visibility). **Wait for A4, port from Polygon.**
 
 ---
 
@@ -390,7 +445,14 @@ tmux new-session -d -s dexarb-base "cd ~/bots/dexarb/src/rust-bot && ./target/re
 | `scripts/analyze_bot_session.py` | Session analysis (log + price CSV parsing) |
 | `scripts/bot_watch.sh` | Kill bot after first profitable trade |
 | `docs/private_rpc_polygon_research.md` | Private RPC research (FastLane dead, 1RPC metadata-only) |
+| `src/mempool/mod.rs` | A4 mempool module (monitor, decoder, types) |
+| `src/mempool/monitor.rs` | Alchemy pendingTx subscription, CSV logging, cross-ref tracker |
+| `src/mempool/decoder.rs` | Calldata decoder (11 selectors: V3, Algebra, V2) |
+| `src/mempool/types.rs` | MempoolMode, DecodedSwap, PendingSwap, ConfirmationTracker |
+| `docs/a4_mempool_monitor_plan.md` | A4 mempool monitor plan (phases, calldata ref, CU budget, cross-chain) |
+| `docs/session_summaries/2026-02-01_a4_phase1_mempool_monitor.md` | A4 Phase 1: mempool observer build, architecture, deploy plan |
+| `docs/session_summaries/2026-02-01_session11_base_diagnostic.md` | Session 11: Base atomic/phantom audit, WS fix, historical analysis |
 
 ---
 
-*Last updated: 2026-02-01 — A0-A3 deployed and live. Event-driven sync (A3) confirmed working: eth_getLogs parses V3 Swap + V2 Sync events per block. Gas priority 5000 gwei (A0), cached base_fee (A1), AtomicU64 nonce (A2). Estimated ~450ms latency reduction (700ms→250ms). Diagnostic running: if revert rate drops below 80%, speed was the issue. If >95%, proceed to A4 (mempool backrunning).*
+*Last updated: 2026-02-01 (A4 Phase 1) — Mempool observer code complete (660 LOC, 11 selectors, Alchemy pendingTx sub, CSV log, cross-ref tracker). 61/61 tests. ENV: MEMPOOL_MONITOR=observe. Next: build release, deploy, run 24h+ observation, analyze visibility/lead time. Full plans: docs/a4_mempool_monitor_plan.md, docs/session_summaries/2026-02-01_a4_phase1_mempool_monitor.md.*

@@ -191,5 +191,9 @@ fn load_config_inner() -> Result<BotConfig> {
 
         // Private RPC for tx submission (Polygon Fastlane — optional)
         private_rpc_url: std::env::var("PRIVATE_RPC_URL").ok(),
+
+        // A4 Mempool Monitor mode (default: off)
+        mempool_monitor_mode: std::env::var("MEMPOOL_MONITOR")
+            .unwrap_or_else(|_| "off".to_string()),
     })
 }

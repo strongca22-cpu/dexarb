@@ -550,6 +550,12 @@ pub struct BotConfig {
     // until block inclusion. All reads stay on the Alchemy WS connection.
     // Rollback: remove this env var to fall back to public mempool.
     pub private_rpc_url: Option<String>,
+
+    // A4 Mempool Monitor mode: "off", "observe", "execute"
+    // observe: log pending DEX swaps to CSV, measure visibility + lead time
+    // execute: submit backrun txs (Phase 3 — not yet implemented)
+    // off: mempool monitoring disabled (default)
+    pub mempool_monitor_mode: String,
 }
 
 #[cfg(test)]

@@ -10,6 +10,7 @@ pub mod arbitrage;
 pub mod config;
 pub mod data_collector;
 pub mod filters;
+pub mod mempool;
 pub mod paper_trading;
 pub mod pool;
 pub mod price_logger;
