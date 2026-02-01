@@ -1,15 +1,16 @@
 # Next Steps - DEX Arbitrage Bot
 
-## Status: A4 Phase 1 Built — Deploy Observation Mode
+## Status: A4 Phase 1 DEPLOYED — Observation Running (24h collection)
 
 **Date:** 2026-02-01
 **Polygon:** 23 active pools (16 V3 + 7 V2), atomic via `ArbExecutorV3` (`0x7761...`), WS block sub, private RPC (1RPC)
-**Base:** 5 active V3 pools (whitelist v1.1), ArbExecutor deployed (`0x9054...`), WS timeout+reconnect, dry-run collecting data
-**Build:** 61/61 Rust tests, clean release build. A4 mempool module added (660 LOC, 3 new tests).
-**Mode:** WS block subscription (~2s Polygon blocks), 3 tmux sessions (livebot, botstatus, botwatch)
-**A0-A3:** Deployed 2026-02-01. Diagnostic complete: 97.1% revert rate confirms mempool-based competition.
-**A4 Phase 1:** Code complete. Mempool observer (decode pending V3 swaps, CSV log, cross-ref tracking). Ready for live deploy.
-**Next:** Build release, deploy, run 24h+ observation, analyze visibility + lead time.
+**Base:** 5 active V3 pools (whitelist v1.1), ArbExecutor deployed (`0x9054...`), EVENT_SYNC=true, dry-run + mempool observe
+**Build:** 61/61 Rust tests, clean release build. A4 mempool module (660 LOC, 3 tests).
+**Mode:** 4 tmux sessions (livebot_polygon, dexarb-base, botstatus, botwatch)
+**A0-A3:** Deployed 2026-02-01. Diagnostic: 97.1% revert rate → mempool competition confirmed.
+**A4 Phase 1:** DEPLOYED. Early results (15min): 100% confirmation rate, 6.9s median lead time. Both gates pass.
+**Base mempool:** 0 pending txs — sequencer model has no public mempool via Alchemy.
+**Next:** Complete 24h observation, run `python3 scripts/analyze_mempool.py`, decide on Phase 2.
 
 ---
 
@@ -171,19 +172,20 @@ Total: ~700ms from block to revert
 | **A4 plan** | **02-01** | **Mempool monitor plan: 4 phases (observe→simulate→execute→own node). Full plan in docs/.** |
 | **Base diagnostic (S11)** | **02-01** | **Atomic verified, phantom spread audit (clean), WS timeout+reconnect, historical analysis, strategic: wait for A4** |
 | **A4 Phase 1 (code)** | **02-01** | **Mempool observer: 660 LOC, 11 selectors, Alchemy sub, CSV log, cross-ref tracker. ENV: MEMPOOL_MONITOR=observe.** |
+| **A4 Phase 1 (deploy)** | **02-01** | **Polygon + Base deployed. Early: 100% confirmation, 6.9s lead. Base: 0 pending (sequencer). Analysis script written.** |
 
 ---
 
-## Immediate Next Steps — Deploy A4 Phase 1 + Analyze
+## Immediate Next Steps — Complete A4 Observation + Phase 2 Decision
 
-**A4 Phase 1 code is complete. Next: deploy live and collect data.**
+**A4 Phase 1 is deployed and collecting data. Both decision gates passing early.**
 
-1. **Build release binary** — `cargo build --release` (A4 code is already integrated)
-2. **Restart Polygon live bot** — same tmux command, MEMPOOL_MONITOR=observe is already in .env.polygon. Monitor runs as async task alongside existing block-reactive arb.
-3. **Verify monitor is running** — look for `A4: Mempool monitor spawned (observation mode)` and `PENDING:` lines in logs
-4. **Run 24h+ observation** — collect CSV data at `data/polygon/mempool/pending_swaps_YYYYMMDD.csv`
-5. **Analyze observations** — check MEMPOOL STATS in log output (confirmation rate %, median lead time). Optionally write analysis script for CSV.
-6. **Decision gate** — If >30% visibility + >500ms lead time → proceed to Phase 2 (AMM simulation). If <20% → evaluate own Bor node ($80-100/mo).
+1. **Complete 24h+ observation** — collecting at `data/polygon/mempool/pending_swaps_YYYYMMDD.csv`. ~4 decoded/min on Polygon.
+2. **Run analysis** — `python3 scripts/analyze_mempool.py` (or `--chain base` for Base)
+3. **Decision gate** — If >30% visibility + >500ms lead time (currently 100% / 6.9s): proceed to Phase 2. If data degrades after 24h, extend observation.
+4. **Phase 2 (if gate passes):** AMM state simulation — compute post-swap pool state from pending calldata. V2 constant-product + V3 sqrt-price within tick.
+5. **Base strategy:** Alchemy mempool not viable (0 pending txs). Evaluate sequencer feed or deprioritize Base for mempool approach.
+6. **Commit analysis script** — `scripts/analyze_mempool.py` not yet committed.
 
 ---
 
@@ -443,6 +445,8 @@ tmux new-session -d -s dexarb-base "cd ~/bots/dexarb/src/rust-bot && ./target/re
 | `config/base/pools_whitelist.json` | v1.1: 5 active, 1 observation, 2 blacklisted |
 | `.env.base` | Base config (QuoterV2, USDC native, multicall skip) |
 | `scripts/analyze_bot_session.py` | Session analysis (log + price CSV parsing) |
+| `scripts/analyze_price_logs.py` | Cross-DEX price spreads, volatility, frequency (stdlib only) |
+| `scripts/analyze_mempool.py` | A4 mempool analysis: visibility, lead time, decoder, gas, hourly |
 | `scripts/bot_watch.sh` | Kill bot after first profitable trade |
 | `docs/private_rpc_polygon_research.md` | Private RPC research (FastLane dead, 1RPC metadata-only) |
 | `src/mempool/mod.rs` | A4 mempool module (monitor, decoder, types) |
@@ -452,7 +456,8 @@ tmux new-session -d -s dexarb-base "cd ~/bots/dexarb/src/rust-bot && ./target/re
 | `docs/a4_mempool_monitor_plan.md` | A4 mempool monitor plan (phases, calldata ref, CU budget, cross-chain) |
 | `docs/session_summaries/2026-02-01_a4_phase1_mempool_monitor.md` | A4 Phase 1: mempool observer build, architecture, deploy plan |
 | `docs/session_summaries/2026-02-01_session11_base_diagnostic.md` | Session 11: Base atomic/phantom audit, WS fix, historical analysis |
+| `docs/session_summaries/2026-02-01_a4_deploy_and_analysis.md` | A4 deploy, Base enable, analysis script, early results |
 
 ---
 
-*Last updated: 2026-02-01 (A4 Phase 1) — Mempool observer code complete (660 LOC, 11 selectors, Alchemy pendingTx sub, CSV log, cross-ref tracker). 61/61 tests. ENV: MEMPOOL_MONITOR=observe. Next: build release, deploy, run 24h+ observation, analyze visibility/lead time. Full plans: docs/a4_mempool_monitor_plan.md, docs/session_summaries/2026-02-01_a4_phase1_mempool_monitor.md.*
+*Last updated: 2026-02-01 (A4 Deploy) — A4 Phase 1 deployed on Polygon + Base. Early data (15min): 100% confirmation rate, 6.9s median lead time — both decision gates passing. Base: 0 pending txs (sequencer). Analysis script: scripts/analyze_mempool.py. 4 tmux sessions running. Next: complete 24h observation, run analysis, decide on Phase 2.*
