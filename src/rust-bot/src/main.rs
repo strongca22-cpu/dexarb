@@ -349,23 +349,26 @@ async fn main() -> Result<()> {
     info!("Starting opportunity detection loop (WS block subscription)...");
 
     // A4: Mempool monitor — observe pending DEX swaps (async task, runs alongside block loop)
+    // Phase 2: passes PoolStateManager (Arc clone) for AMM state simulation.
     let mempool_mode = MempoolMode::from_env(&config.mempool_monitor_mode);
     match &mempool_mode {
         MempoolMode::Observe => {
             let mempool_config = config.clone();
+            let mempool_pool_state = state_manager.clone();
             tokio::spawn(async move {
-                info!("A4: Mempool monitor starting (observation mode)...");
-                if let Err(e) = dexarb_bot::mempool::run_observation(mempool_config).await {
+                info!("A4: Mempool monitor starting (observation + simulation mode)...");
+                if let Err(e) = dexarb_bot::mempool::run_observation(mempool_config, mempool_pool_state).await {
                     error!("A4: Mempool monitor exited with error: {}", e);
                 }
             });
-            info!("A4: Mempool monitor spawned (observation mode)");
+            info!("A4: Mempool monitor spawned (observation + Phase 2 simulation)");
         }
         MempoolMode::Execute => {
-            warn!("A4: Mempool execute mode not yet implemented (Phase 3). Running in observe mode instead.");
+            warn!("A4: Mempool execute mode not yet implemented (Phase 3). Running in observe+sim mode instead.");
             let mempool_config = config.clone();
+            let mempool_pool_state = state_manager.clone();
             tokio::spawn(async move {
-                if let Err(e) = dexarb_bot::mempool::run_observation(mempool_config).await {
+                if let Err(e) = dexarb_bot::mempool::run_observation(mempool_config, mempool_pool_state).await {
                     error!("A4: Mempool monitor exited with error: {}", e);
                 }
             });

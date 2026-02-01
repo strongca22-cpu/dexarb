@@ -24,6 +24,7 @@
 //!     - V3 routers only for Phase 1 (~2 txs/min, ~3.5M CU/month)
 //!     - Cross-reference uses a separate WS connection for block + get_block calls
 //!     - CSV output: data/{chain}/mempool/pending_swaps_YYYYMMDD.csv
+//!     - Phase 2: simulated_opportunities + simulation_accuracy CSVs
 
 use anyhow::{Context, Result};
 use chrono::Utc;
@@ -33,17 +34,20 @@ use futures::StreamExt;
 use std::collections::HashMap;
 use std::io::Write;
 use tokio::time::{interval, Duration};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
+use crate::pool::PoolStateManager;
 use crate::types::BotConfig;
 
 use super::decoder;
-use super::types::{ConfirmationTracker, PendingSwap};
+use super::simulator;
+use super::types::{ConfirmationTracker, PendingSwap, SimulatedOpportunity, SimulationTracker};
 
 /// Run the mempool observation monitor.
 /// This is the main entry point, called from main.rs via tokio::spawn.
 /// Creates its own WS connections and runs indefinitely with auto-reconnect.
-pub async fn run_observation(config: BotConfig) -> Result<()> {
+/// Phase 2: accepts PoolStateManager for AMM state simulation.
+pub async fn run_observation(config: BotConfig, pool_state: PoolStateManager) -> Result<()> {
     let chain = &config.chain_name;
 
     // Create data directory for CSV logs
@@ -91,7 +95,7 @@ pub async fn run_observation(config: BotConfig) -> Result<()> {
     const MAX_RECONNECTS: u32 = 50;
 
     loop {
-        match run_observation_inner(&config, &data_dir, &router_hex, &router_lookup).await {
+        match run_observation_inner(&config, &data_dir, &router_hex, &router_lookup, &pool_state).await {
             Ok(()) => {
                 // Clean exit (shouldn't happen in observe mode)
                 info!("Mempool monitor exited cleanly");
@@ -125,6 +129,7 @@ async fn run_observation_inner(
     data_dir: &str,
     router_hex: &[String],
     router_lookup: &HashMap<Address, String>,
+    pool_state: &PoolStateManager,
 ) -> Result<()> {
     // Create WS provider for pending tx subscription
     let sub_provider = Provider::<Ws>::connect(&config.rpc_url)
@@ -163,6 +168,14 @@ async fn run_observation_inner(
 
     // Cross-reference tracker
     let mut tracker = ConfirmationTracker::new();
+
+    // Phase 2: Simulation tracker + CSV files
+    let mut sim_tracker = SimulationTracker::new();
+    let sim_csv_path = format!("{}/simulated_opportunities_{}.csv", data_dir, date_str);
+    let mut sim_csv_file = open_sim_csv(&sim_csv_path)?;
+    let accuracy_csv_path = format!("{}/simulation_accuracy_{}.csv", data_dir, date_str);
+    let mut accuracy_csv_file = open_accuracy_csv(&accuracy_csv_path)?;
+    info!("Phase 2: simulation CSVs → {} , {}", sim_csv_path, accuracy_csv_path);
 
     // Block tracking for cross-reference
     let mut last_checked_block = rpc_provider.get_block_number().await?.as_u64();
@@ -234,6 +247,62 @@ async fn run_observation_inner(
                                     decoded.fee_tier.map(|f| f.to_string()).unwrap_or_else(|| "dyn".to_string()),
                                     swap.gas_price_gwei,
                                 );
+
+                                // ── Phase 2: Simulate post-swap state ──
+                                if let Some(amount) = decoded.amount_in {
+                                    if let Some((dex, pair_sym, zero_for_one)) =
+                                        simulator::identify_affected_pool(&decoded, &router_name, pool_state)
+                                    {
+                                        let sim_result = if dex.is_v3() {
+                                            pool_state
+                                                .get_v3_pool(dex, &pair_sym)
+                                                .and_then(|pool| simulator::simulate_v3_swap(&pool, amount, zero_for_one))
+                                        } else {
+                                            pool_state
+                                                .get_pool(dex, &pair_sym)
+                                                .and_then(|pool| {
+                                                    let token_in = decoded.token_in.unwrap_or_default();
+                                                    simulator::simulate_v2_swap(&pool, amount, token_in)
+                                                })
+                                        };
+
+                                        if sim_result.is_none() {
+                                            debug!(
+                                                "SIM FAIL: {:?}/{} z4o={} amt={} — simulation returned None",
+                                                dex, pair_sym, zero_for_one, amount
+                                            );
+                                        }
+
+                                        if let Some(ref simulated) = sim_result {
+                                            debug!(
+                                                "SIM OK: {:?}/{} pre={:.6} post={:.6} impact={:.4}%",
+                                                dex, pair_sym, simulated.pre_swap_price, simulated.post_swap_price,
+                                                (simulated.post_swap_price - simulated.pre_swap_price).abs()
+                                                    / simulated.pre_swap_price * 100.0
+                                            );
+                                            let opportunities = simulator::check_post_swap_opportunities(
+                                                pool_state, simulated, config, tx.hash,
+                                                &decoded.function_name, amount, zero_for_one,
+                                                &swap.timestamp_utc,
+                                            );
+
+                                            for opp in &opportunities {
+                                                info!(
+                                                    "SIM OPP: {:?} | {} | {:.3}% spread | ${:.2} est | impact={:.4}%",
+                                                    tx.hash, opp.pair_symbol, opp.arb_spread_pct,
+                                                    opp.arb_est_profit_usd, opp.price_impact_pct,
+                                                );
+                                                if let Err(e) = write_sim_csv_row(&mut sim_csv_file, opp) {
+                                                    warn!("Sim CSV write error: {}", e);
+                                                }
+                                            }
+
+                                            // Track simulation for accuracy validation (with or without opportunity)
+                                            let best_opp = opportunities.into_iter().next();
+                                            sim_tracker.track(tx.hash, simulated.clone(), best_opp);
+                                        }
+                                    }
+                                }
                             }
                             None => {
                                 total_undecoded += 1;
@@ -272,6 +341,44 @@ async fn run_observation_inner(
                                             "CONFIRMED: {:?} | {} | lead_time={}ms | block={}",
                                             hash, router_name, lead_time_ms, block_num
                                         );
+
+                                        // Phase 2: Accuracy validation — compare simulated vs actual
+                                        if let Some((simulated, _opp)) = sim_tracker.check_confirmation(*hash) {
+                                            let actual_price = if simulated.is_v3 {
+                                                pool_state
+                                                    .get_v3_pool(simulated.dex, &simulated.pair_symbol)
+                                                    .map(|p| p.price())
+                                            } else {
+                                                pool_state
+                                                    .get_pool(simulated.dex, &simulated.pair_symbol)
+                                                    .map(|p| p.price_adjusted())
+                                            };
+
+                                            if let Some(actual) = actual_price {
+                                                let predicted = simulated.post_swap_price;
+                                                let error_pct = if actual != 0.0 {
+                                                    ((predicted - actual) / actual * 100.0).abs()
+                                                } else {
+                                                    f64::MAX
+                                                };
+
+                                                info!(
+                                                    "SIM VALIDATE: {:?} | {} | predicted={:.8} actual={:.8} | error={:.4}% | lead={}ms",
+                                                    hash, simulated.pair_symbol, predicted, actual, error_pct, lead_time_ms
+                                                );
+
+                                                sim_tracker.record_accuracy(error_pct);
+
+                                                let ts = Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
+                                                if let Err(e) = write_accuracy_csv_row(
+                                                    &mut accuracy_csv_file, &ts, hash,
+                                                    &simulated.pair_symbol, &format!("{:?}", simulated.dex),
+                                                    predicted, actual, error_pct, *lead_time_ms,
+                                                ) {
+                                                    warn!("Accuracy CSV write error: {}", e);
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                                 Ok(None) => {}
@@ -290,12 +397,14 @@ async fn run_observation_inner(
 
                 // Cleanup stale tracker entries (>2 min old = probably dropped)
                 tracker.cleanup(Duration::from_secs(120));
+                sim_tracker.cleanup(Duration::from_secs(120));
 
                 // Report stats every ~10 minutes (100 ticks × 6s)
                 if tick_count % 100 == 0 {
                     info!(
                         "MEMPOOL STATS | decoded={} undecoded={} | confirmed={}/{} ({:.1}%) | \
-                         median_lead={}ms mean_lead={}ms | tracking={} | blocks_checked={}",
+                         median_lead={}ms mean_lead={}ms | tracking={} | blocks_checked={} | \
+                         sim: opps={} validated={} median_err={:.3}%",
                         total_decoded,
                         total_undecoded,
                         tracker.total_confirmed,
@@ -305,6 +414,9 @@ async fn run_observation_inner(
                         tracker.mean_lead_time_ms(),
                         tracker.tracking_count(),
                         blocks_checked,
+                        sim_tracker.total_opportunities,
+                        sim_tracker.total_validated,
+                        sim_tracker.median_error_pct(),
                     );
                 }
             }
@@ -364,6 +476,98 @@ fn write_csv_row(file: &mut std::fs::File, swap: &PendingSwap) -> Result<()> {
             .unwrap_or_default(),
         swap.gas_price_gwei,
         swap.max_priority_fee_gwei,
+    )?;
+    file.flush()?;
+    Ok(())
+}
+
+// ── Phase 2: Simulation CSV Helpers ─────────────────────────────────
+
+/// Open simulated opportunities CSV (append mode, write header if new)
+fn open_sim_csv(path: &str) -> Result<std::fs::File> {
+    let exists = std::path::Path::new(path).exists();
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .with_context(|| format!("Failed to open sim CSV: {}", path))?;
+
+    if !exists {
+        let mut f = file;
+        writeln!(
+            f,
+            "timestamp_utc,tx_hash,trigger_dex,trigger_function,pair_symbol,zero_for_one,\
+             amount_in,pre_swap_price,post_swap_price,price_impact_pct,\
+             arb_buy_dex,arb_sell_dex,arb_spread_pct,arb_est_profit_usd"
+        )?;
+        Ok(f)
+    } else {
+        Ok(file)
+    }
+}
+
+/// Open simulation accuracy CSV (append mode, write header if new)
+fn open_accuracy_csv(path: &str) -> Result<std::fs::File> {
+    let exists = std::path::Path::new(path).exists();
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .with_context(|| format!("Failed to open accuracy CSV: {}", path))?;
+
+    if !exists {
+        let mut f = file;
+        writeln!(
+            f,
+            "timestamp_utc,tx_hash,pair_symbol,dex,predicted_price,actual_price,error_pct,lead_time_ms"
+        )?;
+        Ok(f)
+    } else {
+        Ok(file)
+    }
+}
+
+/// Write a simulated opportunity row
+fn write_sim_csv_row(file: &mut std::fs::File, opp: &SimulatedOpportunity) -> Result<()> {
+    writeln!(
+        file,
+        "{},{:?},{:?},{},{},{},{},{:.10},{:.10},{:.6},{:?},{:?},{:.6},{:.4}",
+        opp.timestamp_utc,
+        opp.tx_hash,
+        opp.trigger_dex,
+        opp.trigger_function,
+        opp.pair_symbol,
+        opp.zero_for_one,
+        opp.amount_in,
+        opp.pre_swap_price,
+        opp.post_swap_price,
+        opp.price_impact_pct,
+        opp.arb_buy_dex,
+        opp.arb_sell_dex,
+        opp.arb_spread_pct,
+        opp.arb_est_profit_usd,
+    )?;
+    file.flush()?;
+    Ok(())
+}
+
+/// Write an accuracy validation row
+#[allow(clippy::too_many_arguments)]
+fn write_accuracy_csv_row(
+    file: &mut std::fs::File,
+    timestamp: &str,
+    tx_hash: &TxHash,
+    pair_symbol: &str,
+    dex: &str,
+    predicted: f64,
+    actual: f64,
+    error_pct: f64,
+    lead_time_ms: u64,
+) -> Result<()> {
+    writeln!(
+        file,
+        "{},{:?},{},{},{:.10},{:.10},{:.6},{}",
+        timestamp, tx_hash, pair_symbol, dex, predicted, actual, error_pct, lead_time_ms,
     )?;
     file.flush()?;
     Ok(())
