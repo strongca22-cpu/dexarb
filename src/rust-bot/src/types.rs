@@ -571,6 +571,21 @@ pub struct BotConfig {
     // Used for gas cost calculations everywhere. Default 0.50 (MATIC).
     // Set via NATIVE_TOKEN_PRICE_USD env var.
     pub native_token_price_usd: f64,
+
+    // Secondary quote token address (native USDC on Polygon).
+    // When set, pools using either USDC variant are eligible for arbitrage.
+    // Pools with different quote tokens are never compared against each other.
+    // Polygon: USDC.e (primary) + native USDC (0x3c499c...) (secondary)
+    pub quote_token_address_native: Option<Address>,
+}
+
+impl BotConfig {
+    /// Check if an address is any recognized quote token (primary or native variant).
+    /// Used by detector, simulator, and mempool handler to determine swap direction.
+    pub fn is_quote_token(&self, addr: &Address) -> bool {
+        *addr == self.quote_token_address
+            || self.quote_token_address_native.map_or(false, |a| a == *addr)
+    }
 }
 
 #[cfg(test)]

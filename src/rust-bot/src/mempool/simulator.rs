@@ -567,20 +567,20 @@ pub fn check_post_swap_opportunities(
     }
 
     // Determine quote token direction (same logic as detector.rs)
-    // quote_is_token0: if USDC address < base token address
-    // On Polygon: USDC (0x3c49...) < WETH (0x7ceb...) → true for WETH/USDC
-    //             WMATIC (0x0d50...) < USDC (0x3c49...) → false for WMATIC/USDC
+    // quote_is_token0: if any recognized USDC variant is token0
+    // On Polygon: USDC variants (0x2791..., 0x3c49...) < WETH (0x7ceb...) → true for WETH/USDC
+    //             WMATIC (0x0d50...) < USDC variants → false for WMATIC/USDC
     let quote_is_token0 = if simulated.is_v3 {
         state_manager
             .get_v3_pools_for_pair(&simulated.pair_symbol)
             .first()
-            .map(|p| p.pair.token0 == config.quote_token_address)
+            .map(|p| config.is_quote_token(&p.pair.token0))
             .unwrap_or(true)
     } else {
         state_manager
             .get_pools_for_pair(&simulated.pair_symbol)
             .first()
-            .map(|p| p.pair.token0 == config.quote_token_address)
+            .map(|p| config.is_quote_token(&p.pair.token0))
             .unwrap_or(true)
     };
 

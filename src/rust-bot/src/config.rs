@@ -104,6 +104,11 @@ fn load_config_inner() -> Result<BotConfig> {
         .and_then(|v| v.parse().ok())
         .unwrap_or(0.05);
 
+    // Secondary quote token (native USDC on Polygon)
+    let quote_token_address_native = std::env::var("QUOTE_TOKEN_ADDRESS_NATIVE")
+        .ok()
+        .and_then(|s| Address::from_str(&s).ok());
+
     // Native token price — must resolve before chain_name is moved into BotConfig
     let native_token_price_usd: f64 = std::env::var("NATIVE_TOKEN_PRICE_USD")
         .ok()
@@ -227,5 +232,6 @@ fn load_config_inner() -> Result<BotConfig> {
             .unwrap_or(0.50),
 
         native_token_price_usd,
+        quote_token_address_native,
     })
 }

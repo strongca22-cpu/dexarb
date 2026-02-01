@@ -37,6 +37,10 @@ struct UnifiedPool {
     token0_decimals: u8,
     token1_decimals: u8,
     liquidity: u128,
+    /// The actual quote token address this pool uses (USDC.e or native USDC).
+    /// Pools with different quote tokens must NOT be compared for arb —
+    /// ArbExecutor.sol starts and ends with the same token.
+    quote_token: Address,
 }
 
 /// Opportunity detector for cross-DEX arbitrage
@@ -143,6 +147,17 @@ impl OpportunityDetector {
                 continue;
             }
 
+            // Determine which quote token this pool uses (USDC.e or native USDC).
+            // V3 pools sort token0 < token1 by address. The quote token is whichever
+            // of token0/token1 matches a recognized quote token address.
+            let qt = if self.config.is_quote_token(&pool.pair.token0) {
+                pool.pair.token0
+            } else if self.config.is_quote_token(&pool.pair.token1) {
+                pool.pair.token1
+            } else {
+                continue; // Neither token is a known quote token — skip
+            };
+
             unified_pools.push(UnifiedPool {
                 dex: pool.dex,
                 price,
@@ -152,6 +167,7 @@ impl OpportunityDetector {
                 token0_decimals: pool.token0_decimals,
                 token1_decimals: pool.token1_decimals,
                 liquidity: pool.liquidity,
+                quote_token: qt,
             });
         }
 
@@ -186,6 +202,15 @@ impl OpportunityDetector {
                 pool.reserve1.low_u128(),
             );
 
+            // Determine quote token for this V2 pool
+            let qt = if self.config.is_quote_token(&pool.pair.token0) {
+                pool.pair.token0
+            } else if self.config.is_quote_token(&pool.pair.token1) {
+                pool.pair.token1
+            } else {
+                continue; // Neither token is a known quote token — skip
+            };
+
             unified_pools.push(UnifiedPool {
                 dex: pool.dex,
                 price,
@@ -195,6 +220,7 @@ impl OpportunityDetector {
                 token0_decimals: pool.token0_decimals,
                 token1_decimals: pool.token1_decimals,
                 liquidity,
+                quote_token: qt,
             });
         }
 
@@ -206,18 +232,21 @@ impl OpportunityDetector {
         // The executor will try them in profit order and skip Quoter-rejected ones
         let mut results: Vec<ArbitrageOpportunity> = Vec::new();
 
-        // Determine if the quote token (USDC) is V3 token0 or token1.
-        // V3 sorts tokens by address. Quote token address comes from config
-        // (Polygon: USDC.e 0x2791..., Base: native USDC 0x8335...).
-        // This controls buy/sell assignment and swap direction.
-        let quote_is_token0 = unified_pools.first()
-            .map(|p| p.pair.token0 == self.config.quote_token_address)
-            .unwrap_or(true);
-
         for i in 0..unified_pools.len() {
             for j in (i + 1)..unified_pools.len() {
                 let pool_a = &unified_pools[i];
                 let pool_b = &unified_pools[j];
+
+                // CRITICAL: Only compare pools that use the SAME quote token variant.
+                // ArbExecutor.sol starts and ends with the same token — can't mix
+                // USDC.e and native USDC in a single atomic arb.
+                if pool_a.quote_token != pool_b.quote_token {
+                    continue;
+                }
+
+                // Determine if the quote token is V3 token0 for this pool pair.
+                // Both pools share the same quote token, so checking pool_a suffices.
+                let quote_is_token0 = pool_a.pair.token0 == pool_a.quote_token;
 
                 // V3 price = token1/token0
                 //
@@ -593,6 +622,7 @@ mod tests {
             mempool_min_priority_gwei: 1000,
             mempool_gas_profit_cap: 0.50,
             native_token_price_usd: 0.50,
+            quote_token_address_native: None,
         }
     }
 

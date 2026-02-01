@@ -84,6 +84,9 @@ async fn main() -> Result<()> {
     info!("Configuration loaded from {} (chain_id: {})", env_file, config.chain_id);
     info!("RPC URL: {}", &config.rpc_url[..40.min(config.rpc_url.len())]);
     info!("Quote token: {:?}", config.quote_token_address);
+    if let Some(native) = config.quote_token_address_native {
+        info!("Quote token (native): {:?}", native);
+    }
     info!("Gas cost estimate: ${:.3}", config.estimated_gas_cost_usd);
     info!("Trading pairs: {}", config.pairs.len());
     info!("Poll interval: {}ms", config.poll_interval_ms);
@@ -1059,8 +1062,9 @@ fn build_mempool_arb_opportunity(
         state_manager.get_pool(opp.arb_sell_dex, &opp.pair_symbol).map(|p| p.address)
     };
 
-    // Determine quote_token_is_token0 by comparing pool's token0 with config's quote_token
-    let quote_token_is_token0 = token0 == config.quote_token_address;
+    // Determine quote_token_is_token0 by comparing pool's token0 with known quote tokens.
+    // Supports both USDC.e (primary) and native USDC (secondary) on Polygon.
+    let quote_token_is_token0 = config.is_quote_token(&token0);
 
     // Trade size: max_trade_size_usd in USDC raw units (6 decimals)
     let quote_decimals = if quote_token_is_token0 { t0_dec } else { t1_dec };
