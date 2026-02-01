@@ -195,5 +195,23 @@ fn load_config_inner() -> Result<BotConfig> {
         // A4 Mempool Monitor mode (default: off)
         mempool_monitor_mode: std::env::var("MEMPOOL_MONITOR")
             .unwrap_or_else(|_| "off".to_string()),
+
+        // A4 Phase 3: Mempool execution parameters
+        mempool_min_profit_usd: std::env::var("MEMPOOL_MIN_PROFIT_USD")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0.05),
+        mempool_gas_limit: std::env::var("MEMPOOL_GAS_LIMIT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(500_000),
+        mempool_min_priority_gwei: std::env::var("MEMPOOL_MIN_PRIORITY_GWEI")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1000),
+        mempool_gas_profit_cap: std::env::var("MEMPOOL_GAS_PROFIT_CAP")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0.50),
     })
 }

@@ -553,9 +553,19 @@ pub struct BotConfig {
 
     // A4 Mempool Monitor mode: "off", "observe", "execute"
     // observe: log pending DEX swaps to CSV, measure visibility + lead time
-    // execute: submit backrun txs (Phase 3 — not yet implemented)
+    // execute: submit backrun txs (Phase 3)
     // off: mempool monitoring disabled (default)
     pub mempool_monitor_mode: String,
+
+    // A4 Phase 3: Mempool execution parameters
+    // Minimum estimated profit to send a mempool signal to the executor (default $0.05)
+    pub mempool_min_profit_usd: f64,
+    // Fixed gas limit for mempool-sourced txs (skip estimateGas for speed) (default 500000)
+    pub mempool_gas_limit: u64,
+    // Minimum priority fee floor in gwei (Polygon competitive floor) (default 1000)
+    pub mempool_min_priority_gwei: u64,
+    // Max fraction of estimated profit to spend on gas (default 0.50 = 50%)
+    pub mempool_gas_profit_cap: f64,
 }
 
 #[cfg(test)]

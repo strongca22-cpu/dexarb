@@ -33,6 +33,8 @@ use ethers::types::Transaction;
 use futures::StreamExt;
 use std::collections::HashMap;
 use std::io::Write;
+use std::time::Instant;
+use tokio::sync::mpsc;
 use tokio::time::{interval, Duration};
 use tracing::{debug, error, info, warn};
 
@@ -41,13 +43,39 @@ use crate::types::BotConfig;
 
 use super::decoder;
 use super::simulator;
-use super::types::{ConfirmationTracker, PendingSwap, SimulatedOpportunity, SimulationTracker};
+use super::types::{ConfirmationTracker, MempoolSignal, PendingSwap, SimulatedOpportunity, SimulationTracker};
+
+/// Phase 3: Minimum spread (%) to trigger execution signal.
+/// 0.01% = 1 bps net-of-fees — filters noise.
+const MEMPOOL_MIN_SPREAD_PCT: f64 = 0.01;
+
+/// Run the mempool execution monitor (Phase 3).
+/// Wraps run_observation_impl with a signal sender — sends MempoolSignal to the
+/// main loop when a simulated opportunity exceeds the execution threshold.
+pub async fn run_execution(
+    config: BotConfig,
+    pool_state: PoolStateManager,
+    signal_tx: mpsc::Sender<MempoolSignal>,
+) -> Result<()> {
+    run_observation_impl(config, pool_state, Some(signal_tx)).await
+}
 
 /// Run the mempool observation monitor.
 /// This is the main entry point, called from main.rs via tokio::spawn.
 /// Creates its own WS connections and runs indefinitely with auto-reconnect.
 /// Phase 2: accepts PoolStateManager for AMM state simulation.
 pub async fn run_observation(config: BotConfig, pool_state: PoolStateManager) -> Result<()> {
+    run_observation_impl(config, pool_state, None).await
+}
+
+/// Implementation: observation + optional execution signaling.
+/// When signal_tx is Some, sends MempoolSignal on SIM OPP exceeding threshold.
+/// When None, observe-only mode (Phase 1/2 behavior preserved).
+async fn run_observation_impl(
+    config: BotConfig,
+    pool_state: PoolStateManager,
+    signal_tx: Option<mpsc::Sender<MempoolSignal>>,
+) -> Result<()> {
     let chain = &config.chain_name;
 
     // Create data directory for CSV logs
@@ -95,7 +123,7 @@ pub async fn run_observation(config: BotConfig, pool_state: PoolStateManager) ->
     const MAX_RECONNECTS: u32 = 50;
 
     loop {
-        match run_observation_inner(&config, &data_dir, &router_hex, &router_lookup, &pool_state).await {
+        match run_observation_inner(&config, &data_dir, &router_hex, &router_lookup, &pool_state, &signal_tx).await {
             Ok(()) => {
                 // Clean exit (shouldn't happen in observe mode)
                 info!("Mempool monitor exited cleanly");
@@ -124,12 +152,14 @@ pub async fn run_observation(config: BotConfig, pool_state: PoolStateManager) ->
 
 /// Inner observation loop — one WS session.
 /// Returns Err on connection failure (caller retries).
+/// Phase 3: signal_tx sends MempoolSignal to main loop when in execute mode.
 async fn run_observation_inner(
     config: &BotConfig,
     data_dir: &str,
     router_hex: &[String],
     router_lookup: &HashMap<Address, String>,
     pool_state: &PoolStateManager,
+    signal_tx: &Option<mpsc::Sender<MempoolSignal>>,
 ) -> Result<()> {
     // Create WS provider for pending tx subscription
     let sub_provider = Provider::<Ws>::connect(&config.rpc_url)
@@ -294,6 +324,32 @@ async fn run_observation_inner(
                                                 );
                                                 if let Err(e) = write_sim_csv_row(&mut sim_csv_file, opp) {
                                                     warn!("Sim CSV write error: {}", e);
+                                                }
+
+                                                // Phase 3: Send execution signal if thresholds met
+                                                if let Some(ref stx) = signal_tx {
+                                                    if opp.arb_est_profit_usd >= config.mempool_min_profit_usd
+                                                        && opp.arb_spread_pct >= MEMPOOL_MIN_SPREAD_PCT
+                                                    {
+                                                        let signal = MempoolSignal {
+                                                            opportunity: opp.clone(),
+                                                            trigger_gas_price: tx.gas_price.unwrap_or_default(),
+                                                            trigger_max_priority_fee: tx.max_priority_fee_per_gas,
+                                                            seen_at: Instant::now(),
+                                                        };
+                                                        match stx.try_send(signal) {
+                                                            Ok(()) => info!(
+                                                                "MEMPOOL EXEC: signal sent | {} | ${:.2} | {:.3}%",
+                                                                opp.pair_symbol, opp.arb_est_profit_usd, opp.arb_spread_pct
+                                                            ),
+                                                            Err(mpsc::error::TrySendError::Full(_)) => warn!(
+                                                                "MEMPOOL EXEC: channel full, dropping signal"
+                                                            ),
+                                                            Err(e) => error!(
+                                                                "MEMPOOL EXEC: channel error: {}", e
+                                                            ),
+                                                        }
+                                                    }
                                                 }
                                             }
 

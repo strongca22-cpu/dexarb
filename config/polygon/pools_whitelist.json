@@ -1,7 +1,7 @@
 {
-  "version": "1.4",
-  "last_updated": "2026-01-30T21:51:00Z",
-  "changelog": "v1.4: V2 pool assessment for V2↔V3 cross-protocol arb. 7 V2 pools whitelisted (v2_ready), 2 marginal V2 pools in observation, 3 dead V2 pools blacklisted. Verified on-chain via verify_v2_pools.py (block 82344927). Total: 16 active V3 + 7 v2_ready + 2 v2_observation.",
+  "version": "1.5",
+  "last_updated": "2026-02-01T08:30:00Z",
+  "changelog": "v1.5: Pool expansion scan. 197 factory queries across UniV3/SushiV3/QuickswapV3. 9 whitelist-quality native USDC pools added as candidates (status=candidate_native_usdc). All USDC.e candidates dead. Requires dual-USDC support to activate. See docs/pool_expansion_catalog.md.",
   "config": {
     "default_min_liquidity": 1000000000,
     "whitelist_enforcement": "strict",
@@ -572,6 +572,111 @@
         "added": "2026-01-30",
         "last_verified": "2026-01-30",
         "concern": "Only V2 pool for WBTC/USDC. Moderate impact at $1K (1.15%). Consider including for diversity."
+      }
+    ]
+  },
+  "native_usdc_candidates": {
+    "comment": "Native USDC (0x3c499c...) pools discovered 2026-02-01. Bot currently uses USDC.e (0x2791Bca...) as QUOTE_TOKEN. Activate after dual-USDC support or quote token migration. See docs/pool_expansion_catalog.md.",
+    "usdc_address": "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359",
+    "pools": [
+      {
+        "address": "0xa4d8c89f0c20efbe54cba9e7e7a7e509056228d9",
+        "pair": "WETH/USDC",
+        "dex": "UniswapV3",
+        "fee_tier": 500,
+        "status": "candidate_native_usdc",
+        "notes": "Native USDC. 0.4% impact@$5K. Parallel to existing USDC.e 0.05% pool.",
+        "added": "2026-02-01",
+        "last_verified": "2026-02-01",
+        "discovered_by": "mempool_factory_scan"
+      },
+      {
+        "address": "0xb6e57ed85c4c9dbfef2a68711e9d6f36c56e0fcb",
+        "pair": "WMATIC/USDC",
+        "dex": "UniswapV3",
+        "fee_tier": 500,
+        "status": "candidate_native_usdc",
+        "notes": "Native USDC. 0.7% impact@$5K. Parallel to existing USDC.e 0.05% pool.",
+        "added": "2026-02-01",
+        "last_verified": "2026-02-01",
+        "discovered_by": "mempool_factory_scan"
+      },
+      {
+        "address": "0x32fae204835e08b9374493d6b4628fd1f87dd045",
+        "pair": "WBTC/USDC",
+        "dex": "UniswapV3",
+        "fee_tier": 500,
+        "status": "candidate_native_usdc",
+        "notes": "Native USDC. 0.3% impact@$5K. Parallel to existing USDC.e 0.05% pool.",
+        "added": "2026-02-01",
+        "last_verified": "2026-02-01",
+        "discovered_by": "mempool_factory_scan"
+      },
+      {
+        "address": "0xe6ba22265aefe9dc392f544437acce2aedf8ef36",
+        "pair": "WBTC/USDC",
+        "dex": "UniswapV3",
+        "fee_tier": 3000,
+        "status": "candidate_native_usdc",
+        "notes": "Native USDC. 0.7% impact@$5K. New fee tier for WBTC — different fee tiers create persistent spreads.",
+        "added": "2026-02-01",
+        "last_verified": "2026-02-01",
+        "discovered_by": "mempool_factory_scan"
+      },
+      {
+        "address": "0x31083a78e11b18e450fd139f9abea98cd53181b7",
+        "pair": "USDT/USDC",
+        "dex": "UniswapV3",
+        "fee_tier": 100,
+        "status": "candidate_native_usdc",
+        "notes": "Native USDC. 0.0% impact@$5K. Deep stablecoin.",
+        "added": "2026-02-01",
+        "last_verified": "2026-02-01",
+        "discovered_by": "mempool_factory_scan"
+      },
+      {
+        "address": "0xee95696f77693af4f9b93850a9f48b4ad8e7a30a",
+        "pair": "USDT/USDC",
+        "dex": "UniswapV3",
+        "fee_tier": 500,
+        "status": "candidate_native_usdc",
+        "notes": "Native USDC. 0.0% impact@$5K. Deep stablecoin.",
+        "added": "2026-02-01",
+        "last_verified": "2026-02-01",
+        "discovered_by": "mempool_factory_scan"
+      },
+      {
+        "address": "0xf369277650ad6654f25412ea8bfbd5942733babc",
+        "pair": "DAI/USDC",
+        "dex": "UniswapV3",
+        "fee_tier": 100,
+        "status": "candidate_native_usdc",
+        "notes": "Native USDC. 0.0% impact@$5K. Deep stablecoin.",
+        "added": "2026-02-01",
+        "last_verified": "2026-02-01",
+        "discovered_by": "mempool_factory_scan"
+      },
+      {
+        "address": "0x79e4240e33c121402dfc9009de266356c91f241d",
+        "pair": "LINK/USDC",
+        "dex": "UniswapV3",
+        "fee_tier": 3000,
+        "status": "candidate_native_usdc",
+        "notes": "Native USDC. 0.7% impact@$5K. First viable LINK pool for cross-DEX arb.",
+        "added": "2026-02-01",
+        "last_verified": "2026-02-01",
+        "discovered_by": "mempool_factory_scan"
+      },
+      {
+        "address": "0xc42bf5cd16d9eb1e892b66bb32a3892dcb7bb75c",
+        "pair": "AAVE/USDC",
+        "dex": "UniswapV3",
+        "fee_tier": 3000,
+        "status": "candidate_native_usdc",
+        "notes": "Native USDC. 4.3% impact@$5K. Entirely new pair — AAVE has 15 mempool swaps/session.",
+        "added": "2026-02-01",
+        "last_verified": "2026-02-01",
+        "discovered_by": "mempool_factory_scan"
       }
     ]
   }

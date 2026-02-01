@@ -735,6 +735,366 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
         })
     }
 
+    /// Execute an atomic arbitrage from a mempool signal (Phase 3).
+    ///
+    /// Structurally identical to execute_atomic() with three key differences:
+    /// 1. Skips estimateGas — uses fixed gas limit (500K) for speed
+    /// 2. Dynamic gas pricing — priority fee scales with trigger tx + expected profit
+    /// 3. Lower minProfit threshold — mempool signals have higher conviction
+    ///
+    /// Safety: ArbExecutor.sol reverts if profit < minProfit. Only gas (~$0.01) at risk.
+    pub async fn execute_from_mempool(
+        &mut self,
+        opportunity: &ArbitrageOpportunity,
+        trigger_gas_price: U256,
+        trigger_max_priority_fee: Option<U256>,
+        mempool_min_profit_usd: f64,
+    ) -> Result<TradeResult> {
+        let start_time = Instant::now();
+        let pair_symbol = &opportunity.pair.symbol;
+        let arb_address = match self.config.arb_executor_address {
+            Some(addr) => addr,
+            None => {
+                return Ok(TradeResult {
+                    opportunity: pair_symbol.clone(),
+                    tx_hash: None, block_number: None, success: false,
+                    profit_usd: 0.0, gas_cost_usd: 0.0, gas_used_native: 0.0,
+                    net_profit_usd: 0.0,
+                    execution_time_ms: start_time.elapsed().as_millis() as u64,
+                    error: Some("No ARB_EXECUTOR_ADDRESS configured".to_string()),
+                    amount_in: None, amount_out: None,
+                });
+            }
+        };
+
+        if self.dry_run {
+            return self.simulate_execution(opportunity, start_time).await;
+        }
+
+        let mode = if opportunity.buy_dex.is_v2() || opportunity.sell_dex.is_v2() {
+            "V2↔V3"
+        } else {
+            "V3↔V3"
+        };
+        info!(
+            "⚡ MEMPOOL {} exec: {} | Buy {:?} → Sell {:?} | est=${:.2}",
+            mode, pair_symbol, opportunity.buy_dex, opportunity.sell_dex,
+            opportunity.estimated_profit
+        );
+
+        // Dynamic gas pricing (Phase 3: profit-aware bidding)
+        let base_fee = match self.cached_base_fee {
+            Some(bf) => bf,
+            None => self.provider.get_gas_price().await?,
+        };
+        let (priority_fee, max_fee) = self.calculate_mempool_gas(
+            trigger_gas_price,
+            trigger_max_priority_fee,
+            opportunity.estimated_profit,
+            base_fee,
+        );
+
+        // Token ordering: token0 = quote (USDC), token1 = base
+        let (token0, token1) = if opportunity.quote_token_is_token0 {
+            (opportunity.pair.token0, opportunity.pair.token1)
+        } else {
+            (opportunity.pair.token1, opportunity.pair.token0)
+        };
+        let trade_size = opportunity.trade_size;
+
+        let router_buy = self.get_router_address(opportunity.buy_dex);
+        let router_sell = self.get_router_address(opportunity.sell_dex);
+        let fee_buy = opportunity.buy_dex.atomic_fee();
+        let fee_sell = opportunity.sell_dex.atomic_fee();
+
+        // Lower minProfit for mempool signals (higher conviction)
+        let min_profit_raw = U256::from((mempool_min_profit_usd * 1e6) as u64);
+
+        let gas_limit = U256::from(self.config.mempool_gas_limit);
+
+        info!(
+            "  MEMPOOL TX: routerBuy={:?} feeBuy={} | routerSell={:?} feeSell={} | amt={} | minProfit={} | gas={}K priority={:.0}gwei",
+            router_buy, fee_buy, router_sell, fee_sell, trade_size, min_profit_raw,
+            gas_limit.as_u64() / 1000,
+            priority_fee.as_u128() as f64 / 1e9,
+        );
+
+        // Build contract call
+        let ws_signer = Arc::new(SignerMiddleware::new(
+            self.provider.clone(),
+            self.wallet.clone().with_chain_id(self.config.chain_id),
+        ));
+        let contract = IArbExecutor::new(arb_address, ws_signer.clone());
+        let call = contract.execute_arb(
+            token0, token1, router_buy, router_sell,
+            fee_buy.into(), fee_sell.into(), trade_size, min_profit_raw,
+        );
+
+        // Initialize nonce if needed
+        if !self.nonce_initialized {
+            let nonce = self.provider.get_transaction_count(
+                self.wallet.address(), Some(BlockNumber::Pending.into())
+            ).await?;
+            self.cached_nonce.store(nonce.as_u64(), Ordering::SeqCst);
+            self.nonce_initialized = true;
+            info!("Nonce initialized: {}", nonce);
+        }
+        let current_nonce = U256::from(self.cached_nonce.load(Ordering::SeqCst));
+
+        // Build tx manually — skip estimateGas for speed
+        let send_result: Result<TxHash, String> = if let Some(ref tx_client) = self.tx_client {
+            // Private RPC path: pre-set all fields, sign, send raw
+            info!("📡 MEMPOOL: private RPC (priority={:.0}gwei, nonce={}, gas={}K)",
+                  priority_fee.as_u128() as f64 / 1e9, current_nonce, gas_limit.as_u64() / 1000);
+            let mut tx = call.tx.clone();
+            tx.set_nonce(current_nonce);
+            tx.set_gas(gas_limit); // Fixed gas limit — skip estimateGas
+            tx.as_eip1559_mut().map(|inner| {
+                inner.max_fee_per_gas = Some(max_fee);
+                inner.max_priority_fee_per_gas = Some(priority_fee);
+            });
+            // Sign directly — no fill_transaction (which would call estimateGas)
+            match ws_signer.signer().sign_transaction(&tx).await {
+                Err(e) => Err(format!("Mempool tx sign failed: {}", e)),
+                Ok(signature) => {
+                    let raw_tx = tx.rlp_signed(&signature);
+                    match tx_client.send_raw_transaction(raw_tx).await {
+                        Ok(pending) => {
+                            self.cached_nonce.fetch_add(1, Ordering::SeqCst);
+                            Ok(pending.tx_hash())
+                        }
+                        Err(e) => Err(format!("Mempool tx send failed (private): {}", e))
+                    }
+                }
+            }
+        } else {
+            // Public WS path: set gas fields on the contract call
+            info!("📡 MEMPOOL: public RPC (priority={:.0}gwei, nonce={})",
+                  priority_fee.as_u128() as f64 / 1e9, current_nonce);
+            let mut tx = call.tx.clone();
+            tx.set_nonce(current_nonce);
+            tx.set_gas(gas_limit);
+            tx.as_eip1559_mut().map(|inner| {
+                inner.max_fee_per_gas = Some(max_fee);
+                inner.max_priority_fee_per_gas = Some(priority_fee);
+            });
+            match ws_signer.signer().sign_transaction(&tx).await {
+                Err(e) => Err(format!("Mempool tx sign failed: {}", e)),
+                Ok(signature) => {
+                    let raw_tx = tx.rlp_signed(&signature);
+                    match ws_signer.provider().send_raw_transaction(raw_tx).await {
+                        Ok(pending) => {
+                            self.cached_nonce.fetch_add(1, Ordering::SeqCst);
+                            Ok(pending.tx_hash())
+                        }
+                        Err(e) => Err(format!("Mempool tx send failed: {}", e))
+                    }
+                }
+            }
+        };
+
+        let tx_hash = match send_result {
+            Ok(hash) => hash,
+            Err(err_msg) => {
+                if err_msg.contains("InsufficientProfit") || err_msg.contains("execution reverted") {
+                    info!("MEMPOOL: atomic revert (expected — pool conditions changed)");
+                } else {
+                    error!("MEMPOOL: {}", err_msg);
+                }
+                return Ok(TradeResult {
+                    opportunity: pair_symbol.clone(),
+                    tx_hash: None, block_number: None, success: false,
+                    profit_usd: 0.0, gas_cost_usd: 0.0, gas_used_native: 0.0,
+                    net_profit_usd: 0.0,
+                    execution_time_ms: start_time.elapsed().as_millis() as u64,
+                    error: Some(err_msg),
+                    amount_in: Some(trade_size.to_string()), amount_out: None,
+                });
+            }
+        };
+
+        info!("⚡ MEMPOOL tx submitted: {:?} ({}ms from signal)", tx_hash, start_time.elapsed().as_millis());
+
+        // Wait for receipt (identical to execute_atomic)
+        let receipt_deadline = Instant::now() + Duration::from_secs(30);
+        let receipt = loop {
+            match self.provider.get_transaction_receipt(tx_hash).await {
+                Ok(Some(r)) => break r,
+                Ok(None) => {
+                    if Instant::now() > receipt_deadline {
+                        error!("MEMPOOL: receipt timeout (30s) for {:?}", tx_hash);
+                        return Ok(TradeResult {
+                            opportunity: pair_symbol.clone(),
+                            tx_hash: Some(format!("{:?}", tx_hash)),
+                            block_number: None, success: false,
+                            profit_usd: 0.0, gas_cost_usd: 0.0, gas_used_native: 0.0,
+                            net_profit_usd: 0.0,
+                            execution_time_ms: start_time.elapsed().as_millis() as u64,
+                            error: Some("Receipt timeout — tx submitted but unconfirmed".to_string()),
+                            amount_in: Some(trade_size.to_string()), amount_out: None,
+                        });
+                    }
+                    tokio::time::sleep(tokio::time::Duration::from_millis(250)).await;
+                }
+                Err(e) => return Err(anyhow!("Failed to fetch receipt for {:?}: {}", tx_hash, e)),
+            }
+        };
+
+        let block_number = receipt.block_number.map(|bn| bn.as_u64()).unwrap_or(0);
+
+        if receipt.status != Some(U64::from(1)) {
+            warn!("MEMPOOL: tx reverted on-chain (gas burned, no capital loss)");
+            return Ok(TradeResult {
+                opportunity: pair_symbol.clone(),
+                tx_hash: Some(format!("{:?}", tx_hash)),
+                block_number: Some(block_number), success: false,
+                profit_usd: 0.0, gas_cost_usd: 0.0, gas_used_native: 0.0,
+                net_profit_usd: 0.0,
+                execution_time_ms: start_time.elapsed().as_millis() as u64,
+                error: Some("Mempool tx reverted on-chain".to_string()),
+                amount_in: Some(trade_size.to_string()), amount_out: None,
+            });
+        }
+
+        // Parse profit from ArbExecuted event (identical to execute_atomic)
+        let mut profit_raw = U256::zero();
+        let mut amount_out = trade_size;
+        let arb_executed_topic: H256 = ethers::utils::keccak256(
+            b"ArbExecuted(address,address,uint256,uint256,uint256,address,address)"
+        ).into();
+
+        for log in &receipt.logs {
+            if log.address == arb_address && !log.topics.is_empty() && log.topics[0] == arb_executed_topic {
+                if log.data.len() >= 96 {
+                    amount_out = U256::from_big_endian(&log.data[32..64]);
+                    profit_raw = U256::from_big_endian(&log.data[64..96]);
+                    debug!("MEMPOOL: ArbExecuted amountOut={}, profit={}", amount_out, profit_raw);
+                }
+                break;
+            }
+        }
+
+        let quote_decimals = if opportunity.quote_token_is_token0 {
+            opportunity.token0_decimals
+        } else {
+            opportunity.token1_decimals
+        };
+        let profit_usd = profit_raw.low_u128() as f64 / 10_f64.powi(quote_decimals as i32);
+        let gas_used = receipt.gas_used.unwrap_or(U256::from(400_000u64));
+        let effective_gas_price = receipt.effective_gas_price.unwrap_or(max_fee);
+        let gas_cost_wei = gas_used * effective_gas_price;
+        let gas_used_native = gas_cost_wei.low_u128() as f64 / 1e18;
+        let gas_cost_usd = gas_used_native * 0.50;
+        let net_profit_usd = profit_usd - gas_cost_usd;
+
+        let success = net_profit_usd > 0.0;
+
+        if success {
+            info!(
+                "🎉 MEMPOOL PROFIT: ${:.4} (gross: ${:.4}, gas: ${:.4}) | tx: {:?}",
+                net_profit_usd, profit_usd, gas_cost_usd, tx_hash
+            );
+        } else {
+            warn!(
+                "📉 MEMPOOL LOSS: ${:.4} (gross: ${:.4}, gas: ${:.4}) | tx: {:?}",
+                net_profit_usd, profit_usd, gas_cost_usd, tx_hash
+            );
+        }
+
+        // Tax logging
+        self.log_tax_record_if_enabled(
+            opportunity,
+            &format!("{:?}", tx_hash),
+            block_number,
+            trade_size,
+            amount_out,
+            gas_used_native,
+        );
+
+        Ok(TradeResult {
+            opportunity: pair_symbol.clone(),
+            tx_hash: Some(format!("{:?}", tx_hash)),
+            block_number: Some(block_number),
+            success,
+            profit_usd,
+            gas_cost_usd,
+            gas_used_native,
+            net_profit_usd,
+            execution_time_ms: start_time.elapsed().as_millis() as u64,
+            error: None,
+            amount_in: Some(trade_size.to_string()),
+            amount_out: Some(amount_out.to_string()),
+        })
+    }
+
+    /// Calculate dynamic gas pricing for mempool-sourced transactions.
+    ///
+    /// Strategy:
+    /// - match_trigger: trigger_priority * 1.05 (land right after trigger tx)
+    /// - profit_cap: never spend > gas_profit_cap fraction of expected profit
+    /// - min_priority: competitive floor (configurable, default 1000 gwei on Polygon)
+    /// - final = min(profit_cap, max(match_trigger, min_priority))
+    ///
+    /// Returns (priority_fee, max_fee) both in wei.
+    fn calculate_mempool_gas(
+        &self,
+        trigger_gas_price: U256,
+        trigger_max_priority_fee: Option<U256>,
+        est_profit_usd: f64,
+        base_fee: U256,
+    ) -> (U256, U256) {
+        let gwei = U256::from(1_000_000_000u64);
+        let min_priority_gwei = self.config.mempool_min_priority_gwei;
+        let gas_profit_cap = self.config.mempool_gas_profit_cap;
+        let gas_limit = self.config.mempool_gas_limit;
+
+        // 1. Match trigger: trigger's priority fee * 1.05
+        let trigger_priority = trigger_max_priority_fee.unwrap_or_else(|| {
+            // Legacy tx: estimate priority as gas_price - base_fee
+            if trigger_gas_price > base_fee {
+                trigger_gas_price - base_fee
+            } else {
+                gwei * min_priority_gwei // fallback to floor
+            }
+        });
+        // * 1.05 = * 105 / 100
+        let match_trigger = trigger_priority * U256::from(105u64) / U256::from(100u64);
+
+        // 2. Profit cap: max gas spend = est_profit * gas_profit_cap / MATIC_price / gas_limit
+        // Convert: profit_usd * cap → max_gas_cost_usd → max_gas_cost_matic → max_gas_per_unit
+        // MATIC ~$0.50
+        let max_gas_budget_usd = est_profit_usd * gas_profit_cap;
+        let max_gas_budget_matic = max_gas_budget_usd / 0.50; // MATIC price ~$0.50
+        let max_gas_budget_wei = (max_gas_budget_matic * 1e18) as u128;
+        let profit_cap = if gas_limit > 0 {
+            U256::from(max_gas_budget_wei) / U256::from(gas_limit)
+        } else {
+            gwei * min_priority_gwei
+        };
+
+        // 3. Floor
+        let floor = gwei * min_priority_gwei;
+
+        // 4. Final: min(profit_cap, max(match_trigger, floor))
+        let candidate = std::cmp::max(match_trigger, floor);
+        let priority_fee = std::cmp::min(profit_cap, candidate);
+
+        // Max fee = base_fee + priority_fee
+        let max_fee = base_fee + priority_fee;
+
+        debug!(
+            "MEMPOOL GAS: trigger_priority={:.0}gwei match={:.0}gwei cap={:.0}gwei floor={:.0}gwei → final={:.0}gwei maxfee={:.0}gwei",
+            trigger_priority.as_u128() as f64 / 1e9,
+            match_trigger.as_u128() as f64 / 1e9,
+            profit_cap.as_u128() as f64 / 1e9,
+            floor.as_u128() as f64 / 1e9,
+            priority_fee.as_u128() as f64 / 1e9,
+            max_fee.as_u128() as f64 / 1e9,
+        );
+
+        (priority_fee, max_fee)
+    }
+
     /// Log a tax record if tax logging is enabled
     fn log_tax_record_if_enabled(
         &mut self,

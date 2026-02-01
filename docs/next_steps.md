@@ -1,17 +1,19 @@
 # Next Steps - DEX Arbitrage Bot
 
-## Status: A4 Phase 2 DEPLOYED — Simulation Collecting Data, Phase 3 Next
+## Status: A4 Phase 3 DEPLOYED — Mempool Execution Pipeline LIVE
 
 **Date:** 2026-02-01
 **Polygon:** 23 active pools (16 V3 + 7 V2), atomic via `ArbExecutorV3` (`0x7761...`), WS block sub, private RPC (1RPC)
-**Base:** 5 active V3 pools (whitelist v1.1), ArbExecutor deployed (`0x9054...`), EVENT_SYNC=true, dry-run + mempool observe
-**Build:** 72/72 Rust tests, clean release build. A4 mempool module (2,100+ LOC, 14 tests).
-**Mode:** 4 tmux sessions (livebot_polygon, dexarb-base, botstatus, botwatch)
+**Base:** 5 active V3 pools (whitelist v1.1), ArbExecutor deployed (`0x9054...`), EVENT_SYNC=true, dry-run (no mempool)
+**Build:** 72/72 Rust tests, clean release build. A4 mempool module (2,500+ LOC, 14 tests).
+**Whitelist:** v1.5 — 23 active + 9 native USDC candidates + 22 blacklisted. AAVE/USDC added to TRADING_PAIRS (8 pairs).
+**Mode:** 3 tmux sessions (livebot_polygon, botstatus, botwatch). Base offline pending A4 port.
 **A0-A3:** Deployed 2026-02-01. Diagnostic: 97.1% revert rate → mempool competition confirmed.
 **A4 Phase 1:** DEPLOYED. 100% confirmation rate, 6.0s median lead time.
 **A4 Phase 2:** DEPLOYED. AMM simulator: 0.04% median prediction error, 12 cross-DEX opps in 45min, median $0.45 est. profit.
+**A4 Phase 3:** DEPLOYED. Mempool execution: mpsc channel → main loop → execute_from_mempool(). Skip estimateGas, dynamic gas (profit-capped), 500K gas limit. Dual pipeline (block-reactive + mempool).
 **Base mempool:** 0 pending txs — sequencer model has no public mempool via Alchemy.
-**Next:** Collect 24h+ simulation data, analyze, build Phase 3 execution pipeline + A5 dynamic gas.
+**Next:** Monitor Phase 3 results (2-24h), analyze mempool_executions CSV, tune gas/thresholds. If >5% success rate → profitable. If <1% → investigate timing/gas. Port A4 to Base if Polygon viable.
 
 ---
 
@@ -175,33 +177,39 @@ Total: ~700ms from block to revert
 | **A4 Phase 1 (code)** | **02-01** | **Mempool observer: 660 LOC, 11 selectors, Alchemy sub, CSV log, cross-ref tracker. ENV: MEMPOOL_MONITOR=observe.** |
 | **A4 Phase 1 (deploy)** | **02-01** | **Polygon + Base deployed. Early: 100% confirmation, 6.9s lead. Base: 0 pending (sequencer). Analysis script written.** |
 | **A4 Phase 2 (simulator)** | **02-01** | **AMM state simulator: V2 constant product + V3 sqrtPrice math. 871 LOC, 11 tests. 0.04% median prediction error, 12 cross-DEX opps in 45min.** |
+| **Pool expansion scan** | **02-01** | **197 factory queries. 9 whitelist-quality native USDC pools found (all USDC.e dead). AAVE/USDC added. Whitelist v1.5. Catalog: `docs/pool_expansion_catalog.md`.** |
+| **A4 Phase 3 (execution)** | **02-01** | **Mempool execution pipeline: mpsc channel, tokio::select!, execute_from_mempool(), dynamic gas, skip estimateGas. A5 merged. Dual pipeline (block + mempool). LIVE.** |
 
 ---
 
-## Immediate Next Steps — A4 Phase 3 Execution + A5 Dynamic Gas
+## Immediate Next Steps — Monitor Phase 3 Results + Tune
 
-**A4 Phase 2 is deployed and proving the simulation is accurate and actionable.**
+**A4 Phase 3 is deployed and executing from mempool signals.**
 
-### Phase 2 Results (first 45 minutes)
+### Phase 3 Architecture (deployed)
 
-| Metric | Value | Significance |
-|--------|-------|-------------|
-| Simulation accuracy | **0.04% median error** | Math is reliable for execution decisions |
-| Perfect predictions | 7/25 (28%) | Within-tick swaps are exact |
-| Lead time | **6.0s median** | Ample time for tx construction + submission |
-| Opportunities detected | **12 in 45min (~16/hr)** | Consistent signal flow |
-| Median est. profit | **$0.45** | Above gas cost ($0.01) by 45x |
-| Profitable (>$0.10) | **10/12 (83%)** | High hit rate |
-| Top route | SushiV3_030 ↔ UniswapV3_005 | Different fee tiers = persistent spreads |
+```
+Monitor (tokio::spawn)     mpsc::channel(8)     Main Loop (select!)
+  SIM OPP detected  ---------> MempoolSignal  ---------> execute_from_mempool()
+                                                          (skip estimateGas,
+                                                           dynamic gas,
+                                                           fixed 500K gas limit)
+```
 
-### Phase 3: Execute from Mempool Signals
+### Monitoring Checklist
 
-1. **Collect 24h+ simulation data** — Bot is running. Run `python3 scripts/analyze_mempool.py` after accumulation for full analysis.
-2. **Build Phase 3 execution pipeline** — When SIM OPP fires with spread > threshold, construct and submit a backrun transaction targeting the post-swap pool state.
-3. **Implement A5: Dynamic gas** — Replace static 5000 gwei with profit-aware gas bidding (see A5 section below).
-4. **Skip estimateGas** — When submitting from mempool signal, skip the 150ms estimateGas call. Set gas limit to safe fixed value (~500K). Simulation already validated the trade.
-5. **Minimum threshold**: Lower MIN_PROFIT from $0.10 to $0.05 for mempool-sourced signals (higher conviction, gas is $0.01).
-6. **Base strategy:** Alchemy mempool not viable on Base (0 pending txs, centralized sequencer). Deprioritize until sequencer feed evaluation.
+1. **2h check:** Review `data/polygon/mempool/mempool_executions_*.csv`. Check signal count, success rate, gas spend.
+2. **Success rate assessment:**
+   - **>5% success** → Profitable. Leave running, tune thresholds.
+   - **1-5% success** → Marginal. Check if gas tuning can improve.
+   - **<1% success (all reverts)** → Investigate: are we too slow? Wrong gas? Stale state?
+3. **Gas spend audit:** Sum gas cost column. Should be <$1/hr at current rates (~$0.01/revert).
+4. **Analyze with:** `python3 scripts/analyze_mempool.py` (existing script covers simulation data).
+5. **Tuning levers:**
+   - `MEMPOOL_MIN_PROFIT_USD` — raise to reduce revert count (fewer, higher-quality signals)
+   - `MEMPOOL_MIN_PRIORITY_GWEI` — raise/lower to adjust gas competitiveness
+   - `MEMPOOL_GAS_PROFIT_CAP` — lower to reduce gas spend per attempt
+6. **Base strategy:** Alchemy mempool not viable on Base (0 pending txs, centralized sequencer). Port A4 only if Polygon proves viable.
 
 ---
 
@@ -236,32 +244,32 @@ The 99.1% revert rate is structural. A3 is the diagnostic: if speed alone is the
 - **Savings:** ~350ms per block (1 RPC call @ 75 CU vs ~21 calls @ ~1100 CU). Frees ~21M CU/month.
 - **Note:** Used `eth_getLogs` (synchronous, deterministic) instead of `eth_subscribe("logs")` (async stream) for simplicity. All events for the current block are guaranteed present before detection runs.
 
-**A4: Pending Mempool Monitoring (the strategic shift)** — PHASE 2 DEPLOYED
+**A4: Pending Mempool Monitoring (the strategic shift)** — PHASE 3 DEPLOYED
 - **Gate passed:** A3 diagnostic shows 97.1% revert rate (>95%). Confirmed: competitors use mempool.
 - **Full plan:** `docs/a4_mempool_monitor_plan.md`
 - **Phase 1 (Observation):** DONE. 100% confirmation rate, 6.0s median lead time, ~4 decoded/min.
 - **Phase 2 (Simulation):** DONE. V2 constant product + V3 sqrtPriceX96 math. 0.04% median error. 12 cross-DEX opps in 45min.
-- **Phase 3 (Execution):** NEXT. Submit backrun txs targeting simulated state. Skip estimateGas (A5). Dynamic gas bid.
+- **Phase 3 (Execution):** DEPLOYED. mpsc channel → main loop → `execute_from_mempool()`. Skip estimateGas, dynamic gas (profit-capped), 500K gas limit. Dual pipeline (block-reactive + mempool).
 - **Phase 4 (conditional):** Own Bor node ($80-100/mo) if Alchemy visibility degrades. Currently not needed (100% confirmation).
 - **Cross-chain:** Architecture is 100% reusable on Base, Arbitrum, Ethereum, BSC. Same ABIs, same AMM math.
 - **CU budget:** V3 monitoring ~3.5M CU/month. Total with A3: ~14.2M CU/month. Within free tier.
 - **Files:** `src/mempool/{mod,monitor,decoder,types,simulator}.rs`, `main.rs`, `executor.rs`.
+- **Execution CSVs:** `data/polygon/mempool/mempool_executions_*.csv`
 - **Simulation CSVs:** `data/polygon/mempool/simulated_opportunities_*.csv`, `simulation_accuracy_*.csv`
 
-**A5: Dynamic Gas + Skip estimateGas (combined with Phase 3)**
-- **What:** Two changes to the execution path for mempool-sourced trades:
-  1. **Skip estimateGas:** Set gas limit to fixed safe value (~500K). Sign and send immediately. Saves ~150ms.
-  2. **Dynamic gas pricing:** Replace static 5000 gwei with profit-aware bidding.
-- **Dynamic gas formula (proposed):**
+**A5: Dynamic Gas + Skip estimateGas** — MERGED INTO A4 PHASE 3
+- **Implemented as part of Phase 3 execution pipeline:**
+  1. **Skip estimateGas:** Fixed 500K gas limit. Sign and send immediately. Saves ~150ms.
+  2. **Dynamic gas pricing:** `calculate_mempool_gas()` in executor.rs.
+- **Dynamic gas formula (deployed):**
   ```
-  base_priority = trigger_tx.gas_price * 1.05   // slightly outbid the trigger
-  profit_cap = expected_profit_wei * 0.50        // willing to pay up to 50% of profit as gas
-  min_priority = 1000 gwei                       // floor (avoid underbidding)
-  priority_fee = min(profit_cap, max(base_priority, min_priority))
+  match_trigger = trigger_priority * 1.05        // slightly outbid the trigger
+  profit_cap = (est_profit * 0.50 / $0.50) * 1e18 / 500K   // never spend >50% of profit
+  min_priority = 1000 gwei                       // competitive floor on Polygon
+  priority_fee = min(profit_cap, max(match_trigger, min_priority))
   ```
-- **Why dynamic:** Static 5000 gwei wastes money on small opps ($0.05 profit shouldn't pay $0.50 gas) and underbids on large ones ($1.00 profit can afford $0.50 gas to guarantee inclusion position).
-- **Risk:** On-chain reverts cost gas (~$0.01-0.05 on Polygon at dynamic rates). Break-even if >5% of mempool signals succeed.
-- **Files:** `executor.rs` — new `execute_from_mempool()` method with `skip_estimate: bool`, `dynamic_gas: bool` parameters.
+- **Config:** `MEMPOOL_MIN_PRIORITY_GWEI=1000`, `MEMPOOL_GAS_PROFIT_CAP=0.50` in `.env.polygon`.
+- **Risk:** On-chain reverts cost ~$0.01. Break-even if >5% of mempool signals succeed.
 
 ### Tier 2: Further Optimizations (after Tier 1 proves viable)
 
@@ -336,7 +344,7 @@ A0-A3 deployed and measured (2h 45m session, 34 attempts):
 
 ---
 
-## Active Whitelist (v1.4)
+## Active Whitelist (v1.5)
 
 **V3 Pools (16 active):**
 
@@ -440,7 +448,7 @@ source ~/.cargo/env && cd ~/bots/dexarb/src/rust-bot && cargo build --release
 # Start Polygon live bot (--chain polygon loads .env.polygon)
 tmux new-session -d -s livebot_polygon "cd ~/bots/dexarb/src/rust-bot && ./target/release/dexarb-bot --chain polygon 2>&1 | tee ~/bots/dexarb/data/polygon/logs/livebot_ws.log"
 
-# Bot watch (kills on first profitable trade — "Trade complete" only)
+# Bot watch (kills on first profitable trade — "Trade complete" or "MEMPOOL SUCCESS")
 tmux new-session -d -s botwatch "bash ~/bots/dexarb/scripts/bot_watch.sh"
 
 # Discord status (30 min loop)
@@ -467,7 +475,7 @@ tmux new-session -d -s dexarb-base "cd ~/bots/dexarb/src/rust-bot && ./target/re
 | `src/types.rs` | DexType, V2_FEE_SENTINEL, atomic_fee() |
 | `contracts/src/ArbExecutor.sol` | Atomic arb V3 (V2+Algebra+V3 routing) |
 | `.env.polygon` | Polygon live config (loaded via --chain polygon) |
-| `config/polygon/pools_whitelist.json` | v1.4: 23 active + 22 blacklisted |
+| `config/polygon/pools_whitelist.json` | v1.5: 23 active + 9 native USDC candidates + 22 blacklisted |
 | `config/base/pools_whitelist.json` | v1.1: 5 active, 1 observation, 2 blacklisted |
 | `.env.base` | Base config (QuoterV2, USDC native, multicall skip) |
 | `scripts/analyze_bot_session.py` | Session analysis (log + price CSV parsing) |
@@ -479,7 +487,7 @@ tmux new-session -d -s dexarb-base "cd ~/bots/dexarb/src/rust-bot && ./target/re
 | `src/mempool/monitor.rs` | Alchemy pendingTx subscription, Phase 2 simulation pipeline, CSV logging |
 | `src/mempool/decoder.rs` | Calldata decoder (11 selectors: V3, Algebra, V2) |
 | `src/mempool/simulator.rs` | Phase 2: V2/V3 AMM math, pool ID, cross-DEX spread check (871 LOC) |
-| `src/mempool/types.rs` | MempoolMode, DecodedSwap, PendingSwap, ConfirmationTracker, SimulationTracker |
+| `src/mempool/types.rs` | MempoolMode, MempoolSignal, DecodedSwap, PendingSwap, ConfirmationTracker, SimulationTracker |
 | `docs/a4_mempool_monitor_plan.md` | A4 mempool monitor plan (phases, calldata ref, CU budget, cross-chain) |
 | `docs/session_summaries/2026-02-01_a4_phase1_mempool_monitor.md` | A4 Phase 1: mempool observer build, architecture, deploy plan |
 | `docs/session_summaries/2026-02-01_session11_base_diagnostic.md` | Session 11: Base atomic/phantom audit, WS fix, historical analysis |
@@ -488,7 +496,10 @@ tmux new-session -d -s dexarb-base "cd ~/bots/dexarb/src/rust-bot && ./target/re
 ---
 
 | `docs/session_summaries/2026-02-01_a4_phase2_simulator.md` | A4 Phase 2: simulator build, deploy, live results, Phase 3 prep |
+| `docs/session_summaries/2026-02-01_pool_expansion_scan.md` | Pool expansion: factory scan, native USDC discovery, whitelist v1.5 |
+| `docs/session_summaries/2026-02-01_a4_phase3_execution.md` | A4 Phase 3: mempool execution pipeline, dynamic gas, deploy |
+| `docs/pool_expansion_catalog.md` | Full pool expansion catalog: tiers, addresses, implementation roadmap |
 
 ---
 
-*Last updated: 2026-02-01 (A4 Phase 2) — AMM state simulator deployed on Polygon. V3 sqrtPrice math: 0.04% median error, 6s lead time. 12 cross-DEX opportunities in 45 min (median $0.45). Phase 3 (execution) is next — submit backrun txs from mempool signals. A5 (dynamic gas) designed. Data collecting continuously.*
+*Last updated: 2026-02-01 (A4 Phase 3 deployed) — Mempool execution pipeline live on Polygon. mpsc channel architecture, tokio::select!, execute_from_mempool() with skip-estimateGas + dynamic gas pricing. A5 merged into Phase 3. Dual pipeline: block-reactive + mempool-sourced trades run simultaneously. Monitor mempool_executions CSV for results.*

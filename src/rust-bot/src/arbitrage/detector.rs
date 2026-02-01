@@ -588,6 +588,10 @@ mod tests {
             route_cooldown_blocks: 10,
             private_rpc_url: None,
             mempool_monitor_mode: "off".to_string(),
+            mempool_min_profit_usd: 0.05,
+            mempool_gas_limit: 500_000,
+            mempool_min_priority_gwei: 1000,
+            mempool_gas_profit_cap: 0.50,
         }
     }
 

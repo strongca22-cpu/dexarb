@@ -7,6 +7,7 @@
 # Modified: 2026-01-30 - Fix log path, trade counting, clock-aligned 30min schedule
 # Modified: 2026-01-31 - Multi-chain naming (livebot.polygon), prominent status indicator
 # Modified: 2026-02-01 - Multi-chain report: separate Polygon (LIVE) + Base (DRY-RUN) sections
+# Modified: 2026-02-01 - A4 Phase 3: mempool execution stats (signals, executions, successes)
 #
 # Usage:
 #   # One-shot:
@@ -45,6 +46,9 @@ _LATEST_STATUS="No log file"
 _ATTEMPTS=0
 _COMPLETED=0
 _HALTS=0
+_MEMPOOL_SIGNALS=0
+_MEMPOOL_SUCCESS=0
+_MEMPOOL_FAIL=0
 
 send_discord() {
     local msg="$1"
@@ -87,6 +91,9 @@ collect_log_stats() {
         _ATTEMPTS=0
         _COMPLETED=0
         _HALTS=0
+        _MEMPOOL_SIGNALS=0
+        _MEMPOOL_SUCCESS=0
+        _MEMPOOL_FAIL=0
         return
     fi
 
@@ -98,6 +105,12 @@ collect_log_stats() {
     _COMPLETED=${_COMPLETED:-0}
     _HALTS=$(grep -c "HALT" "$LOG_FILE" 2>/dev/null || true)
     _HALTS=${_HALTS:-0}
+    _MEMPOOL_SIGNALS=$(grep -c "MEMPOOL EXEC: processing signal" "$LOG_FILE" 2>/dev/null || true)
+    _MEMPOOL_SIGNALS=${_MEMPOOL_SIGNALS:-0}
+    _MEMPOOL_SUCCESS=$(grep -c "MEMPOOL SUCCESS" "$LOG_FILE" 2>/dev/null || true)
+    _MEMPOOL_SUCCESS=${_MEMPOOL_SUCCESS:-0}
+    _MEMPOOL_FAIL=$(grep -c "MEMPOOL FAIL" "$LOG_FILE" 2>/dev/null || true)
+    _MEMPOOL_FAIL=${_MEMPOOL_FAIL:-0}
 }
 
 build_report() {
@@ -120,6 +133,9 @@ build_report() {
     local pol_attempts="$_ATTEMPTS"
     local pol_completed="$_COMPLETED"
     local pol_halts="$_HALTS"
+    local pol_mp_signals="$_MEMPOOL_SIGNALS"
+    local pol_mp_success="$_MEMPOOL_SUCCESS"
+    local pol_mp_fail="$_MEMPOOL_FAIL"
 
     # Polygon wallet
     local pol_usdc pol_matic pol_usdc_raw
@@ -140,6 +156,9 @@ build_report() {
     local base_attempts="$_ATTEMPTS"
     local base_completed="$_COMPLETED"
     local base_halts="$_HALTS"
+    local base_mp_signals="$_MEMPOOL_SIGNALS"
+    local base_mp_success="$_MEMPOOL_SUCCESS"
+    local base_mp_fail="$_MEMPOOL_FAIL"
 
     # Base wallet (ETH + USDC)
     local base_usdc base_eth base_usdc_raw
@@ -156,6 +175,7 @@ Process:   $pol_proc
 Wallet:    $pol_usdc USDC | $pol_matic MATIC
 Log lines: $pol_log_lines
 Attempts:  $pol_attempts  Completed: $pol_completed  HALTs: $pol_halts
+Mempool:   $pol_mp_signals signals | $pol_mp_success ok | $pol_mp_fail fail
 Latest:    $pol_latest
 \`\`\`
 **dryrun.base** [$base_status] — paper trading, unfunded
@@ -164,6 +184,7 @@ Process:   $base_proc
 Wallet:    $base_usdc USDC | $base_eth ETH (gas only)
 Log lines: $base_log_lines
 Attempts:  $base_attempts  Completed: $base_completed  HALTs: $base_halts
+Mempool:   $base_mp_signals signals | $base_mp_success ok | $base_mp_fail fail
 Latest:    $base_latest
 \`\`\`
 \`Sessions: $sessions\`

@@ -35,17 +35,19 @@ use clap::Parser;
 use dexarb_bot::arbitrage::{MulticallQuoter, OpportunityDetector, RouteCooldown, TradeExecutor, VerifiedOpportunity};
 use dexarb_bot::config::load_config_from_file;
 use dexarb_bot::filters::WhitelistFilter;
-use dexarb_bot::mempool::MempoolMode;
+use dexarb_bot::mempool::{MempoolMode, MempoolSignal};
 use dexarb_bot::pool::{PoolStateManager, V2PoolSyncer, V3PoolSyncer, SUSHI_V3_FEE_TIERS, V3_FEE_TIERS};
-use dexarb_bot::types::{DexType, PoolState, TradingPair, V3PoolState};
+use dexarb_bot::types::{ArbitrageOpportunity, DexType, PoolState, TradingPair, V3PoolState};
 use std::collections::HashMap;
 use dexarb_bot::price_logger::PriceLogger;
 use ethers::prelude::*;
 use futures::StreamExt;
 use std::sync::Arc;
+use tokio::sync::mpsc;
 use tokio::time::{timeout, Duration};
 use tracing::{error, info, warn, Level};
 use tracing_subscriber;
+use chrono;
 
 /// DEX Arbitrage Bot — Multi-Chain (Polygon, Base)
 #[derive(Parser)]
@@ -350,7 +352,9 @@ async fn main() -> Result<()> {
 
     // A4: Mempool monitor — observe pending DEX swaps (async task, runs alongside block loop)
     // Phase 2: passes PoolStateManager (Arc clone) for AMM state simulation.
+    // Phase 3: Execute mode sends MempoolSignal to main loop via mpsc channel.
     let mempool_mode = MempoolMode::from_env(&config.mempool_monitor_mode);
+    let mut mempool_receiver: Option<mpsc::Receiver<MempoolSignal>> = None;
     match &mempool_mode {
         MempoolMode::Observe => {
             let mempool_config = config.clone();
@@ -364,14 +368,19 @@ async fn main() -> Result<()> {
             info!("A4: Mempool monitor spawned (observation + Phase 2 simulation)");
         }
         MempoolMode::Execute => {
-            warn!("A4: Mempool execute mode not yet implemented (Phase 3). Running in observe+sim mode instead.");
+            let (mempool_tx, rx) = mpsc::channel::<MempoolSignal>(8);
+            mempool_receiver = Some(rx);
             let mempool_config = config.clone();
             let mempool_pool_state = state_manager.clone();
             tokio::spawn(async move {
-                if let Err(e) = dexarb_bot::mempool::run_observation(mempool_config, mempool_pool_state).await {
-                    error!("A4: Mempool monitor exited with error: {}", e);
+                info!("A4: Mempool monitor starting (EXECUTION mode)...");
+                if let Err(e) = dexarb_bot::mempool::run_execution(
+                    mempool_config, mempool_pool_state, mempool_tx,
+                ).await {
+                    error!("A4: Mempool execution monitor exited: {}", e);
                 }
             });
+            info!("A4: Mempool monitor spawned (Phase 3 EXECUTION mode — signals → main loop)");
         }
         MempoolMode::Off => {
             info!("A4: Mempool monitor DISABLED (MEMPOOL_MONITOR=off or unset)");
@@ -441,6 +450,36 @@ async fn main() -> Result<()> {
         info!("Event-driven sync disabled: poll-based sync (~400ms/block). Set EVENT_SYNC=true to enable.");
     }
 
+    // Mempool execution CSV (Phase 3) — log all mempool-sourced trade attempts
+    let mut mempool_exec_csv: Option<std::fs::File> = if mempool_receiver.is_some() {
+        let csv_dir = format!("/home/botuser/bots/dexarb/data/{}/mempool", config.chain_name);
+        std::fs::create_dir_all(&csv_dir).ok();
+        let date_str = chrono::Utc::now().format("%Y%m%d").to_string();
+        let csv_path = format!("{}/mempool_executions_{}.csv", csv_dir, date_str);
+        let exists = std::path::Path::new(&csv_path).exists();
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&csv_path)
+            .ok();
+        if let Some(mut f) = file {
+            if !exists {
+                use std::io::Write;
+                let _ = writeln!(f,
+                    "timestamp_utc,tx_hash,pair,buy_dex,sell_dex,spread_pct,est_profit_usd,\
+                     result,profit_usd,gas_cost_usd,net_profit_usd,exec_time_ms,lead_time_ms,source"
+                );
+            }
+            info!("Mempool execution CSV: {}", csv_path);
+            Some(f)
+        } else {
+            warn!("Failed to open mempool execution CSV: {}", csv_path);
+            None
+        }
+    } else {
+        None
+    };
+
     // Statistics tracking
     let mut total_opportunities: u64 = 0;
     let mut total_scans: u64 = 0;
@@ -491,20 +530,147 @@ async fn main() -> Result<()> {
     info!("WS block subscription active — reacting to blocks in real-time");
     ws_reconnects = 0; // reset on successful subscribe
 
+    // LoopEvent: block-reactive or mempool-sourced signal
+    enum LoopEvent {
+        Block(Block<TxHash>),
+        Mempool(MempoolSignal),
+        StreamEnd,
+        Timeout,
+    }
+
     loop { // inner block-processing loop
-    let block = match timeout(block_timeout, block_stream.next()).await {
-        Ok(Some(block)) => block,
-        Ok(None) => {
-            // Stream ended gracefully (WS closed)
+
+    // Select between block events and mempool signals
+    let event = if let Some(ref mut rx) = mempool_receiver {
+        tokio::select! {
+            result = timeout(block_timeout, block_stream.next()) => {
+                match result {
+                    Ok(Some(b)) => LoopEvent::Block(b),
+                    Ok(None) => LoopEvent::StreamEnd,
+                    Err(_) => LoopEvent::Timeout,
+                }
+            }
+            signal = rx.recv() => {
+                match signal {
+                    Some(s) => LoopEvent::Mempool(s),
+                    None => {
+                        // Channel closed — monitor exited. Disable receiver, continue block-only.
+                        warn!("Mempool signal channel closed — falling back to block-only mode");
+                        mempool_receiver = None;
+                        continue;
+                    }
+                }
+            }
+        }
+    } else {
+        // No mempool execution — original timeout behavior
+        match timeout(block_timeout, block_stream.next()).await {
+            Ok(Some(b)) => LoopEvent::Block(b),
+            Ok(None) => LoopEvent::StreamEnd,
+            Err(_) => LoopEvent::Timeout,
+        }
+    };
+
+    // Handle mempool signal (Phase 3)
+    if let LoopEvent::Mempool(signal) = event {
+        let lead_ms = signal.seen_at.elapsed().as_millis() as u64;
+        if lead_ms > 10_000 {
+            info!("MEMPOOL SKIP: stale signal ({}ms > 10s)", lead_ms);
+            continue;
+        }
+
+        let opp = &signal.opportunity;
+        info!(
+            "MEMPOOL EXEC: processing signal | {} | ${:.2} | {:.3}% | lead={}ms",
+            opp.pair_symbol, opp.arb_est_profit_usd, opp.arb_spread_pct, lead_ms
+        );
+
+        // Convert SimulatedOpportunity → ArbitrageOpportunity
+        let arb_opp = match build_mempool_arb_opportunity(&signal, &state_manager, &config) {
+            Some(o) => o,
+            None => {
+                warn!("MEMPOOL SKIP: pool data resolution failed for {}", opp.pair_symbol);
+                continue;
+            }
+        };
+
+        // Execute via mempool-specific path (skip estimateGas, dynamic gas)
+        let exec_start = std::time::Instant::now();
+        match executor.execute_from_mempool(
+            &arb_opp,
+            signal.trigger_gas_price,
+            signal.trigger_max_priority_fee,
+            config.mempool_min_profit_usd,
+        ).await {
+            Ok(result) => {
+                let exec_ms = exec_start.elapsed().as_millis() as u64;
+                let result_str = if result.success { "SUCCESS" } else { "FAIL" };
+                info!(
+                    "MEMPOOL {}: {} | ${:.4} net | {}ms exec | {}ms lead | tx={}",
+                    result_str, result.opportunity, result.net_profit_usd,
+                    exec_ms, lead_ms,
+                    result.tx_hash.as_deref().unwrap_or("none"),
+                );
+
+                // Route cooldown on failure
+                if !result.success {
+                    route_cooldown.record_failure(
+                        &opp.pair_symbol, opp.arb_buy_dex, opp.arb_sell_dex, last_block
+                    );
+                } else {
+                    route_cooldown.record_success(
+                        &opp.pair_symbol, opp.arb_buy_dex, opp.arb_sell_dex
+                    );
+                }
+
+                // Log to mempool execution CSV
+                if let Some(ref mut csv) = mempool_exec_csv {
+                    use std::io::Write;
+                    let ts = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
+                    let _ = writeln!(csv,
+                        "{},{},{},{:?},{:?},{:.4},{:.2},{},{:.4},{:.4},{:.4},{},{},mempool",
+                        ts,
+                        result.tx_hash.as_deref().unwrap_or(""),
+                        opp.pair_symbol,
+                        opp.arb_buy_dex,
+                        opp.arb_sell_dex,
+                        opp.arb_spread_pct,
+                        opp.arb_est_profit_usd,
+                        result_str,
+                        result.profit_usd,
+                        result.gas_cost_usd,
+                        result.net_profit_usd,
+                        exec_ms,
+                        lead_ms,
+                    );
+                    let _ = csv.flush();
+                }
+            }
+            Err(e) => {
+                error!("MEMPOOL EXEC ERROR: {}", e);
+                route_cooldown.record_failure(
+                    &opp.pair_symbol, opp.arb_buy_dex, opp.arb_sell_dex, last_block
+                );
+            }
+        }
+
+        continue; // Back to select! loop — don't fall through to block processing
+    }
+
+    // Handle stream end / timeout
+    let block = match event {
+        LoopEvent::Block(b) => b,
+        LoopEvent::StreamEnd => {
             warn!("WS block stream ended (None) — reconnecting...");
-            break; // drop block_stream + sub_provider, continue 'reconnect
+            break;
         }
-        Err(_) => {
-            // Timeout — no block in 30s, WS is stale
+        LoopEvent::Timeout => {
             warn!("No block received in {}s — WS stale, reconnecting...", block_timeout.as_secs());
-            break; // drop block_stream + sub_provider, continue 'reconnect
+            break;
         }
-    }; // end match timeout
+        LoopEvent::Mempool(_) => unreachable!(), // handled above
+    };
+
     {
             let current_block = block.number.map(|n| n.as_u64()).unwrap_or(last_block + 1);
 
@@ -847,4 +1013,78 @@ async fn main() -> Result<()> {
     // All reconnects exhausted — exit so supervisor can restart the whole process.
     error!("WS subscription loop exited — exiting for supervisor restart");
     Ok(())
+}
+
+/// Convert a MempoolSignal into an ArbitrageOpportunity that the executor can process.
+///
+/// Looks up pool addresses, token decimals, and quote_token_is_token0 from the
+/// PoolStateManager. Returns None if the pool data can't be resolved (stale or missing).
+fn build_mempool_arb_opportunity(
+    signal: &MempoolSignal,
+    state_manager: &PoolStateManager,
+    config: &dexarb_bot::types::BotConfig,
+) -> Option<ArbitrageOpportunity> {
+    let opp = &signal.opportunity;
+
+    // Resolve trading pair from pair_symbol
+    // Find any pool for this pair to get token addresses
+    let (token0, token1, t0_dec, t1_dec) = {
+        // Try buy_dex pool first, then sell_dex
+        let buy_pool = if opp.arb_buy_dex.is_v3() {
+            state_manager.get_v3_pool(opp.arb_buy_dex, &opp.pair_symbol)
+                .map(|p| (p.pair.token0, p.pair.token1, p.token0_decimals, p.token1_decimals))
+        } else {
+            state_manager.get_pool(opp.arb_buy_dex, &opp.pair_symbol)
+                .map(|p| (p.pair.token0, p.pair.token1, p.token0_decimals, p.token1_decimals))
+        };
+        let sell_pool = if opp.arb_sell_dex.is_v3() {
+            state_manager.get_v3_pool(opp.arb_sell_dex, &opp.pair_symbol)
+                .map(|p| (p.pair.token0, p.pair.token1, p.token0_decimals, p.token1_decimals))
+        } else {
+            state_manager.get_pool(opp.arb_sell_dex, &opp.pair_symbol)
+                .map(|p| (p.pair.token0, p.pair.token1, p.token0_decimals, p.token1_decimals))
+        };
+        buy_pool.or(sell_pool)?
+    };
+
+    // Get pool addresses
+    let buy_pool_addr = if opp.arb_buy_dex.is_v3() {
+        state_manager.get_v3_pool(opp.arb_buy_dex, &opp.pair_symbol).map(|p| p.address)
+    } else {
+        state_manager.get_pool(opp.arb_buy_dex, &opp.pair_symbol).map(|p| p.address)
+    };
+    let sell_pool_addr = if opp.arb_sell_dex.is_v3() {
+        state_manager.get_v3_pool(opp.arb_sell_dex, &opp.pair_symbol).map(|p| p.address)
+    } else {
+        state_manager.get_pool(opp.arb_sell_dex, &opp.pair_symbol).map(|p| p.address)
+    };
+
+    // Determine quote_token_is_token0 by comparing pool's token0 with config's quote_token
+    let quote_token_is_token0 = token0 == config.quote_token_address;
+
+    // Trade size: max_trade_size_usd in USDC raw units (6 decimals)
+    let quote_decimals = if quote_token_is_token0 { t0_dec } else { t1_dec };
+    let trade_size = U256::from(
+        (config.max_trade_size_usd * 10_f64.powi(quote_decimals as i32)) as u64
+    );
+
+    let pair = TradingPair::new(token0, token1, opp.pair_symbol.clone());
+
+    let mut arb = ArbitrageOpportunity::new(
+        pair,
+        opp.arb_buy_dex,
+        opp.arb_sell_dex,
+        opp.pre_swap_price,   // buy_price
+        opp.post_swap_price,  // sell_price
+        trade_size,
+    );
+    arb.estimated_profit = opp.arb_est_profit_usd;
+    arb.spread_percent = opp.arb_spread_pct;
+    arb.buy_pool_address = buy_pool_addr;
+    arb.sell_pool_address = sell_pool_addr;
+    arb.token0_decimals = t0_dec;
+    arb.token1_decimals = t1_dec;
+    arb.quote_token_is_token0 = quote_token_is_token0;
+
+    Some(arb)
 }

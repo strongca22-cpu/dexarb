@@ -2,11 +2,12 @@
 //!
 //! Purpose:
 //!     Data structures for pending swap observation, cross-reference tracking,
-//!     and AMM state simulation (Phase 2).
+//!     AMM state simulation (Phase 2), and execution signaling (Phase 3).
 //!
 //! Author: AI-Generated
 //! Created: 2026-02-01
 //! Modified: 2026-02-01 — Phase 2: simulation types
+//! Modified: 2026-02-01 — Phase 3: MempoolSignal for execution pipeline
 //!
 //! Dependencies:
 //!     - ethers (Address, TxHash, U256)
@@ -284,4 +285,22 @@ impl SimulationTracker {
         sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         sorted[sorted.len() / 2]
     }
+}
+
+// ── Phase 3: Execution Signal Types ─────────────────────────────────────────
+
+/// Signal sent from the mempool monitor to the main loop when a simulated
+/// opportunity exceeds the execution threshold.
+/// Carried over an mpsc channel; the main loop converts it to an
+/// ArbitrageOpportunity and calls execute_from_mempool().
+#[derive(Debug, Clone)]
+pub struct MempoolSignal {
+    /// The simulated cross-DEX opportunity
+    pub opportunity: SimulatedOpportunity,
+    /// Gas price from the trigger transaction (wei)
+    pub trigger_gas_price: U256,
+    /// EIP-1559 max priority fee from the trigger tx (if available)
+    pub trigger_max_priority_fee: Option<U256>,
+    /// When the signal was created (for staleness detection)
+    pub seen_at: Instant,
 }
