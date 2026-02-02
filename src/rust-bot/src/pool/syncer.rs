@@ -217,23 +217,6 @@ impl<P: Provider + 'static> PoolSyncer<P> {
         Ok(result)
     }
 
-    /// Get reserves from pool contract
-    async fn get_reserves(&self, pool_address: Address) -> Result<(u128, u128, u32)> {
-        let pool = IUniswapV2Pair::new(pool_address, self.provider.clone());
-
-        let reserves = pool
-            .getReserves()
-            .call()
-            .await
-            .context("Failed to get reserves")?;
-
-        Ok((
-            reserves.reserve0.to::<u128>(),
-            reserves.reserve1.to::<u128>(),
-            reserves.blockTimestampLast,
-        ))
-    }
-
     /// Sync a single pool by its address (for event-driven updates)
     pub async fn sync_pool_by_address(
         &self,

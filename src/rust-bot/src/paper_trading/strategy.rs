@@ -207,7 +207,7 @@ impl Strategy<PoolUpdateEvent, SimulatedTradeAction> for PaperTradingStrategy {
         Ok(())
     }
 
-    async fn process_event(&mut self, event: PoolUpdateEvent) -> Vec<SimulatedTradeAction> {
+    async fn process_event(&mut self, _event: PoolUpdateEvent) -> Vec<SimulatedTradeAction> {
         self.iteration += 1;
 
         // Check if we should stop trading

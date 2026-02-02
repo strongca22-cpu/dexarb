@@ -690,11 +690,11 @@ impl<P: Provider + 'static> MulticallQuoter<P> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloy::network::Ethereum;
     use alloy::providers::RootProvider;
-    use alloy::transports::BoxTransport;
 
     // Type alias for test — static methods don't use the provider
-    type Q = MulticallQuoter<RootProvider<BoxTransport>>;
+    type Q = MulticallQuoter<RootProvider<Ethereum>>;
 
     #[test]
     fn test_encode_quoter_v1_call() {

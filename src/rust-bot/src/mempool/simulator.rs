@@ -748,15 +748,15 @@ mod tests {
             address: Address::ZERO,
             dex: DexType::QuickSwapV2,
             pair: TradingPair::new(Address::ZERO, Address::ZERO, "WETH/USDC".to_string()),
-            reserve0: U256::from(1000u64) * U256::exp10(18), // 1000 WETH (18 dec)
-            reserve1: U256::from(2_400_000u64) * U256::exp10(6), // 2.4M USDC (6 dec)
+            reserve0: U256::from(1000u64) * U256::from(10u64).pow(U256::from(18)), // 1000 WETH (18 dec)
+            reserve1: U256::from(2_400_000u64) * U256::from(10u64).pow(U256::from(6)), // 2.4M USDC (6 dec)
             last_updated: 100,
             token0_decimals: 18,
             token1_decimals: 6,
         };
 
         // Swap 1 WETH → USDC (token0 → token1)
-        let amount_in = U256::exp10(18); // 1e18 = 1 WETH
+        let amount_in = U256::from(10u64).pow(U256::from(18)); // 1e18 = 1 WETH
         let token_in = pool.pair.token0;
 
         let result = simulate_v2_swap(&pool, amount_in, token_in);
@@ -784,15 +784,15 @@ mod tests {
             address: Address::ZERO,
             dex: DexType::QuickSwapV2,
             pair: TradingPair::new(Address::ZERO, Address::ZERO, "WETH/USDC".to_string()),
-            reserve0: U256::from(100u64) * U256::exp10(18), // 100 WETH
-            reserve1: U256::from(240_000u64) * U256::exp10(6), // 240K USDC
+            reserve0: U256::from(100u64) * U256::from(10u64).pow(U256::from(18)), // 100 WETH
+            reserve1: U256::from(240_000u64) * U256::from(10u64).pow(U256::from(6)), // 240K USDC
             last_updated: 100,
             token0_decimals: 18,
             token1_decimals: 6,
         };
 
         // Swap 10 WETH (10% of reserves) → expect ~10% price impact
-        let amount_in = U256::from(10u64) * U256::exp10(18);
+        let amount_in = U256::from(10u64) * U256::from(10u64).pow(U256::from(18));
         let token_in = pool.pair.token0;
 
         let sim = simulate_v2_swap(&pool, amount_in, token_in).unwrap();

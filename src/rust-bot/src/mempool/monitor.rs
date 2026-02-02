@@ -180,13 +180,18 @@ async fn run_observation_inner(
     // Returns full transaction objects (hashesOnly: false).
     // CU cost: ~40 CU per notification, ~2 V3 txs/min = ~3.5M CU/month.
     //
-    // alloy: Use subscribe_full_pending_transactions() as base, then filter client-side.
-    // The Alchemy-specific server-side filtering (toAddress) is not directly supported
-    // in alloy's standard API, but the subscription handles full tx objects.
-    let pending_sub = sub_provider
-        .subscribe_full_pending_transactions()
+    // alloy: Use raw subscribe() with Alchemy-specific params. The standard
+    // subscribe_full_pending_transactions() sends "newPendingTransactions" which
+    // Alchemy returns as hashes only. Alchemy's custom method supports server-side
+    // toAddress filtering and full tx object delivery.
+    let alchemy_params = serde_json::json!({
+        "toAddress": router_hex,
+        "hashesOnly": false
+    });
+    let pending_sub: alloy::pubsub::Subscription<alloy::rpc::types::Transaction> = sub_provider
+        .subscribe(("alchemy_pendingTransactions", alchemy_params))
         .await
-        .context("pending transactions subscription failed")?;
+        .context("Alchemy pending tx subscription failed")?;
     let mut pending_stream = pending_sub.into_stream();
 
     info!("Mempool: alchemy_pendingTransactions subscription active ({} routers)", router_hex.len());
@@ -229,8 +234,8 @@ async fn run_observation_inner(
             maybe_tx = pending_stream.next() => {
                 match maybe_tx {
                     Some(tx) => {
-                        // Filter: only process txs sent to our monitored routers
-                        // (alloy's subscribe_full_pending_transactions returns all pending txs)
+                        // Filter: verify tx is to a monitored router (should already
+                        // be filtered server-side by Alchemy's toAddress param)
                         let tx_to = tx.to();
                         let router_name = match tx_to
                             .and_then(|to| router_lookup.get(&to))

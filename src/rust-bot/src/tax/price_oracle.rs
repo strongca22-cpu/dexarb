@@ -13,7 +13,7 @@
 //! Created: 2026-01-28
 
 use crate::data_collector::SharedPoolState;
-use anyhow::{Context, Result};
+use anyhow::Result;
 use rust_decimal::Decimal;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

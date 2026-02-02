@@ -525,7 +525,7 @@ impl OpportunityBatcher {
         &self,
         opps: &HashMap<String, Vec<AggregatedOpportunity>>,
     ) -> Vec<BatchedOpportunitySummary> {
-        opps.iter().map(|(key, opportunities)| {
+        opps.iter().map(|(_key, opportunities)| {
             let first = &opportunities[0];
             let route = format!("{} → {}", first.buy_dex, first.sell_dex);
 

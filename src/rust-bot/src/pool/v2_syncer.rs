@@ -18,7 +18,7 @@ use alloy::primitives::{Address, U256};
 use alloy::providers::Provider;
 use anyhow::{Context, Result};
 use std::sync::Arc;
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 /// V2 pool syncer — fetches reserves for known V2 pool addresses.
 /// Designed for the live bot's V2↔V3 cross-protocol arbitrage flow.

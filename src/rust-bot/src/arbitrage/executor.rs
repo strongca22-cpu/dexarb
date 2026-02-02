@@ -136,11 +136,6 @@ impl<P: Provider + 'static> TradeExecutor<P> {
         Ok(())
     }
 
-    /// Get wallet address as string (for tax records)
-    fn wallet_address_string(&self) -> String {
-        format!("{:?}", self.wallet.address())
-    }
-
     /// Execute an arbitrage opportunity
     pub async fn execute(&mut self, opportunity: &ArbitrageOpportunity) -> Result<TradeResult> {
         let start_time = Instant::now();
