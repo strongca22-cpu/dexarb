@@ -10,7 +10,7 @@
 
 use crate::types::{DexType, PoolState, V3PoolState};
 use dashmap::DashMap;
-use ethers::types::Address;
+use alloy::primitives::Address;
 use std::sync::Arc;
 use tracing::debug;
 
@@ -194,17 +194,17 @@ impl Clone for PoolStateManager {
 mod tests {
     use super::*;
     use crate::types::TradingPair;
-    use ethers::types::{Address, U256};
+    use alloy::primitives::{Address, U256};
 
     fn create_test_pool(dex: DexType, symbol: &str, reserve0: u64, reserve1: u64) -> PoolState {
         // Use a deterministic address based on dex+symbol so each pool gets a unique address
         let addr_seed = format!("{:?}:{}", dex, symbol);
-        let hash = ethers::utils::keccak256(addr_seed.as_bytes());
+        let hash = alloy::primitives::keccak256(addr_seed.as_bytes());
         let address = Address::from_slice(&hash[..20]);
         PoolState {
             address,
             dex,
-            pair: TradingPair::new(Address::zero(), Address::zero(), symbol.to_string()),
+            pair: TradingPair::new(Address::ZERO, Address::ZERO, symbol.to_string()),
             reserve0: U256::from(reserve0),
             reserve1: U256::from(reserve1),
             last_updated: 100,
@@ -245,13 +245,21 @@ mod tests {
         // should NOT overwrite each other (the dual-USDC scenario).
         let manager = PoolStateManager::new();
 
-        let addr_a = Address::from_low_u64_be(0xAAA);
-        let addr_b = Address::from_low_u64_be(0xBBB);
+        let addr_a = {
+            let mut bytes = [0u8; 20];
+            bytes[12..20].copy_from_slice(&0xAAAu64.to_be_bytes());
+            Address::from(bytes)
+        };
+        let addr_b = {
+            let mut bytes = [0u8; 20];
+            bytes[12..20].copy_from_slice(&0xBBBu64.to_be_bytes());
+            Address::from(bytes)
+        };
 
         let pool_a = PoolState {
             address: addr_a,
             dex: DexType::Uniswap,
-            pair: TradingPair::new(Address::zero(), Address::zero(), "WETH/USDC".to_string()),
+            pair: TradingPair::new(Address::ZERO, Address::ZERO, "WETH/USDC".to_string()),
             reserve0: U256::from(1000),
             reserve1: U256::from(2000),
             last_updated: 100,
@@ -261,7 +269,7 @@ mod tests {
         let pool_b = PoolState {
             address: addr_b,
             dex: DexType::Uniswap,
-            pair: TradingPair::new(Address::zero(), Address::zero(), "WETH/USDC".to_string()),
+            pair: TradingPair::new(Address::ZERO, Address::ZERO, "WETH/USDC".to_string()),
             reserve0: U256::from(3000),
             reserve1: U256::from(4000),
             last_updated: 100,

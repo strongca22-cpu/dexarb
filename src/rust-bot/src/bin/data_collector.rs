@@ -15,7 +15,7 @@
 use anyhow::Result;
 use dexarb_bot::config::load_config;
 use dexarb_bot::data_collector::{run_data_collector, DEFAULT_STATE_PATH};
-use ethers::prelude::*;
+use alloy::providers::{ProviderBuilder, WsConnect};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::info;
@@ -39,8 +39,9 @@ async fn main() -> Result<()> {
     let config = load_config()?;
     info!("Configuration loaded");
 
-    // Create provider
-    let provider = Provider::<Ws>::connect(&config.rpc_url).await?;
+    // Create provider (alloy WebSocket)
+    let ws = WsConnect::new(&config.rpc_url);
+    let provider = ProviderBuilder::new().connect_ws(ws).await?;
     let provider = Arc::new(provider);
     info!("Connected to RPC: {}", &config.rpc_url[..50.min(config.rpc_url.len())]);
 

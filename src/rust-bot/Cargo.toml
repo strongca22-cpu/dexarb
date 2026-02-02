@@ -5,8 +5,16 @@ edition = "2021"
 description = "DEX Arbitrage Bot - Multi-Chain (Polygon, Base)"
 
 [dependencies]
-# Core Ethereum interaction (ethers-rs)
-ethers = { version = "2.0", features = ["ws", "rustls", "abigen"] }
+# Core Ethereum interaction (alloy — successor to ethers-rs)
+# Migrated from ethers-rs 2.0 on 2026-02-01
+# Default features include: contract, provider-http, rpc-types, signer-local, reqwest-rustls-tls, sol-types
+alloy = { version = "1.5", features = [
+    "provider-ws",    # WebSocket transport
+    "provider-ipc",   # IPC transport (for local Bor node)
+    "pubsub",         # Block/tx subscriptions
+    "dyn-abi",        # Dynamic ABI encoding/decoding
+    "json",           # JSON serialization for ABI
+] }
 
 # Async runtime
 tokio = { version = "1.35", features = ["full"] }
@@ -44,7 +52,8 @@ rust_decimal = "1.33"
 chrono = { version = "0.4", features = ["serde"] }
 
 # HTTP client for Discord webhooks (using rustls to avoid OpenSSL dependency)
-reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls"] }
+# Upgraded from 0.11 to 0.12 to match alloy's reqwest version
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 # Optional: Discord bot (full framework)
 serenity = { version = "0.12", optional = true, default-features = false, features = ["client", "gateway", "model"] }

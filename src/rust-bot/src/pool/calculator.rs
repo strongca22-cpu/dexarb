@@ -8,7 +8,7 @@
 
 use crate::pool::PoolStateManager;
 use crate::types::{DexType, PoolState};
-use ethers::types::{Address, U256};
+use alloy::primitives::{Address, U256};
 use tracing::debug;
 
 /// Price calculator for DEX pools
@@ -37,7 +37,7 @@ impl PriceCalculator {
         reserve_out: U256,
     ) -> U256 {
         if amount_in.is_zero() || reserve_in.is_zero() || reserve_out.is_zero() {
-            return U256::zero();
+            return U256::ZERO;
         }
 
         let amount_in_with_fee = amount_in * U256::from(997);
@@ -57,7 +57,7 @@ impl PriceCalculator {
         reserve_out: U256,
     ) -> U256 {
         if amount_out.is_zero() || reserve_in.is_zero() || reserve_out.is_zero() {
-            return U256::zero();
+            return U256::ZERO;
         }
 
         if amount_out >= reserve_out {
@@ -81,7 +81,7 @@ impl PriceCalculator {
         }
 
         // Spot price before trade
-        let spot_price = reserve_out.low_u128() as f64 / reserve_in.low_u128() as f64;
+        let spot_price = reserve_out.to::<u128>() as f64 / reserve_in.to::<u128>() as f64;
 
         // Actual execution price with trade
         let amount_out = Self::get_amount_out(amount_in, reserve_in, reserve_out);
@@ -89,7 +89,7 @@ impl PriceCalculator {
             return 100.0;
         }
 
-        let execution_price = amount_out.low_u128() as f64 / amount_in.low_u128() as f64;
+        let execution_price = amount_out.to::<u128>() as f64 / amount_in.to::<u128>() as f64;
 
         // Price impact as percentage
         ((spot_price - execution_price) / spot_price) * 100.0
@@ -151,7 +151,7 @@ impl PriceCalculator {
         let profit = if amount_out > amount_in {
             amount_out - amount_in
         } else {
-            U256::zero()
+            U256::ZERO
         };
 
         debug!(
@@ -209,16 +209,16 @@ mod tests {
     #[test]
     fn test_get_amount_out_zero_inputs() {
         assert_eq!(
-            PriceCalculator::get_amount_out(U256::zero(), U256::from(100), U256::from(100)),
-            U256::zero()
+            PriceCalculator::get_amount_out(U256::ZERO, U256::from(100), U256::from(100)),
+            U256::ZERO
         );
         assert_eq!(
-            PriceCalculator::get_amount_out(U256::from(100), U256::zero(), U256::from(100)),
-            U256::zero()
+            PriceCalculator::get_amount_out(U256::from(100), U256::ZERO, U256::from(100)),
+            U256::ZERO
         );
         assert_eq!(
-            PriceCalculator::get_amount_out(U256::from(100), U256::from(100), U256::zero()),
-            U256::zero()
+            PriceCalculator::get_amount_out(U256::from(100), U256::from(100), U256::ZERO),
+            U256::ZERO
         );
     }
 

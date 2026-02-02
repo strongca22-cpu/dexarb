@@ -12,16 +12,16 @@ use crate::pool::{PoolStateManager, PoolSyncer};
 use crate::types::BotConfig;
 use anyhow::Result;
 use async_trait::async_trait;
-use ethers::prelude::*;
+use alloy::providers::Provider;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio_stream::wrappers::IntervalStream;
 use tokio_stream::StreamExt;
 
 /// Collector that syncs pool state and produces update events
-pub struct PoolStateCollector<M> {
-    /// Ethers provider
-    provider: Arc<M>,
+pub struct PoolStateCollector<P> {
+    /// Alloy provider
+    provider: Arc<P>,
     /// Bot configuration
     config: BotConfig,
     /// Pool state manager (shared with strategies)
@@ -30,12 +30,12 @@ pub struct PoolStateCollector<M> {
     poll_interval: Duration,
 }
 
-impl<M> PoolStateCollector<M>
+impl<P> PoolStateCollector<P>
 where
-    M: Middleware + 'static,
+    P: Provider + 'static,
 {
     pub fn new(
-        provider: Arc<M>,
+        provider: Arc<P>,
         config: BotConfig,
         state_manager: PoolStateManager,
     ) -> Self {
@@ -55,10 +55,9 @@ where
 }
 
 #[async_trait]
-impl<M> Collector<PoolUpdateEvent> for PoolStateCollector<M>
+impl<P> Collector<PoolUpdateEvent> for PoolStateCollector<P>
 where
-    M: Middleware + 'static,
-    M::Error: 'static,
+    P: Provider + 'static,
 {
     async fn get_event_stream(&self) -> Result<CollectorStream<'_, PoolUpdateEvent>> {
         // Create a syncer for this collector
@@ -99,7 +98,6 @@ where
                 let block_number = provider
                     .get_block_number()
                     .await
-                    .map(|b| b.as_u64())
                     .unwrap_or(0);
 
                 PoolUpdateEvent {
@@ -118,16 +116,16 @@ where
 
 /// Simple block-based collector that doesn't sync pools
 /// (for testing or when pools are synced elsewhere)
-pub struct SimpleBlockCollector<M> {
-    provider: Arc<M>,
+pub struct SimpleBlockCollector<P> {
+    provider: Arc<P>,
     poll_interval: Duration,
 }
 
-impl<M> SimpleBlockCollector<M>
+impl<P> SimpleBlockCollector<P>
 where
-    M: Middleware + 'static,
+    P: Provider + 'static,
 {
-    pub fn new(provider: Arc<M>, poll_interval_ms: u64) -> Self {
+    pub fn new(provider: Arc<P>, poll_interval_ms: u64) -> Self {
         Self {
             provider,
             poll_interval: Duration::from_millis(poll_interval_ms),
@@ -136,10 +134,9 @@ where
 }
 
 #[async_trait]
-impl<M> Collector<PoolUpdateEvent> for SimpleBlockCollector<M>
+impl<P> Collector<PoolUpdateEvent> for SimpleBlockCollector<P>
 where
-    M: Middleware + 'static,
-    M::Error: 'static,
+    P: Provider + 'static,
 {
     async fn get_event_stream(&self) -> Result<CollectorStream<'_, PoolUpdateEvent>> {
         let interval = tokio::time::interval(self.poll_interval);
@@ -153,7 +150,6 @@ where
                 let block_number = provider
                     .get_block_number()
                     .await
-                    .map(|b| b.as_u64())
                     .unwrap_or(0);
 
                 PoolUpdateEvent {

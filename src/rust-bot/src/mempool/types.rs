@@ -10,11 +10,11 @@
 //! Modified: 2026-02-01 — Phase 3: MempoolSignal for execution pipeline
 //!
 //! Dependencies:
-//!     - ethers (Address, TxHash, U256)
+//!     - alloy (Address, TxHash, U256)
 //!     - chrono (timestamps)
 
 use crate::types::DexType;
-use ethers::types::{Address, TxHash, U256};
+use alloy::primitives::{Address, TxHash, U256};
 use std::collections::HashMap;
 use std::time::Instant;
 

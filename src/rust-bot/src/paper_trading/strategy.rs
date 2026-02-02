@@ -120,7 +120,7 @@ impl PaperTradingStrategy {
                                     pool_b.dex,
                                     price_a,
                                     price_b,
-                                    ethers::types::U256::from(
+                                    alloy::primitives::U256::from(
                                         (self.config.max_trade_size_usd * 1e18) as u128,
                                     ),
                                 ));
@@ -141,7 +141,7 @@ impl PaperTradingStrategy {
                                     pool_a.dex,
                                     price_b,
                                     price_a,
-                                    ethers::types::U256::from(
+                                    alloy::primitives::U256::from(
                                         (self.config.max_trade_size_usd * 1e18) as u128,
                                     ),
                                 ));

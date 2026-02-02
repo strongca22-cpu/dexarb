@@ -40,7 +40,10 @@ use dexarb_bot::pool::{PoolStateManager, V2PoolSyncer, V3PoolSyncer, SUSHI_V3_FE
 use dexarb_bot::types::{ArbitrageOpportunity, DexType, PoolState, TradingPair, V3PoolState};
 use std::collections::HashMap;
 use dexarb_bot::price_logger::PriceLogger;
-use ethers::prelude::*;
+use alloy::primitives::{Address, B256, U256, keccak256};
+use alloy::providers::{Provider, ProviderBuilder, WsConnect};
+use alloy::rpc::types::{Filter, Header};
+use alloy::signers::local::PrivateKeySigner;
 use futures::StreamExt;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -94,7 +97,8 @@ async fn main() -> Result<()> {
     // Initialize provider for RPC calls (sync, Quoter, execution).
     // A separate WS connection for block subscription is created in the reconnect loop below.
     info!("Connecting to {} via WebSocket (RPC provider)...", config.chain_name);
-    let provider = Provider::<Ws>::connect(&config.rpc_url).await?;
+    let ws = WsConnect::new(&config.rpc_url);
+    let provider = ProviderBuilder::new().connect_ws(ws).await?;
     let provider = Arc::new(provider);
 
     // Verify connection
@@ -280,13 +284,10 @@ async fn main() -> Result<()> {
     info!("Opportunity detector initialized");
 
     // Initialize trade executor
-    let wallet: LocalWallet = config
-        .private_key
-        .parse::<LocalWallet>()?
-        .with_chain_id(config.chain_id);
-    info!("Wallet loaded: {:?}", wallet.address());
+    let signer: PrivateKeySigner = config.private_key.parse()?;
+    info!("Wallet loaded: {:?}", signer.address());
 
-    let mut executor = TradeExecutor::new(Arc::clone(&provider), wallet, config.clone());
+    let mut executor = TradeExecutor::new(Arc::clone(&provider), signer, config.clone());
 
     // Set live/dry run mode based on config
     if config.live_mode {
@@ -404,12 +405,12 @@ async fn main() -> Result<()> {
     // V3 Swap events give us (sqrtPriceX96, liquidity, tick) directly.
     // V2 Sync events give us (reserve0, reserve1) directly.
     // One eth_getLogs call per block replaces ~21 per-pool RPC calls.
-    let v3_swap_topic: H256 = ethers::utils::keccak256(
+    let v3_swap_topic: B256 = keccak256(
         b"Swap(address,address,int256,int256,uint160,uint128,int24)"
-    ).into();
-    let v2_sync_topic: H256 = ethers::utils::keccak256(
+    );
+    let v2_sync_topic: B256 = keccak256(
         b"Sync(uint112,uint112)"
-    ).into();
+    );
 
     struct PoolMeta {
         dex: DexType,
@@ -502,7 +503,7 @@ async fn main() -> Result<()> {
     'reconnect: loop {
     // Create a fresh WS connection for block subscription each reconnect cycle.
     // Scoped to this loop iteration so borrow checker is satisfied when we `break`.
-    let sub_provider = match Provider::<Ws>::connect(&config.rpc_url).await {
+    let sub_provider = match ProviderBuilder::new().connect_ws(WsConnect::new(&config.rpc_url)).await {
         Ok(p) => p,
         Err(e) => {
             ws_reconnects += 1;
@@ -517,8 +518,8 @@ async fn main() -> Result<()> {
     };
 
     info!("Subscribing to new blocks via WebSocket (dedicated connection)...");
-    let mut block_stream = match sub_provider.subscribe_blocks().await {
-        Ok(stream) => stream,
+    let block_sub = match sub_provider.subscribe_blocks().await {
+        Ok(sub) => sub,
         Err(e) => {
             ws_reconnects += 1;
             if ws_reconnects > MAX_WS_RECONNECTS {
@@ -530,12 +531,13 @@ async fn main() -> Result<()> {
             continue 'reconnect;
         }
     };
+    let mut block_stream = block_sub.into_stream();
     info!("WS block subscription active — reacting to blocks in real-time");
     ws_reconnects = 0; // reset on successful subscribe
 
     // LoopEvent: block-reactive or mempool-sourced signal
     enum LoopEvent {
-        Block(Block<TxHash>),
+        Block(Header),
         Mempool(MempoolSignal),
         StreamEnd,
         Timeout,
@@ -675,7 +677,7 @@ async fn main() -> Result<()> {
     };
 
     {
-            let current_block = block.number.map(|n| n.as_u64()).unwrap_or(last_block + 1);
+            let current_block = block.number;
 
             iteration += 1;
             total_scans += 1;
@@ -701,7 +703,7 @@ async fn main() -> Result<()> {
             // A1: Update executor's cached base fee from block header.
             // Eliminates get_gas_price() RPC call during execution (~50ms savings).
             if let Some(base_fee) = block.base_fee_per_gas {
-                executor.set_base_fee(base_fee);
+                executor.set_base_fee(base_fee as u128);
             }
 
             // --- Pool state sync ---
@@ -713,7 +715,7 @@ async fn main() -> Result<()> {
                     .from_block(current_block)
                     .to_block(current_block)
                     .address(pool_addresses.clone())
-                    .topic0(vec![v3_swap_topic, v2_sync_topic]);
+                    .event_signature(vec![v3_swap_topic, v2_sync_topic]);
 
                 match provider.get_logs(&filter).await {
                     Ok(logs) => {
@@ -721,25 +723,27 @@ async fn main() -> Result<()> {
                         let mut v2_updated = 0u32;
 
                         for log in &logs {
-                            if let Some(meta) = pool_lookup.get(&log.address) {
-                                if meta.is_v3 && !log.topics.is_empty() && log.topics[0] == v3_swap_topic {
+                            let topics = log.topics();
+                            let data = &log.inner.data.data;
+                            if let Some(meta) = pool_lookup.get(&log.address()) {
+                                if meta.is_v3 && !topics.is_empty() && topics[0] == v3_swap_topic {
                                     // V3 Swap event data layout (160 bytes):
                                     //   [0..32]   amount0 (int256)
                                     //   [32..64]  amount1 (int256)
                                     //   [64..96]  sqrtPriceX96 (uint160)
                                     //   [96..128] liquidity (uint128)
                                     //   [128..160] tick (int24 as int256)
-                                    if log.data.len() >= 160 {
-                                        let sqrt_price_x96 = U256::from_big_endian(&log.data[64..96]);
-                                        let liquidity = U256::from_big_endian(&log.data[96..128]).low_u128();
+                                    if data.len() >= 160 {
+                                        let sqrt_price_x96 = U256::from_be_slice(&data[64..96]);
+                                        let liquidity = U256::from_be_slice(&data[96..128]).to::<u128>();
                                         // tick: int24 sign-extended to int256; last 4 bytes = valid i32
                                         let tick = i32::from_be_bytes([
-                                            log.data[156], log.data[157],
-                                            log.data[158], log.data[159],
+                                            data[156], data[157],
+                                            data[158], data[159],
                                         ]);
 
                                         state_manager.update_v3_pool(V3PoolState {
-                                            address: log.address,
+                                            address: log.address(),
                                             dex: meta.dex,
                                             pair: meta.pair.clone(),
                                             sqrt_price_x96,
@@ -752,16 +756,16 @@ async fn main() -> Result<()> {
                                         });
                                         v3_updated += 1;
                                     }
-                                } else if !meta.is_v3 && !log.topics.is_empty() && log.topics[0] == v2_sync_topic {
+                                } else if !meta.is_v3 && !topics.is_empty() && topics[0] == v2_sync_topic {
                                     // V2 Sync event data layout (64 bytes):
                                     //   [0..32]  reserve0 (uint112)
                                     //   [32..64] reserve1 (uint112)
-                                    if log.data.len() >= 64 {
-                                        let reserve0 = U256::from_big_endian(&log.data[0..32]);
-                                        let reserve1 = U256::from_big_endian(&log.data[32..64]);
+                                    if data.len() >= 64 {
+                                        let reserve0 = U256::from_be_slice(&data[0..32]);
+                                        let reserve1 = U256::from_be_slice(&data[32..64]);
 
                                         state_manager.update_pool(PoolState {
-                                            address: log.address,
+                                            address: log.address(),
                                             dex: meta.dex,
                                             pair: meta.pair.clone(),
                                             reserve0,

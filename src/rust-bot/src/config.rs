@@ -13,7 +13,7 @@ use anyhow::{Context, Result};
 
 // Re-export BotConfig for external access
 pub use crate::types::BotConfig;
-use ethers::types::Address;
+use alloy::primitives::Address;
 use std::str::FromStr;
 
 /// Load config from default .env file (used by data collector, dev tools)

@@ -8,6 +8,7 @@
 
 pub mod arbitrage;
 pub mod config;
+pub mod contracts;
 pub mod data_collector;
 pub mod filters;
 pub mod mempool;

@@ -199,16 +199,16 @@ Replace Cargo.toml dependency:
 # Remove
 ethers = { version = "2.0", features = ["ws", "rustls", "abigen"] }
 
-# Add
-alloy = { version = "0.9", features = [
-    "full",           # All core features
+# Add (updated for alloy 1.5.2)
+alloy = { version = "1.5", features = [
     "provider-ws",    # WebSocket transport
     "provider-ipc",   # IPC transport (NEW — for local Bor node)
-    "signer-local",   # LocalWallet equivalent
-    "sol-types",      # sol! macro
-    "json-abi",       # ABI encoding/decoding
-    "rpc-types",      # Transaction, Block, Log types
+    "pubsub",         # Block/tx subscriptions
+    "dyn-abi",        # Dynamic ABI encoding/decoding (replaces ethers::abi)
+    "json",           # JSON serialization for ABI
 ] }
+# Note: "default" features include: essentials (contract, provider-http, rpc-types, signer-local),
+# reqwest-rustls-tls, sol-types, json-abi, etc. — no need to list them explicitly.
 ```
 
 Files to update (type imports only — 10 files):
@@ -372,13 +372,20 @@ let provider = if config.rpc_url.starts_with("ipc://") {
 
 ## Alloy Version Selection
 
-As of early 2026, alloy `0.9.x` is the latest stable release. Key features to verify:
-- `provider-ipc` feature for Unix socket transport
-- `sol!` macro stability for all our ABI patterns (especially tuple params like SushiSwap QuoterV2)
-- WebSocket subscription API for `subscribe_blocks()` and pending transaction subscriptions
-- Alchemy-specific subscription methods (may need raw JSON-RPC calls)
+**Updated 2026-02-01:** alloy `1.5.2` is the latest stable release (was 0.9.x when plan was written).
+Rust minimum: 1.88 (we have 1.93.0). All needed features confirmed available:
+- `provider-ws` — WebSocket transport (replaces ethers `ws` feature)
+- `provider-ipc` — Unix socket transport for local Bor node
+- `signer-local` — PrivateKeySigner (replaces LocalWallet)
+- `contract` — includes sol! macro, dyn-abi, json-abi, providers
+- `pubsub` — block subscriptions, pending tx subscriptions
+- `rpc-types` — Transaction, Block, Log, TransactionReceipt
+- `dyn-abi` — dynamic ABI encode/decode (replaces ethers::abi)
+- `sol-types` — sol! macro for compile-time ABI
 
-**Check before starting:** `cargo add alloy --dry-run` to see latest available version.
+**Note:** alloy 1.x `default` features include `essentials` (contract + provider-http + rpc-types + signer-local) and `reqwest-rustls-tls`. We need to add `provider-ws`, `provider-ipc`, and `pubsub` explicitly.
+
+**Checked via:** `cargo search alloy` → 1.5.2, `cargo info alloy` → features confirmed, `cargo add --dry-run` → all features resolve.
 
 ---
 

@@ -45,7 +45,7 @@ pub use toml_config::{TomlConfig, GeneralConfig, StrategyConfig};
 use crate::pool::PoolStateManager;
 use crate::types::BotConfig;
 use anyhow::Result;
-use ethers::prelude::*;
+use alloy::providers::Provider;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
@@ -57,13 +57,12 @@ use tracing::info;
 /// 1. A single PoolStateCollector (one data source)
 /// 2. 12 PaperTradingStrategies (one per configuration)
 /// 3. A MultiExecutor that routes actions to the correct metrics tracker
-pub async fn run_paper_trading<M>(
-    provider: Arc<M>,
+pub async fn run_paper_trading<P>(
+    provider: Arc<P>,
     bot_config: BotConfig,
 ) -> Result<()>
 where
-    M: Middleware + 'static,
-    M::Error: 'static,
+    P: Provider + 'static,
 {
     info!("Starting Multi-Configuration Paper Trading System");
 
@@ -157,14 +156,13 @@ async fn report_metrics_loop(metrics: Vec<Arc<RwLock<TraderMetrics>>>) {
 }
 
 /// Run paper trading with custom configurations
-pub async fn run_paper_trading_custom<M>(
-    provider: Arc<M>,
+pub async fn run_paper_trading_custom<P>(
+    provider: Arc<P>,
     bot_config: BotConfig,
     configs: Vec<PaperTradingConfig>,
 ) -> Result<()>
 where
-    M: Middleware + 'static,
-    M::Error: 'static,
+    P: Provider + 'static,
 {
     info!(
         "Starting Custom Paper Trading with {} configurations",

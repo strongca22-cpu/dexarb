@@ -20,12 +20,15 @@
 //! Author: AI-Generated
 //! Created: 2026-01-29
 //! Modified: 2026-01-30 - Cross-DEX: tri-quoter (V1 Uni, V2 Sushi, Algebra QuickSwap)
+//! Modified: 2026-02-01 - Migrated from ethers-rs to alloy
 
 use crate::types::{ArbitrageOpportunity, BotConfig, DexType};
 use anyhow::{anyhow, Context, Result};
-use ethers::abi::{self, ParamType, Token};
-use ethers::prelude::*;
-use ethers::types::{Address, Bytes, U256};
+use alloy::dyn_abi::{DynSolType, DynSolValue};
+use alloy::network::TransactionBuilder;
+use alloy::primitives::{Address, Bytes, U256};
+use alloy::providers::Provider;
+use alloy::rpc::types::TransactionRequest;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
@@ -85,8 +88,8 @@ impl VerifiedOpportunity {
     pub fn passthrough(index: usize) -> Self {
         Self {
             original_index: index,
-            buy_quoted_out: U256::zero(),
-            sell_quoted_out: U256::zero(),
+            buy_quoted_out: U256::ZERO,
+            sell_quoted_out: U256::ZERO,
             quoted_profit_raw: 0,
             both_legs_valid: true, // pass-through — executor will re-verify
             error: None,
@@ -94,11 +97,29 @@ impl VerifiedOpportunity {
     }
 }
 
+// ── ABI Helpers ─────────────────────────────────────────────────────
+
+/// Encode values as ABI function parameters.
+/// Equivalent to the former ethers::abi::encode(&[Token::...]).
+fn abi_encode(values: Vec<DynSolValue>) -> Vec<u8> {
+    DynSolValue::Tuple(values).abi_encode_params()
+}
+
+/// Decode ABI-encoded function parameters.
+/// Equivalent to the former ethers::abi::decode(&params, data).
+fn abi_decode(params: Vec<DynSolType>, data: &[u8]) -> Option<Vec<DynSolValue>> {
+    let ty = DynSolType::Tuple(params);
+    match ty.abi_decode_sequence(data) {
+        Ok(DynSolValue::Tuple(tokens)) => Some(tokens),
+        _ => None,
+    }
+}
+
 /// Batch Quoter using Multicall3 for pre-screening opportunities.
 /// Supports tri-quoter: QuoterV1 for Uniswap V3, QuoterV2 for SushiSwap V3,
 /// Algebra QuoterV2 for QuickSwap V3.
-pub struct MulticallQuoter<M: Middleware> {
-    provider: Arc<M>,
+pub struct MulticallQuoter<P: Provider> {
+    provider: Arc<P>,
     multicall_address: Address,
     uniswap_quoter_address: Address,
     sushiswap_quoter_address: Option<Address>,
@@ -107,11 +128,11 @@ pub struct MulticallQuoter<M: Middleware> {
     uniswap_quoter_is_v2: bool,
 }
 
-impl<M: Middleware + 'static> MulticallQuoter<M> {
+impl<P: Provider + 'static> MulticallQuoter<P> {
     /// Create a new MulticallQuoter using Quoter addresses from config.
     /// Uniswap V3 QuoterV1 is required; SushiSwap V3 QuoterV2 and
     /// QuickSwap V3 (Algebra) QuoterV2 are optional.
-    pub fn new(provider: Arc<M>, config: &BotConfig) -> Result<Self> {
+    pub fn new(provider: Arc<P>, config: &BotConfig) -> Result<Self> {
         let multicall_address: Address = MULTICALL3_ADDRESS
             .parse()
             .context("Invalid Multicall3 address constant")?;
@@ -258,13 +279,13 @@ impl<M: Middleware + 'static> MulticallQuoter<M> {
         let calldata = Self::build_aggregate3_calldata(&sub_calls);
 
         // Execute single eth_call to Multicall3
-        let tx = TransactionRequest::new()
-            .to(self.multicall_address)
-            .data(calldata);
+        let tx = TransactionRequest::default()
+            .with_to(self.multicall_address)
+            .with_input(calldata);
 
         let response = self
             .provider
-            .call(&tx.into(), None)
+            .call(tx)
             .await
             .context("Multicall3 aggregate3 eth_call failed")?;
 
@@ -329,8 +350,8 @@ impl<M: Middleware + 'static> MulticallQuoter<M> {
                         });
                         continue;
                     }
-                    let trade_size_i128 = opp.trade_size.as_u128() as i128;
-                    let sell_out_i128 = sell_out.as_u128() as i128;
+                    let trade_size_i128 = opp.trade_size.to::<u128>() as i128;
+                    let sell_out_i128 = sell_out.to::<u128>() as i128;
                     let profit = sell_out_i128 - trade_size_i128;
 
                     let is_profitable = profit > 0;
@@ -363,8 +384,8 @@ impl<M: Middleware + 'static> MulticallQuoter<M> {
                     );
                     verified.push(VerifiedOpportunity {
                         original_index: i,
-                        buy_quoted_out: U256::zero(),
-                        sell_quoted_out: U256::zero(),
+                        buy_quoted_out: U256::ZERO,
+                        sell_quoted_out: U256::ZERO,
                         quoted_profit_raw: 0,
                         both_legs_valid: false,
                         error: Some(format!("Buy leg: {}", buy_err)),
@@ -378,7 +399,7 @@ impl<M: Middleware + 'static> MulticallQuoter<M> {
                     verified.push(VerifiedOpportunity {
                         original_index: i,
                         buy_quoted_out: buy_out,
-                        sell_quoted_out: U256::zero(),
+                        sell_quoted_out: U256::ZERO,
                         quoted_profit_raw: 0,
                         both_legs_valid: false,
                         error: Some(format!("Sell leg: {}", sell_err)),
@@ -429,12 +450,12 @@ impl<M: Middleware + 'static> MulticallQuoter<M> {
         data.extend_from_slice(&QUOTER_V1_SELECTOR);
 
         // ABI-encode 5 parameters as 32-byte words
-        let encoded = abi::encode(&[
-            Token::Address(token_in),
-            Token::Address(token_out),
-            Token::Uint(U256::from(fee)),
-            Token::Uint(amount_in),
-            Token::Uint(U256::zero()), // sqrtPriceLimitX96 = 0
+        let encoded = abi_encode(vec![
+            DynSolValue::Address(token_in),
+            DynSolValue::Address(token_out),
+            DynSolValue::Uint(U256::from(fee), 256),
+            DynSolValue::Uint(amount_in, 256),
+            DynSolValue::Uint(U256::ZERO, 256), // sqrtPriceLimitX96 = 0
         ]);
         data.extend_from_slice(&encoded);
 
@@ -460,12 +481,12 @@ impl<M: Middleware + 'static> MulticallQuoter<M> {
         data.extend_from_slice(&QUOTER_V2_SELECTOR);
 
         // ABI-encode as a single tuple parameter (note: order differs from V1)
-        let encoded = abi::encode(&[Token::Tuple(vec![
-            Token::Address(token_in),
-            Token::Address(token_out),
-            Token::Uint(amount_in),            // amountIn before fee in V2
-            Token::Uint(U256::from(fee)),
-            Token::Uint(U256::zero()),         // sqrtPriceLimitX96 = 0
+        let encoded = abi_encode(vec![DynSolValue::Tuple(vec![
+            DynSolValue::Address(token_in),
+            DynSolValue::Address(token_out),
+            DynSolValue::Uint(amount_in, 256),            // amountIn before fee in V2
+            DynSolValue::Uint(U256::from(fee), 256),
+            DynSolValue::Uint(U256::ZERO, 256),           // sqrtPriceLimitX96 = 0
         ])]);
         data.extend_from_slice(&encoded);
 
@@ -491,11 +512,11 @@ impl<M: Middleware + 'static> MulticallQuoter<M> {
         data.extend_from_slice(&QUOTER_ALGEBRA_SELECTOR);
 
         // ABI-encode 4 flat parameters (no fee!)
-        let encoded = abi::encode(&[
-            Token::Address(token_in),
-            Token::Address(token_out),
-            Token::Uint(amount_in),
-            Token::Uint(U256::zero()), // sqrtPriceLimitX96 = 0
+        let encoded = abi_encode(vec![
+            DynSolValue::Address(token_in),
+            DynSolValue::Address(token_out),
+            DynSolValue::Uint(amount_in, 256),
+            DynSolValue::Uint(U256::ZERO, 256), // sqrtPriceLimitX96 = 0
         ]);
         data.extend_from_slice(&encoded);
 
@@ -508,20 +529,20 @@ impl<M: Middleware + 'static> MulticallQuoter<M> {
     /// The aggregate3 function takes a single parameter: an array of Call3 structs.
     /// Cross-DEX: each sub-call can target a different quoter contract.
     fn build_aggregate3_calldata(sub_calls: &[(Address, Vec<u8>)]) -> Bytes {
-        let calls: Vec<Token> = sub_calls
+        let calls: Vec<DynSolValue> = sub_calls
             .iter()
             .map(|(target, call_data)| {
-                Token::Tuple(vec![
-                    Token::Address(*target),
-                    Token::Bool(true), // allowFailure — required for Quoter revert pattern
-                    Token::Bytes(call_data.clone()),
+                DynSolValue::Tuple(vec![
+                    DynSolValue::Address(*target),
+                    DynSolValue::Bool(true), // allowFailure — required for Quoter revert pattern
+                    DynSolValue::Bytes(call_data.clone()),
                 ])
             })
             .collect();
 
         let mut data = Vec::new();
         data.extend_from_slice(&AGGREGATE3_SELECTOR);
-        let encoded = abi::encode(&[Token::Array(calls)]);
+        let encoded = abi_encode(vec![DynSolValue::Array(calls)]);
         data.extend_from_slice(&encoded);
 
         Bytes::from(data)
@@ -532,30 +553,32 @@ impl<M: Middleware + 'static> MulticallQuoter<M> {
     /// Response ABI: (bool success, bytes returnData)[]
     fn decode_aggregate3_response(response: &[u8]) -> Result<Vec<(bool, Vec<u8>)>> {
         // The response is ABI-encoded as: array of (bool, bytes) tuples
-        let decoded = abi::decode(
-            &[ParamType::Array(Box::new(ParamType::Tuple(vec![
-                ParamType::Bool,
-                ParamType::Bytes,
+        let decoded = abi_decode(
+            vec![DynSolType::Array(Box::new(DynSolType::Tuple(vec![
+                DynSolType::Bool,
+                DynSolType::Bytes,
             ])))],
             response,
-        )
-        .context("ABI decode of aggregate3 response failed")?;
+        );
 
-        let results_array = match decoded.into_iter().next() {
-            Some(Token::Array(arr)) => arr,
+        let tokens = decoded
+            .ok_or_else(|| anyhow!("ABI decode of aggregate3 response failed"))?;
+
+        let results_array = match tokens.into_iter().next() {
+            Some(DynSolValue::Array(arr)) => arr,
             _ => return Err(anyhow!("Expected Array in aggregate3 response")),
         };
 
         let mut results = Vec::with_capacity(results_array.len());
         for token in results_array {
             match token {
-                Token::Tuple(mut fields) if fields.len() == 2 => {
+                DynSolValue::Tuple(mut fields) if fields.len() == 2 => {
                     let return_data = match fields.pop() {
-                        Some(Token::Bytes(b)) => b,
+                        Some(DynSolValue::Bytes(b)) => b,
                         _ => return Err(anyhow!("Expected Bytes in result tuple")),
                     };
                     let success = match fields.pop() {
-                        Some(Token::Bool(b)) => b,
+                        Some(DynSolValue::Bool(b)) => b,
                         _ => return Err(anyhow!("Expected Bool in result tuple")),
                     };
                     results.push((success, return_data));
@@ -578,7 +601,7 @@ impl<M: Middleware + 'static> MulticallQuoter<M> {
         // A successful sub-call would be unexpected but we handle it gracefully.
         if success && return_data.len() >= 32 {
             // Unexpected: the call succeeded normally. Decode as uint256 anyway.
-            return Ok(U256::from_big_endian(&return_data[..32]));
+            return Ok(U256::from_be_slice(&return_data[..32]));
         }
 
         // Normal QuoterV1 path: success=false, returnData contains the quote
@@ -593,11 +616,10 @@ impl<M: Middleware + 'static> MulticallQuoter<M> {
         if return_data.len() >= 4 && return_data[..4] == ERROR_SELECTOR {
             // Try to decode the error message
             let msg = if return_data.len() > 4 {
-                abi::decode(&[ParamType::String], &return_data[4..])
-                    .ok()
+                abi_decode(vec![DynSolType::String], &return_data[4..])
                     .and_then(|tokens| tokens.into_iter().next())
                     .and_then(|t| match t {
-                        Token::String(s) => Some(s),
+                        DynSolValue::String(s) => Some(s),
                         _ => None,
                     })
                     .unwrap_or_else(|| "unknown error".to_string())
@@ -613,7 +635,7 @@ impl<M: Middleware + 'static> MulticallQuoter<M> {
         }
 
         // Normal QuoterV1 response: first 32 bytes = uint256 amountOut
-        let amount_out = U256::from_big_endian(&return_data[..32]);
+        let amount_out = U256::from_be_slice(&return_data[..32]);
 
         if amount_out.is_zero() {
             return Err(anyhow!("Quoter returned zero — pool has no executable depth"));
@@ -631,16 +653,16 @@ impl<M: Middleware + 'static> MulticallQuoter<M> {
     ///   quote=token1: amount_in in token1 decimals, buy_price = token1/token0
     ///                 → expected_out = amount_in / buy_price (in token0 units)
     fn estimate_buy_output(opp: &ArbitrageOpportunity) -> U256 {
-        let (in_decimals, out_decimals, expected_out_human) = if opp.quote_token_is_token0 {
+        let (_in_decimals, out_decimals, expected_out_human) = if opp.quote_token_is_token0 {
             // quote=token0: trade_size is in token0 units, output is token1
             let amount_in_human =
-                opp.trade_size.low_u128() as f64 / 10_f64.powi(opp.token0_decimals as i32);
+                opp.trade_size.to::<u128>() as f64 / 10_f64.powi(opp.token0_decimals as i32);
             let out = amount_in_human * opp.buy_price * SELL_ESTIMATE_FACTOR;
             (opp.token0_decimals, opp.token1_decimals, out)
         } else {
             // quote=token1: trade_size is in token1 units (USDC), output is token0
             let amount_in_human =
-                opp.trade_size.low_u128() as f64 / 10_f64.powi(opp.token1_decimals as i32);
+                opp.trade_size.to::<u128>() as f64 / 10_f64.powi(opp.token1_decimals as i32);
             // buy_price = token1/token0 (e.g., 82000 USDC per WBTC)
             // To buy token0: amount_in / buy_price
             let out = if opp.buy_price > 0.0 {
@@ -658,7 +680,7 @@ impl<M: Middleware + 'static> MulticallQuoter<M> {
                 "estimate_buy_output: invalid result {:.2} for {} (trade_size={}, buy_price={:.6}, quote_is_t0={})",
                 raw, opp.pair.symbol, opp.trade_size, opp.buy_price, opp.quote_token_is_token0
             );
-            return U256::zero();
+            return U256::ZERO;
         }
 
         U256::from(raw as u128)
@@ -668,6 +690,11 @@ impl<M: Middleware + 'static> MulticallQuoter<M> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloy::providers::RootProvider;
+    use alloy::transports::BoxTransport;
+
+    // Type alias for test — static methods don't use the provider
+    type Q = MulticallQuoter<RootProvider<BoxTransport>>;
 
     #[test]
     fn test_encode_quoter_v1_call() {
@@ -681,7 +708,7 @@ mod tests {
         let fee = 500u32; // 0.05%
         let amount_in = U256::from(1_000_000u64); // 1 USDC (6 decimals)
 
-        let encoded = MulticallQuoter::<Provider<Ws>>::encode_quoter_v1_call(
+        let encoded = Q::encode_quoter_v1_call(
             token_in, token_out, fee, amount_in,
         );
 
@@ -703,7 +730,7 @@ mod tests {
         let fee = 500u32; // 0.05%
         let amount_in = U256::from(1_000_000u64); // 1 USDC (6 decimals)
 
-        let encoded = MulticallQuoter::<Provider<Ws>>::encode_quoter_v2_call(
+        let encoded = Q::encode_quoter_v2_call(
             token_in, token_out, fee, amount_in,
         );
 
@@ -725,7 +752,7 @@ mod tests {
 
         let amount_in = U256::from(1_000_000u64); // 1 USDC (6 decimals)
 
-        let encoded = MulticallQuoter::<Provider<Ws>>::encode_quoter_algebra_call(
+        let encoded = Q::encode_quoter_algebra_call(
             token_in, token_out, amount_in,
         );
 
@@ -738,12 +765,10 @@ mod tests {
     #[test]
     fn test_decode_quoter_result_valid() {
         // Simulate QuoterV1 returning 1e18 (1 token with 18 decimals)
-        let mut return_data = vec![0u8; 32];
         let amount = U256::from(1_000_000_000_000_000_000u64); // 1e18
-        amount.to_big_endian(&mut return_data);
+        let return_data = amount.to_be_bytes::<32>().to_vec();
 
-        let result =
-            MulticallQuoter::<Provider<Ws>>::decode_quoter_result(false, &return_data);
+        let result = Q::decode_quoter_result(false, &return_data);
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), amount);
     }
@@ -754,11 +779,10 @@ mod tests {
         let mut return_data = Vec::new();
         return_data.extend_from_slice(&ERROR_SELECTOR);
         // Add ABI-encoded string "insufficient liquidity"
-        let encoded_msg = abi::encode(&[Token::String("insufficient liquidity".to_string())]);
+        let encoded_msg = abi_encode(vec![DynSolValue::String("insufficient liquidity".to_string())]);
         return_data.extend_from_slice(&encoded_msg);
 
-        let result =
-            MulticallQuoter::<Provider<Ws>>::decode_quoter_result(false, &return_data);
+        let result = Q::decode_quoter_result(false, &return_data);
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("insufficient liquidity"));
@@ -766,8 +790,7 @@ mod tests {
 
     #[test]
     fn test_decode_quoter_result_empty() {
-        let result =
-            MulticallQuoter::<Provider<Ws>>::decode_quoter_result(false, &[]);
+        let result = Q::decode_quoter_result(false, &[]);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("insufficient data"));
     }
@@ -775,8 +798,7 @@ mod tests {
     #[test]
     fn test_decode_quoter_result_zero_amount() {
         let return_data = vec![0u8; 32]; // All zeros = amount 0
-        let result =
-            MulticallQuoter::<Provider<Ws>>::decode_quoter_result(false, &return_data);
+        let result = Q::decode_quoter_result(false, &return_data);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("zero"));
     }
@@ -787,8 +809,7 @@ mod tests {
         return_data.extend_from_slice(&PANIC_SELECTOR);
         return_data.extend_from_slice(&[0u8; 32]); // panic code 0
 
-        let result =
-            MulticallQuoter::<Provider<Ws>>::decode_quoter_result(false, &return_data);
+        let result = Q::decode_quoter_result(false, &return_data);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("panicked"));
     }
@@ -796,12 +817,10 @@ mod tests {
     #[test]
     fn test_decode_quoter_result_success_true() {
         // Unexpected but handled: success=true with valid data
-        let mut return_data = vec![0u8; 32];
         let amount = U256::from(500_000u64);
-        amount.to_big_endian(&mut return_data);
+        let return_data = amount.to_be_bytes::<32>().to_vec();
 
-        let result =
-            MulticallQuoter::<Provider<Ws>>::decode_quoter_result(true, &return_data);
+        let result = Q::decode_quoter_result(true, &return_data);
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), amount);
     }

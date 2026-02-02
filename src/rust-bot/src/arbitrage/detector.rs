@@ -17,7 +17,7 @@
 use crate::filters::WhitelistFilter;
 use crate::pool::{PoolStateManager, PriceCalculator};
 use crate::types::{ArbitrageOpportunity, BotConfig, DexType, PoolState, TradingPair};
-use ethers::types::{Address, U256};
+use alloy::primitives::{Address, U256};
 use tracing::{debug, info, warn};
 
 /// Minimum spread percentage to consider (covers fees)
@@ -198,8 +198,8 @@ impl OpportunityDetector {
             // V2 pools are pre-verified by verify_v2_pools.py (whitelist v2_ready),
             // so this is a rough floor check only.
             let liquidity = std::cmp::min(
-                pool.reserve0.low_u128(),
-                pool.reserve1.low_u128(),
+                pool.reserve0.to::<u128>(),
+                pool.reserve1.to::<u128>(),
             );
 
             // Determine quote token for this V2 pool
@@ -534,7 +534,7 @@ impl OpportunityDetector {
 
     /// Convert Wei profit to USD based on pair
     fn wei_to_usd(&self, wei: U256, pair_symbol: &str) -> f64 {
-        let wei_f = wei.low_u128() as f64;
+        let wei_f = wei.to::<u128>() as f64;
 
         // Convert based on token (can be improved with price oracle)
         if pair_symbol.starts_with("WETH") {
@@ -554,7 +554,7 @@ impl OpportunityDetector {
 mod tests {
     use super::*;
     use crate::types::{DexType, TradingPair};
-    use ethers::types::Address;
+    use alloy::primitives::Address;
 
     fn create_test_pool(
         dex: DexType,
@@ -563,9 +563,9 @@ mod tests {
         reserve1: u128,
     ) -> PoolState {
         PoolState {
-            address: Address::zero(),
+            address: Address::ZERO,
             dex,
-            pair: TradingPair::new(Address::zero(), Address::zero(), symbol.to_string()),
+            pair: TradingPair::new(Address::ZERO, Address::ZERO, symbol.to_string()),
             reserve0: U256::from(reserve0),
             reserve1: U256::from(reserve1),
             last_updated: 100,
@@ -586,10 +586,10 @@ mod tests {
             min_profit_usd: 5.0,
             max_trade_size_usd: 500.0,
             max_slippage_percent: 0.5,
-            uniswap_router: Address::zero(),
-            sushiswap_router: Address::zero(),
-            uniswap_factory: Address::zero(),
-            sushiswap_factory: Address::zero(),
+            uniswap_router: Address::ZERO,
+            sushiswap_router: Address::ZERO,
+            uniswap_factory: Address::ZERO,
+            sushiswap_factory: Address::ZERO,
             apeswap_router: None,
             apeswap_factory: None,
             uniswap_v3_factory: None,

@@ -6,10 +6,10 @@
 //!
 //! Author: AI-Generated
 //! Created: 2026-02-01
-//! Modified: 2026-02-01
+//! Modified: 2026-02-01 — migrated from ethers::abi to alloy::dyn_abi
 //!
 //! Dependencies:
-//!     - ethers (abi decoding)
+//!     - alloy (dyn_abi decoding, primitives)
 //!
 //! Supported Function Selectors:
 //!     V3 SwapRouter:
@@ -27,8 +27,8 @@
 //!       0x7ff36ab5 — swapExactETHForTokens
 //!       0x18cbafe5 — swapExactTokensForETH
 
-use ethers::abi::{decode, ParamType, Token};
-use ethers::types::{Address, U256};
+use alloy::dyn_abi::{DynSolType, DynSolValue};
+use alloy::primitives::{Address, U256};
 use tracing::trace;
 
 use super::types::DecodedSwap;
@@ -95,6 +95,18 @@ pub fn selector_hex(input: &[u8]) -> String {
     format!("0x{:02x}{:02x}{:02x}{:02x}", input[0], input[1], input[2], input[3])
 }
 
+// ── ABI Decode Helper ───────────────────────────────────────────────
+
+/// Decode ABI-encoded function parameters.
+/// Equivalent to the former ethers::abi::decode(&params, data).
+fn abi_decode(params: Vec<DynSolType>, data: &[u8]) -> Option<Vec<DynSolValue>> {
+    let ty = DynSolType::Tuple(params);
+    match ty.abi_decode_sequence(data) {
+        Ok(DynSolValue::Tuple(tokens)) => Some(tokens),
+        _ => None,
+    }
+}
+
 // ── V3 SwapRouter Decoders ──────────────────────────────────────────
 
 /// Decode exactInputSingle(ExactInputSingleParams)
@@ -102,17 +114,17 @@ pub fn selector_hex(input: &[u8]) -> String {
 ///          uint256 deadline, uint256 amountIn, uint256 amountOutMinimum, uint160 sqrtPriceLimitX96)
 fn decode_v3_exact_input_single(data: &[u8]) -> Option<DecodedSwap> {
     let params = vec![
-        ParamType::Address,  // tokenIn
-        ParamType::Address,  // tokenOut
-        ParamType::Uint(24), // fee
-        ParamType::Address,  // recipient
-        ParamType::Uint(256), // deadline
-        ParamType::Uint(256), // amountIn
-        ParamType::Uint(256), // amountOutMinimum
-        ParamType::Uint(160), // sqrtPriceLimitX96
+        DynSolType::Address,  // tokenIn
+        DynSolType::Address,  // tokenOut
+        DynSolType::Uint(24), // fee
+        DynSolType::Address,  // recipient
+        DynSolType::Uint(256), // deadline
+        DynSolType::Uint(256), // amountIn
+        DynSolType::Uint(256), // amountOutMinimum
+        DynSolType::Uint(160), // sqrtPriceLimitX96
     ];
 
-    let tokens = decode(&params, data).ok()?;
+    let tokens = abi_decode(params, data)?;
 
     Some(DecodedSwap {
         function_name: "exactInputSingle".to_string(),
@@ -131,17 +143,17 @@ fn decode_v3_exact_input_single(data: &[u8]) -> Option<DecodedSwap> {
 fn decode_v3_exact_input(data: &[u8]) -> Option<DecodedSwap> {
     // ExactInputParams is a struct with a dynamic field (bytes path),
     // so it's encoded with an offset pointer.
-    let params = vec![ParamType::Tuple(vec![
-        ParamType::Bytes,     // path
-        ParamType::Address,   // recipient
-        ParamType::Uint(256), // deadline
-        ParamType::Uint(256), // amountIn
-        ParamType::Uint(256), // amountOutMinimum
+    let params = vec![DynSolType::Tuple(vec![
+        DynSolType::Bytes,     // path
+        DynSolType::Address,   // recipient
+        DynSolType::Uint(256), // deadline
+        DynSolType::Uint(256), // amountIn
+        DynSolType::Uint(256), // amountOutMinimum
     ])];
 
-    let tokens = decode(&params, data).ok()?;
+    let tokens = abi_decode(params, data)?;
 
-    if let Token::Tuple(inner) = &tokens[0] {
+    if let DynSolValue::Tuple(inner) = &tokens[0] {
         let path = token_to_bytes(&inner[0])?;
         let (token_in, token_out, fee) = decode_v3_path(&path)?;
 
@@ -163,17 +175,17 @@ fn decode_v3_exact_input(data: &[u8]) -> Option<DecodedSwap> {
 ///          uint256 deadline, uint256 amountOut, uint256 amountInMaximum, uint160 sqrtPriceLimitX96)
 fn decode_v3_exact_output_single(data: &[u8]) -> Option<DecodedSwap> {
     let params = vec![
-        ParamType::Address,  // tokenIn
-        ParamType::Address,  // tokenOut
-        ParamType::Uint(24), // fee
-        ParamType::Address,  // recipient
-        ParamType::Uint(256), // deadline
-        ParamType::Uint(256), // amountOut
-        ParamType::Uint(256), // amountInMaximum
-        ParamType::Uint(160), // sqrtPriceLimitX96
+        DynSolType::Address,  // tokenIn
+        DynSolType::Address,  // tokenOut
+        DynSolType::Uint(24), // fee
+        DynSolType::Address,  // recipient
+        DynSolType::Uint(256), // deadline
+        DynSolType::Uint(256), // amountOut
+        DynSolType::Uint(256), // amountInMaximum
+        DynSolType::Uint(160), // sqrtPriceLimitX96
     ];
 
-    let tokens = decode(&params, data).ok()?;
+    let tokens = abi_decode(params, data)?;
 
     Some(DecodedSwap {
         function_name: "exactOutputSingle".to_string(),
@@ -193,17 +205,17 @@ fn decode_v3_exact_output_single(data: &[u8]) -> Option<DecodedSwap> {
 ///                 uint256 amountOut, uint256 amountInMaximum)
 /// Path is REVERSED: tokenOut | fee | ... | tokenIn
 fn decode_v3_exact_output(data: &[u8]) -> Option<DecodedSwap> {
-    let params = vec![ParamType::Tuple(vec![
-        ParamType::Bytes,     // path (reversed!)
-        ParamType::Address,   // recipient
-        ParamType::Uint(256), // deadline
-        ParamType::Uint(256), // amountOut
-        ParamType::Uint(256), // amountInMaximum
+    let params = vec![DynSolType::Tuple(vec![
+        DynSolType::Bytes,     // path (reversed!)
+        DynSolType::Address,   // recipient
+        DynSolType::Uint(256), // deadline
+        DynSolType::Uint(256), // amountOut
+        DynSolType::Uint(256), // amountInMaximum
     ])];
 
-    let tokens = decode(&params, data).ok()?;
+    let tokens = abi_decode(params, data)?;
 
-    if let Token::Tuple(inner) = &tokens[0] {
+    if let DynSolValue::Tuple(inner) = &tokens[0] {
         let path = token_to_bytes(&inner[0])?;
         // Path is reversed for exactOutput: first token is tokenOut, last is tokenIn
         let (first_token, last_token, fee) = decode_v3_path(&path)?;
@@ -226,21 +238,21 @@ fn decode_v3_exact_output(data: &[u8]) -> Option<DecodedSwap> {
 fn decode_multicall(data: &[u8], has_deadline: bool) -> Option<DecodedSwap> {
     let params = if has_deadline {
         vec![
-            ParamType::Uint(256),
-            ParamType::Array(Box::new(ParamType::Bytes)),
+            DynSolType::Uint(256),
+            DynSolType::Array(Box::new(DynSolType::Bytes)),
         ]
     } else {
-        vec![ParamType::Array(Box::new(ParamType::Bytes))]
+        vec![DynSolType::Array(Box::new(DynSolType::Bytes))]
     };
 
-    let tokens = decode(&params, data).ok()?;
+    let tokens = abi_decode(params, data)?;
 
     // Inner calls array is the last element
     let calls_token = tokens.last()?;
-    if let Token::Array(inner_calls) = calls_token {
+    if let DynSolValue::Array(inner_calls) = calls_token {
         // Try to decode each inner call; return the first recognized swap
         for call in inner_calls {
-            if let Token::Bytes(call_data) = call {
+            if let DynSolValue::Bytes(call_data) = call {
                 if let Some(mut swap) = decode_calldata(call_data) {
                     swap.function_name = format!("multicall>{}", swap.function_name);
                     return Some(swap);
@@ -269,16 +281,16 @@ fn decode_multicall(data: &[u8], has_deadline: bool) -> Option<DecodedSwap> {
 ///          uint256 deadline, uint256 amountIn, uint256 amountOutMinimum, uint160 limitSqrtPrice)
 fn decode_algebra_exact_input_single(data: &[u8]) -> Option<DecodedSwap> {
     let params = vec![
-        ParamType::Address,  // tokenIn
-        ParamType::Address,  // tokenOut
-        ParamType::Address,  // recipient
-        ParamType::Uint(256), // deadline
-        ParamType::Uint(256), // amountIn
-        ParamType::Uint(256), // amountOutMinimum
-        ParamType::Uint(160), // limitSqrtPrice
+        DynSolType::Address,  // tokenIn
+        DynSolType::Address,  // tokenOut
+        DynSolType::Address,  // recipient
+        DynSolType::Uint(256), // deadline
+        DynSolType::Uint(256), // amountIn
+        DynSolType::Uint(256), // amountOutMinimum
+        DynSolType::Uint(160), // limitSqrtPrice
     ];
 
-    let tokens = decode(&params, data).ok()?;
+    let tokens = abi_decode(params, data)?;
 
     Some(DecodedSwap {
         function_name: "algebraExactInputSingle".to_string(),
@@ -296,14 +308,14 @@ fn decode_algebra_exact_input_single(data: &[u8]) -> Option<DecodedSwap> {
 /// Params: (uint256 amountIn, uint256 amountOutMin, address[] path, address to, uint256 deadline)
 fn decode_v2_swap_exact_in(data: &[u8], fn_name: &str) -> Option<DecodedSwap> {
     let params = vec![
-        ParamType::Uint(256),  // amountIn
-        ParamType::Uint(256),  // amountOutMin
-        ParamType::Array(Box::new(ParamType::Address)), // path
-        ParamType::Address,    // to
-        ParamType::Uint(256),  // deadline
+        DynSolType::Uint(256),  // amountIn
+        DynSolType::Uint(256),  // amountOutMin
+        DynSolType::Array(Box::new(DynSolType::Address)), // path
+        DynSolType::Address,    // to
+        DynSolType::Uint(256),  // deadline
     ];
 
-    let tokens = decode(&params, data).ok()?;
+    let tokens = abi_decode(params, data)?;
 
     let (token_in, token_out) = extract_v2_path(&tokens[2]);
 
@@ -321,14 +333,14 @@ fn decode_v2_swap_exact_in(data: &[u8], fn_name: &str) -> Option<DecodedSwap> {
 /// Params: (uint256 amountOut, uint256 amountInMax, address[] path, address to, uint256 deadline)
 fn decode_v2_swap_exact_out(data: &[u8]) -> Option<DecodedSwap> {
     let params = vec![
-        ParamType::Uint(256),  // amountOut
-        ParamType::Uint(256),  // amountInMax
-        ParamType::Array(Box::new(ParamType::Address)), // path
-        ParamType::Address,    // to
-        ParamType::Uint(256),  // deadline
+        DynSolType::Uint(256),  // amountOut
+        DynSolType::Uint(256),  // amountInMax
+        DynSolType::Array(Box::new(DynSolType::Address)), // path
+        DynSolType::Address,    // to
+        DynSolType::Uint(256),  // deadline
     ];
 
-    let tokens = decode(&params, data).ok()?;
+    let tokens = abi_decode(params, data)?;
 
     let (token_in, token_out) = extract_v2_path(&tokens[2]);
 
@@ -346,13 +358,13 @@ fn decode_v2_swap_exact_out(data: &[u8]) -> Option<DecodedSwap> {
 /// Params: (uint256 amountOutMin, address[] path, address to, uint256 deadline)
 fn decode_v2_swap_eth_in(data: &[u8]) -> Option<DecodedSwap> {
     let params = vec![
-        ParamType::Uint(256),  // amountOutMin
-        ParamType::Array(Box::new(ParamType::Address)), // path
-        ParamType::Address,    // to
-        ParamType::Uint(256),  // deadline
+        DynSolType::Uint(256),  // amountOutMin
+        DynSolType::Array(Box::new(DynSolType::Address)), // path
+        DynSolType::Address,    // to
+        DynSolType::Uint(256),  // deadline
     ];
 
-    let tokens = decode(&params, data).ok()?;
+    let tokens = abi_decode(params, data)?;
 
     let (token_in, token_out) = extract_v2_path(&tokens[1]);
 
@@ -386,8 +398,8 @@ fn decode_v3_path(path: &[u8]) -> Option<(Address, Address, u32)> {
 }
 
 /// Extract first and last tokens from V2 address[] path
-fn extract_v2_path(token: &Token) -> (Option<Address>, Option<Address>) {
-    if let Token::Array(addresses) = token {
+fn extract_v2_path(token: &DynSolValue) -> (Option<Address>, Option<Address>) {
+    if let DynSolValue::Array(addresses) = token {
         let first = addresses.first().and_then(|t| token_to_address(t));
         let last = addresses.last().and_then(|t| token_to_address(t));
         (first, last)
@@ -396,32 +408,35 @@ fn extract_v2_path(token: &Token) -> (Option<Address>, Option<Address>) {
     }
 }
 
-// ── Token → Rust Type Helpers ───────────────────────────────────────
+// ── DynSolValue → Rust Type Helpers ─────────────────────────────────
 
-fn token_to_address(token: &Token) -> Option<Address> {
+fn token_to_address(token: &DynSolValue) -> Option<Address> {
     match token {
-        Token::Address(addr) => Some(*addr),
+        DynSolValue::Address(addr) => Some(*addr),
         _ => None,
     }
 }
 
-fn token_to_u256(token: &Token) -> Option<U256> {
+fn token_to_u256(token: &DynSolValue) -> Option<U256> {
     match token {
-        Token::Uint(val) => Some(*val),
+        DynSolValue::Uint(val, _) => Some(*val),
         _ => None,
     }
 }
 
-fn token_to_u32(token: &Token) -> Option<u32> {
+fn token_to_u32(token: &DynSolValue) -> Option<u32> {
     match token {
-        Token::Uint(val) => Some(val.low_u32()),
+        DynSolValue::Uint(val, _) => {
+            // Safe for fee tiers (max u24 = 16777215)
+            Some(val.as_limbs()[0] as u32)
+        }
         _ => None,
     }
 }
 
-fn token_to_bytes(token: &Token) -> Option<Vec<u8>> {
+fn token_to_bytes(token: &DynSolValue) -> Option<Vec<u8>> {
     match token {
-        Token::Bytes(bytes) => Some(bytes.clone()),
+        DynSolValue::Bytes(bytes) => Some(bytes.clone()),
         _ => None,
     }
 }
@@ -429,7 +444,7 @@ fn token_to_bytes(token: &Token) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ethers::utils::hex;
+    use alloy::hex;
 
     #[test]
     fn test_selector_hex() {

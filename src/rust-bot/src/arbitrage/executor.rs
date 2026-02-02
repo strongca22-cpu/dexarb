@@ -27,11 +27,21 @@
 //! Modified: 2026-01-29 (Post-incident: decimal fix, quoter, event parsing)
 //! Modified: 2026-01-30 (Atomic execution via ArbExecutor.sol contract)
 //! Modified: 2026-01-30 (QuickSwap V3 / Algebra router + quoter support)
+//! Modified: 2026-02-01 (Migrated from ethers-rs to alloy)
 
+use crate::contracts::{
+    IArbExecutor, IAlgebraQuoter, IAlgebraSwapRouter, IERC20, IQuoter, IQuoterV2,
+    ISwapRouter, IUniswapV2Router02,
+};
 use crate::tax::{TaxLogger, TaxRecordBuilder};
 use crate::types::{ArbitrageOpportunity, BotConfig, DexType, TradeResult};
+use alloy::eips::Encodable2718;
+use alloy::network::{EthereumWallet, TransactionBuilder};
+use alloy::primitives::{Address, B256, U256, keccak256};
+use alloy::providers::{Provider, ProviderBuilder};
+use alloy::signers::local::PrivateKeySigner;
+use alloy::sol_types::SolCall;
 use anyhow::{anyhow, Result};
-use ethers::prelude::*;
 use rust_decimal::Decimal;
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -40,79 +50,15 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tracing::{debug, error, info, warn};
 
-// Uniswap V2 Router ABI (minimal interface for swaps)
-abigen!(
-    IUniswapV2Router02,
-    r#"[
-        function swapExactTokensForTokens(uint256 amountIn, uint256 amountOutMin, address[] calldata path, address to, uint256 deadline) external returns (uint256[] memory amounts)
-        function getAmountsOut(uint256 amountIn, address[] calldata path) external view returns (uint256[] memory amounts)
-    ]"#
-);
-
-// Uniswap V3 SwapRouter ABI (exactInputSingle for single-hop V3 swaps)
-// ExactInputSingleParams: (tokenIn, tokenOut, fee, recipient, deadline, amountIn, amountOutMinimum, sqrtPriceLimitX96)
-abigen!(
-    ISwapRouter,
-    r#"[{"inputs":[{"components":[{"internalType":"address","name":"tokenIn","type":"address"},{"internalType":"address","name":"tokenOut","type":"address"},{"internalType":"uint24","name":"fee","type":"uint24"},{"internalType":"address","name":"recipient","type":"address"},{"internalType":"uint256","name":"deadline","type":"uint256"},{"internalType":"uint256","name":"amountIn","type":"uint256"},{"internalType":"uint256","name":"amountOutMinimum","type":"uint256"},{"internalType":"uint160","name":"sqrtPriceLimitX96","type":"uint160"}],"internalType":"struct ISwapRouter.ExactInputSingleParams","name":"params","type":"tuple"}],"name":"exactInputSingle","outputs":[{"internalType":"uint256","name":"amountOut","type":"uint256"}],"stateMutability":"payable","type":"function"}]"#
-);
-
-// Uniswap V3 QuoterV1 ABI (pre-trade simulation)
-// quoteExactInputSingle simulates a swap and returns the expected output
-// Note: This is not a view function — it reverts internally after computing. Use .call() only.
-abigen!(
-    IQuoter,
-    r#"[
-        function quoteExactInputSingle(address tokenIn, address tokenOut, uint24 fee, uint256 amountIn, uint160 sqrtPriceLimitX96) external returns (uint256 amountOut)
-    ]"#
-);
-
-// SushiSwap V3 QuoterV2 ABI (different function signature from V1)
-// Takes a struct param instead of individual args; returns (amountOut, sqrtPriceX96After, initializedTicksCrossed, gasEstimate)
-abigen!(
-    IQuoterV2,
-    r#"[{"inputs":[{"components":[{"internalType":"address","name":"tokenIn","type":"address"},{"internalType":"address","name":"tokenOut","type":"address"},{"internalType":"uint256","name":"amountIn","type":"uint256"},{"internalType":"uint24","name":"fee","type":"uint24"},{"internalType":"uint160","name":"sqrtPriceLimitX96","type":"uint160"}],"internalType":"struct IQuoterV2.QuoteExactInputSingleParams","name":"params","type":"tuple"}],"name":"quoteExactInputSingle","outputs":[{"internalType":"uint256","name":"amountOut","type":"uint256"},{"internalType":"uint160","name":"sqrtPriceX96After","type":"uint160"},{"internalType":"uint32","name":"initializedTicksCrossed","type":"uint32"},{"internalType":"uint256","name":"gasEstimate","type":"uint256"}],"stateMutability":"nonpayable","type":"function"}]"#
-);
-
-// QuickSwap V3 (Algebra) SwapRouter ABI — no fee parameter, uses limitSqrtPrice
-// ExactInputSingleParams: (tokenIn, tokenOut, recipient, deadline, amountIn, amountOutMinimum, limitSqrtPrice)
-abigen!(
-    IAlgebraSwapRouter,
-    r#"[{"inputs":[{"components":[{"internalType":"address","name":"tokenIn","type":"address"},{"internalType":"address","name":"tokenOut","type":"address"},{"internalType":"address","name":"recipient","type":"address"},{"internalType":"uint256","name":"deadline","type":"uint256"},{"internalType":"uint256","name":"amountIn","type":"uint256"},{"internalType":"uint256","name":"amountOutMinimum","type":"uint256"},{"internalType":"uint160","name":"limitSqrtPrice","type":"uint160"}],"internalType":"struct ISwapRouter.ExactInputSingleParams","name":"params","type":"tuple"}],"name":"exactInputSingle","outputs":[{"internalType":"uint256","name":"amountOut","type":"uint256"}],"stateMutability":"payable","type":"function"}]"#
-);
-
-// QuickSwap V3 (Algebra) Quoter ABI — no fee parameter
-// quoteExactInputSingle(address,address,uint256,uint160) → (uint256,uint16)
-abigen!(
-    IAlgebraQuoter,
-    r#"[
-        function quoteExactInputSingle(address tokenIn, address tokenOut, uint256 amountIn, uint160 limitSqrtPrice) external returns (uint256 amountOut, uint16 fee)
-    ]"#
-);
-
-// ERC20 ABI for token approvals
-abigen!(
-    IERC20,
-    r#"[
-        function approve(address spender, uint256 amount) external returns (bool)
-        function allowance(address owner, address spender) external view returns (uint256)
-        function balanceOf(address account) external view returns (uint256)
-        function decimals() external view returns (uint8)
-    ]"#
-);
-
-// ArbExecutor contract ABI (atomic two-leg arbitrage)
-// Executes both V3 swaps in a single transaction. Reverts if profit < minProfit.
-abigen!(
-    IArbExecutor,
-    r#"[
-        function executeArb(address token0, address token1, address routerBuy, address routerSell, uint24 feeBuy, uint24 feeSell, uint256 amountIn, uint256 minProfit) external returns (uint256 profit)
-    ]"#
-);
+/// Helper: convert u32 fee tier to alloy U24 (same as in v3_syncer.rs)
+fn fee_to_u24(fee: u32) -> alloy::primitives::Uint<24, 1> {
+    alloy::primitives::Uint::from(fee as u16)
+}
 
 /// Trade executor for DEX arbitrage
-pub struct TradeExecutor<M: Middleware> {
-    provider: Arc<M>,
-    wallet: LocalWallet,
+pub struct TradeExecutor<P: Provider> {
+    provider: Arc<P>,
+    wallet: PrivateKeySigner,
     config: BotConfig,
     /// Dry run mode - simulates trades without executing
     dry_run: bool,
@@ -120,23 +66,23 @@ pub struct TradeExecutor<M: Middleware> {
     tax_logger: Option<TaxLogger>,
     /// Price oracle for USD conversions
     tax_record_builder: Option<TaxRecordBuilder>,
-    /// Optional HTTP provider for private mempool tx submission.
-    /// When set, atomic arb transactions are signed via WS (estimateGas, nonce,
-    /// gas price all use Alchemy), then ONLY the raw signed bytes are sent
-    /// through this provider. This avoids burning rate limits on reads.
-    tx_client: Option<Arc<Provider<Http>>>,
+    /// Optional URL for private mempool tx submission.
+    /// When set, atomic arb transactions are signed locally, then ONLY the raw
+    /// signed bytes are sent through this provider. This avoids burning rate limits on reads.
+    tx_client_url: Option<String>,
     /// Cached base_fee_per_gas from latest block header (A1: eliminates get_gas_price RPC).
     /// Set by set_base_fee() from main.rs on each new block.
-    cached_base_fee: Option<U256>,
+    /// alloy gas prices are u128.
+    cached_base_fee: Option<u128>,
     /// Locally tracked nonce (A2: eliminates nonce lookup from fill_transaction).
     /// Initialized on first use, incremented after each successful send.
     cached_nonce: Arc<AtomicU64>,
     nonce_initialized: bool,
 }
 
-impl<M: Middleware + 'static> TradeExecutor<M> {
+impl<P: Provider + 'static> TradeExecutor<P> {
     /// Create a new TradeExecutor
-    pub fn new(provider: Arc<M>, wallet: LocalWallet, config: BotConfig) -> Self {
+    pub fn new(provider: Arc<P>, wallet: PrivateKeySigner, config: BotConfig) -> Self {
         Self {
             provider,
             wallet,
@@ -144,7 +90,7 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
             dry_run: true, // Default to dry run for safety
             tax_logger: None,
             tax_record_builder: None,
-            tx_client: None,
+            tx_client_url: None,
             cached_base_fee: None,
             cached_nonce: Arc::new(AtomicU64::new(0)),
             nonce_initialized: false,
@@ -152,20 +98,19 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
     }
 
     /// Enable private mempool for transaction submission.
-    /// Creates a bare HTTP provider pointed at the private RPC.
+    /// Stores the URL. A bare HTTP provider is created on demand for each send.
     /// Only eth_sendRawTransaction goes through this — all reads (estimateGas,
     /// nonce, gas price) stay on the main WS provider to avoid rate limits.
     pub fn set_private_rpc(&mut self, url: &str) -> Result<()> {
-        let http_provider = Provider::<Http>::try_from(url)
-            .map_err(|e| anyhow!("Failed to create HTTP provider for {}: {}", url, e))?;
-        self.tx_client = Some(Arc::new(http_provider));
+        self.tx_client_url = Some(url.to_string());
         info!("Private mempool enabled: {}", url);
         Ok(())
     }
 
     /// Update cached base fee from latest block header (A1).
     /// Called from main.rs on each new block. Eliminates get_gas_price() RPC.
-    pub fn set_base_fee(&mut self, base_fee: U256) {
+    /// In alloy, block.base_fee_per_gas is u128.
+    pub fn set_base_fee(&mut self, base_fee: u128) {
         self.cached_base_fee = Some(base_fee);
     }
 
@@ -308,7 +253,7 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
             }
         };
 
-        info!("✅ Buy complete: {} | Received: {}", buy_tx_hash, amount_received);
+        info!("✅ Buy complete: {:?} | Received: {}", buy_tx_hash, amount_received);
 
         // Pre-sell safety: V3 Quoter simulation (sell leg)
         // Buy has executed — we're holding token1. Verify sell pool can return expected token0
@@ -371,7 +316,7 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
                 error!("Sell swap failed: {}", e);
                 return Ok(TradeResult {
                     opportunity: pair_symbol.clone(),
-                    tx_hash: Some(buy_tx_hash.to_string()),
+                    tx_hash: Some(format!("{:?}", buy_tx_hash)),
                     block_number: Some(buy_block),
                     success: false,
                     profit_usd: 0.0,
@@ -386,13 +331,13 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
             }
         };
 
-        info!("✅ Sell complete: {} | Final: {}", sell_tx_hash, final_amount);
+        info!("✅ Sell complete: {:?} | Final: {}", sell_tx_hash, final_amount);
 
         // Calculate profit
         let profit_wei = if final_amount > trade_size {
             final_amount - trade_size
         } else {
-            U256::zero()
+            U256::ZERO
         };
         let profit_usd = self.wei_to_usd(profit_wei, pair_symbol);
 
@@ -419,7 +364,7 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
         // Log to tax records (IRS compliance)
         self.log_tax_record_if_enabled(
             opportunity,
-            &sell_tx_hash.to_string(),
+            &format!("{:?}", sell_tx_hash),
             sell_block,
             trade_size,
             final_amount,
@@ -428,7 +373,7 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
 
         Ok(TradeResult {
             opportunity: pair_symbol.clone(),
-            tx_hash: Some(sell_tx_hash.to_string()),
+            tx_hash: Some(format!("{:?}", sell_tx_hash)),
             block_number: Some(sell_block),
             success,
             profit_usd,
@@ -469,15 +414,15 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
         // A0+A1: Gas priority bump + cached base fee from block header.
         // On Polygon, gas is negligible (~$0.01 even at 5000 gwei). Atomic reverts protect capital.
         // Priority fee of 5000 gwei targets top ~30 block position (median is ~2134 gwei).
-        let base_fee = match self.cached_base_fee {
+        let base_fee: u128 = match self.cached_base_fee {
             Some(bf) => bf,
             None => {
                 // Fallback: fetch from RPC (only on first call before any block arrives)
                 self.provider.get_gas_price().await?
             }
         };
-        let priority_fee = U256::from(5_000_000_000_000u64); // 5000 gwei
-        let max_fee = base_fee + priority_fee;
+        let priority_fee: u128 = 5_000_000_000_000; // 5000 gwei
+        let max_fee: u128 = base_fee + priority_fee;
 
         // ArbExecutor.sol token0 = "base token" (start & end) = USDC (quote token)
         // ArbExecutor.sol token1 = "intermediate token" (bought & sold)
@@ -506,77 +451,77 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
             router_buy, fee_buy, router_sell, fee_sell, trade_size, min_profit_raw
         );
 
-        // Build + sign via WS provider. Gas price and nonce are pre-set (A0-A2)
-        // so fill_transaction only needs to call estimateGas.
-        // If private RPC is configured, send only the raw signed bytes through it.
-        let ws_signer = Arc::new(SignerMiddleware::new(
-            self.provider.clone(),
-            self.wallet.clone().with_chain_id(self.config.chain_id),
-        ));
-        let contract = IArbExecutor::new(arb_address, ws_signer.clone());
-        let call = contract.execute_arb(
-            token0, token1, router_buy, router_sell,
-            fee_buy.into(), fee_sell.into(), trade_size, min_profit_raw,
-        );
-
         // A2: Initialize nonce on first use, then track locally
         if !self.nonce_initialized {
-            let nonce = self.provider.get_transaction_count(
-                self.wallet.address(), Some(BlockNumber::Pending.into())
-            ).await?;
-            self.cached_nonce.store(nonce.as_u64(), Ordering::SeqCst);
+            let nonce = self.provider.get_transaction_count(self.wallet.address()).await?;
+            self.cached_nonce.store(nonce, Ordering::SeqCst);
             self.nonce_initialized = true;
             info!("Nonce initialized: {}", nonce);
         }
-        let current_nonce = U256::from(self.cached_nonce.load(Ordering::SeqCst));
+        let current_nonce = self.cached_nonce.load(Ordering::SeqCst);
 
-        let send_result: Result<TxHash, String> = if let Some(ref tx_client) = self.tx_client {
-            // Private RPC path: pre-set gas + nonce on tx, fill only does estimateGas.
-            // Then sign via WS signer, send raw bytes via private RPC.
+        // Build + sign transaction. Gas price and nonce are pre-set (A0-A2).
+        // If private RPC is configured, send only the raw signed bytes through it.
+        let send_result: Result<B256, String> = if let Some(ref url) = self.tx_client_url {
+            // Private RPC path: encode calldata manually, build tx, sign, send raw.
             info!("📡 Sending via private mempool (priority=5000gwei, nonce={})", current_nonce);
-            let mut tx = call.tx.clone();
-            // A0+A1+A2: Pre-set EIP-1559 gas fields and nonce to skip RPC lookups.
-            // fill_transaction will still call estimateGas but skip gas/nonce fetches
-            // since these fields are already populated.
-            tx.set_nonce(current_nonce);
-            tx.as_eip1559_mut().map(|inner| {
-                inner.max_fee_per_gas = Some(max_fee);
-                inner.max_priority_fee_per_gas = Some(priority_fee);
-            });
-            match ws_signer.fill_transaction(&mut tx, None).await {
-                Err(e) => Err(format!("Atomic tx fill failed (WS): {}", e)),
-                Ok(()) => {
-                    match ws_signer.signer().sign_transaction(&tx).await {
-                        Err(e) => Err(format!("Atomic tx sign failed: {}", e)),
-                        Ok(signature) => {
-                            let raw_tx = tx.rlp_signed(&signature);
-                            match tx_client.send_raw_transaction(raw_tx).await {
-                                Ok(pending) => {
-                                    // A2: Increment nonce on successful send
-                                    self.cached_nonce.fetch_add(1, Ordering::SeqCst);
-                                    Ok(pending.tx_hash())
-                                }
-                                Err(e) => Err(format!("Atomic tx send failed (private): {}", e))
-                            }
-                        }
-                    }
-                }
-            }
-        } else {
-            // Public WS path: set gas fields on the contract call, then send.
-            let call = call
-                .gas_price(max_fee)  // Legacy gas price fallback
-                .nonce(current_nonce);
-            // Save result in local var to ensure PendingTransaction borrow
-            // is dropped before `call` goes out of scope.
-            let result = match call.send().await {
+
+            let call_data = IArbExecutor::executeArbCall {
+                token0, token1,
+                routerBuy: router_buy, routerSell: router_sell,
+                feeBuy: fee_to_u24(fee_buy), feeSell: fee_to_u24(fee_sell),
+                amountIn: trade_size, minProfit: min_profit_raw,
+            }.abi_encode();
+
+            let mut tx = alloy::rpc::types::TransactionRequest::default()
+                .with_to(arb_address)
+                .with_input(call_data)
+                .with_nonce(current_nonce)
+                .with_chain_id(self.config.chain_id)
+                .with_max_fee_per_gas(max_fee)
+                .with_max_priority_fee_per_gas(priority_fee);
+
+            // Estimate gas via main provider
+            let gas_estimate = self.provider.estimate_gas(tx.clone()).await
+                .map_err(|e| anyhow!("Atomic tx gas estimate failed: {}", e))?;
+            tx.set_gas_limit(gas_estimate);
+
+            // Sign
+            let wallet = EthereumWallet::from(self.wallet.clone());
+            let signed = tx.build(&wallet).await
+                .map_err(|e| anyhow!("Atomic tx sign failed: {}", e))?;
+            let raw_tx = signed.encoded_2718();
+
+            // Send via private provider
+            let http_provider = ProviderBuilder::new().connect_http(url.parse().unwrap());
+            match http_provider.send_raw_transaction(&raw_tx).await {
                 Ok(pending) => {
                     self.cached_nonce.fetch_add(1, Ordering::SeqCst);
-                    Ok(pending.tx_hash())
+                    Ok(*pending.tx_hash())
                 }
-                Err(e) => Err(format!("Atomic tx send failed: {}", e))
-            };
-            result
+                Err(e) => Err(format!("Atomic tx send failed (private): {}", e))
+            }
+        } else {
+            // Public path: use signing provider with contract call builder.
+            let wallet = EthereumWallet::from(self.wallet.clone());
+            let signer_provider = ProviderBuilder::new()
+                .wallet(wallet)
+                .connect_http(self.config.rpc_url.parse().unwrap());
+            let contract = IArbExecutor::new(arb_address, &signer_provider);
+            contract.executeArb(
+                token0, token1, router_buy, router_sell,
+                fee_to_u24(fee_buy), fee_to_u24(fee_sell), trade_size, min_profit_raw,
+            )
+            .nonce(current_nonce)
+            .max_fee_per_gas(max_fee)
+            .max_priority_fee_per_gas(priority_fee)
+            .send()
+            .await
+            .map(|builder| {
+                self.cached_nonce.fetch_add(1, Ordering::SeqCst);
+                *builder.tx_hash()
+            })
+            .map_err(|e| format!("Atomic tx send failed: {}", e))
         };
 
         let tx_hash = match send_result {
@@ -638,9 +583,9 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
             }
         };
 
-        let block_number = receipt.block_number.map(|bn| bn.as_u64()).unwrap_or(0);
+        let block_number = receipt.block_number.unwrap_or(0);
 
-        if receipt.status != Some(U64::from(1)) {
+        if !receipt.status() {
             warn!("Atomic arb tx reverted on-chain (tx confirmed but failed)");
             return Ok(TradeResult {
                 opportunity: pair_symbol.clone(),
@@ -661,18 +606,21 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
         // Parse profit from ArbExecuted event
         // event ArbExecuted(token0, token1, amountIn, amountOut, profit, routerBuy, routerSell)
         // topic0 = keccak256("ArbExecuted(address,address,uint256,uint256,uint256,address,address)")
-        let mut profit_raw = U256::zero();
+        let mut profit_raw = U256::ZERO;
         let mut amount_out = trade_size; // fallback
-        let arb_executed_topic: H256 = ethers::utils::keccak256(
+        let arb_executed_topic: B256 = keccak256(
             b"ArbExecuted(address,address,uint256,uint256,uint256,address,address)"
-        ).into();
+        );
 
-        for log in &receipt.logs {
-            if log.address == arb_address && !log.topics.is_empty() && log.topics[0] == arb_executed_topic {
+        for log in receipt.inner.logs() {
+            if log.inner.address == arb_address
+                && !log.inner.data.topics().is_empty()
+                && log.inner.data.topics()[0] == arb_executed_topic
+            {
                 // data layout: amountIn (32) | amountOut (32) | profit (32) | routerBuy (32) | routerSell (32)
-                if log.data.len() >= 96 {
-                    amount_out = U256::from_big_endian(&log.data[32..64]);
-                    profit_raw = U256::from_big_endian(&log.data[64..96]);
+                if log.inner.data.data.len() >= 96 {
+                    amount_out = U256::from_be_slice(&log.inner.data.data[32..64]);
+                    profit_raw = U256::from_be_slice(&log.inner.data.data[64..96]);
                     debug!("Parsed ArbExecuted: amountOut={}, profit={}", amount_out, profit_raw);
                 }
                 break;
@@ -686,12 +634,12 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
         } else {
             opportunity.token1_decimals
         };
-        let profit_usd = profit_raw.low_u128() as f64 / 10_f64.powi(quote_decimals as i32);
+        let profit_usd = profit_raw.to::<u128>() as f64 / 10_f64.powi(quote_decimals as i32);
         // Actual gas from receipt
-        let gas_used = receipt.gas_used.unwrap_or(U256::from(400_000u64));
-        let effective_gas_price = receipt.effective_gas_price.unwrap_or(max_fee);
+        let gas_used = receipt.gas_used as u128;
+        let effective_gas_price = receipt.effective_gas_price;
         let gas_cost_wei = gas_used * effective_gas_price;
-        let gas_used_native = gas_cost_wei.low_u128() as f64 / 1e18;
+        let gas_used_native = gas_cost_wei as f64 / 1e18;
         let gas_cost_usd = gas_used_native * self.config.native_token_price_usd;
         let net_profit_usd = profit_usd - gas_cost_usd;
 
@@ -743,6 +691,9 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
     /// 3. Lower minProfit threshold — mempool signals have higher conviction
     ///
     /// Safety: ArbExecutor.sol reverts if profit < minProfit. Only gas (~$0.01) at risk.
+    ///
+    /// Note: trigger_gas_price and trigger_max_priority_fee are U256 from MempoolSignal.
+    /// They are converted to u128 internally for gas arithmetic.
     pub async fn execute_from_mempool(
         &mut self,
         opportunity: &ArbitrageOpportunity,
@@ -783,13 +734,18 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
         );
 
         // Dynamic gas pricing (Phase 3: profit-aware bidding)
-        let base_fee = match self.cached_base_fee {
+        // Convert U256 trigger values to u128 for gas arithmetic
+        let trigger_gas_price_u128: u128 = trigger_gas_price.to::<u128>();
+        let trigger_max_priority_fee_u128: Option<u128> = trigger_max_priority_fee
+            .map(|v| v.to::<u128>());
+
+        let base_fee: u128 = match self.cached_base_fee {
             Some(bf) => bf,
             None => self.provider.get_gas_price().await?,
         };
         let (priority_fee, max_fee) = self.calculate_mempool_gas(
-            trigger_gas_price,
-            trigger_max_priority_fee,
+            trigger_gas_price_u128,
+            trigger_max_priority_fee_u128,
             opportunity.estimated_profit,
             base_fee,
         );
@@ -810,88 +766,86 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
         // Lower minProfit for mempool signals (higher conviction)
         let min_profit_raw = U256::from((mempool_min_profit_usd * 1e6) as u64);
 
-        let gas_limit = U256::from(self.config.mempool_gas_limit);
+        let gas_limit: u64 = self.config.mempool_gas_limit;
 
         info!(
             "  MEMPOOL TX: routerBuy={:?} feeBuy={} | routerSell={:?} feeSell={} | amt={} | minProfit={} | gas={}K priority={:.0}gwei",
             router_buy, fee_buy, router_sell, fee_sell, trade_size, min_profit_raw,
-            gas_limit.as_u64() / 1000,
-            priority_fee.as_u128() as f64 / 1e9,
-        );
-
-        // Build contract call
-        let ws_signer = Arc::new(SignerMiddleware::new(
-            self.provider.clone(),
-            self.wallet.clone().with_chain_id(self.config.chain_id),
-        ));
-        let contract = IArbExecutor::new(arb_address, ws_signer.clone());
-        let call = contract.execute_arb(
-            token0, token1, router_buy, router_sell,
-            fee_buy.into(), fee_sell.into(), trade_size, min_profit_raw,
+            gas_limit / 1000,
+            priority_fee as f64 / 1e9,
         );
 
         // Initialize nonce if needed
         if !self.nonce_initialized {
-            let nonce = self.provider.get_transaction_count(
-                self.wallet.address(), Some(BlockNumber::Pending.into())
-            ).await?;
-            self.cached_nonce.store(nonce.as_u64(), Ordering::SeqCst);
+            let nonce = self.provider.get_transaction_count(self.wallet.address()).await?;
+            self.cached_nonce.store(nonce, Ordering::SeqCst);
             self.nonce_initialized = true;
             info!("Nonce initialized: {}", nonce);
         }
-        let current_nonce = U256::from(self.cached_nonce.load(Ordering::SeqCst));
+        let current_nonce = self.cached_nonce.load(Ordering::SeqCst);
+
+        // Encode calldata manually for both paths
+        let call_data = IArbExecutor::executeArbCall {
+            token0, token1,
+            routerBuy: router_buy, routerSell: router_sell,
+            feeBuy: fee_to_u24(fee_buy), feeSell: fee_to_u24(fee_sell),
+            amountIn: trade_size, minProfit: min_profit_raw,
+        }.abi_encode();
 
         // Build tx manually — skip estimateGas for speed
-        let send_result: Result<TxHash, String> = if let Some(ref tx_client) = self.tx_client {
+        let send_result: Result<B256, String> = if let Some(ref url) = self.tx_client_url {
             // Private RPC path: pre-set all fields, sign, send raw
             info!("📡 MEMPOOL: private RPC (priority={:.0}gwei, nonce={}, gas={}K)",
-                  priority_fee.as_u128() as f64 / 1e9, current_nonce, gas_limit.as_u64() / 1000);
-            let mut tx = call.tx.clone();
-            tx.set_nonce(current_nonce);
-            tx.set_gas(gas_limit); // Fixed gas limit — skip estimateGas
-            tx.as_eip1559_mut().map(|inner| {
-                inner.chain_id = Some(self.config.chain_id.into());
-                inner.max_fee_per_gas = Some(max_fee);
-                inner.max_priority_fee_per_gas = Some(priority_fee);
-            });
-            // Sign directly — no fill_transaction (which would call estimateGas)
-            match ws_signer.signer().sign_transaction(&tx).await {
-                Err(e) => Err(format!("Mempool tx sign failed: {}", e)),
-                Ok(signature) => {
-                    let raw_tx = tx.rlp_signed(&signature);
-                    match tx_client.send_raw_transaction(raw_tx).await {
-                        Ok(pending) => {
-                            self.cached_nonce.fetch_add(1, Ordering::SeqCst);
-                            Ok(pending.tx_hash())
-                        }
-                        Err(e) => Err(format!("Mempool tx send failed (private): {}", e))
-                    }
+                  priority_fee as f64 / 1e9, current_nonce, gas_limit / 1000);
+
+            let mut tx = alloy::rpc::types::TransactionRequest::default()
+                .with_to(arb_address)
+                .with_input(call_data.clone())
+                .with_nonce(current_nonce)
+                .with_chain_id(self.config.chain_id)
+                .with_max_fee_per_gas(max_fee)
+                .with_max_priority_fee_per_gas(priority_fee);
+            tx.set_gas_limit(gas_limit);
+
+            // Sign directly — no estimateGas (fixed gas limit for speed)
+            let wallet = EthereumWallet::from(self.wallet.clone());
+            let signed = tx.build(&wallet).await
+                .map_err(|e| anyhow!("Mempool tx sign failed: {}", e))?;
+            let raw_tx = signed.encoded_2718();
+
+            let http_provider = ProviderBuilder::new().connect_http(url.parse().unwrap());
+            match http_provider.send_raw_transaction(&raw_tx).await {
+                Ok(pending) => {
+                    self.cached_nonce.fetch_add(1, Ordering::SeqCst);
+                    Ok(*pending.tx_hash())
                 }
+                Err(e) => Err(format!("Mempool tx send failed (private): {}", e))
             }
         } else {
-            // Public WS path: set gas fields on the contract call
+            // Public path: sign and send raw via main provider
             info!("📡 MEMPOOL: public RPC (priority={:.0}gwei, nonce={})",
-                  priority_fee.as_u128() as f64 / 1e9, current_nonce);
-            let mut tx = call.tx.clone();
-            tx.set_nonce(current_nonce);
-            tx.set_gas(gas_limit);
-            tx.as_eip1559_mut().map(|inner| {
-                inner.chain_id = Some(self.config.chain_id.into());
-                inner.max_fee_per_gas = Some(max_fee);
-                inner.max_priority_fee_per_gas = Some(priority_fee);
-            });
-            match ws_signer.signer().sign_transaction(&tx).await {
-                Err(e) => Err(format!("Mempool tx sign failed: {}", e)),
-                Ok(signature) => {
-                    let raw_tx = tx.rlp_signed(&signature);
-                    match ws_signer.provider().send_raw_transaction(raw_tx).await {
-                        Ok(pending) => {
-                            self.cached_nonce.fetch_add(1, Ordering::SeqCst);
-                            Ok(pending.tx_hash())
-                        }
-                        Err(e) => Err(format!("Mempool tx send failed: {}", e))
-                    }
+                  priority_fee as f64 / 1e9, current_nonce);
+
+            let mut tx = alloy::rpc::types::TransactionRequest::default()
+                .with_to(arb_address)
+                .with_input(call_data)
+                .with_nonce(current_nonce)
+                .with_chain_id(self.config.chain_id)
+                .with_max_fee_per_gas(max_fee)
+                .with_max_priority_fee_per_gas(priority_fee);
+            tx.set_gas_limit(gas_limit);
+
+            let wallet = EthereumWallet::from(self.wallet.clone());
+            let signed = tx.build(&wallet).await
+                .map_err(|e| anyhow!("Mempool tx sign failed: {}", e))?;
+            let raw_tx = signed.encoded_2718();
+
+            match self.provider.send_raw_transaction(&raw_tx).await {
+                Ok(pending) => {
+                    self.cached_nonce.fetch_add(1, Ordering::SeqCst);
+                    Ok(*pending.tx_hash())
                 }
+                Err(e) => Err(format!("Mempool tx send failed: {}", e))
             }
         };
 
@@ -942,9 +896,9 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
             }
         };
 
-        let block_number = receipt.block_number.map(|bn| bn.as_u64()).unwrap_or(0);
+        let block_number = receipt.block_number.unwrap_or(0);
 
-        if receipt.status != Some(U64::from(1)) {
+        if !receipt.status() {
             warn!("MEMPOOL: tx reverted on-chain (gas burned, no capital loss)");
             return Ok(TradeResult {
                 opportunity: pair_symbol.clone(),
@@ -959,17 +913,20 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
         }
 
         // Parse profit from ArbExecuted event (identical to execute_atomic)
-        let mut profit_raw = U256::zero();
+        let mut profit_raw = U256::ZERO;
         let mut amount_out = trade_size;
-        let arb_executed_topic: H256 = ethers::utils::keccak256(
+        let arb_executed_topic: B256 = keccak256(
             b"ArbExecuted(address,address,uint256,uint256,uint256,address,address)"
-        ).into();
+        );
 
-        for log in &receipt.logs {
-            if log.address == arb_address && !log.topics.is_empty() && log.topics[0] == arb_executed_topic {
-                if log.data.len() >= 96 {
-                    amount_out = U256::from_big_endian(&log.data[32..64]);
-                    profit_raw = U256::from_big_endian(&log.data[64..96]);
+        for log in receipt.inner.logs() {
+            if log.inner.address == arb_address
+                && !log.inner.data.topics().is_empty()
+                && log.inner.data.topics()[0] == arb_executed_topic
+            {
+                if log.inner.data.data.len() >= 96 {
+                    amount_out = U256::from_be_slice(&log.inner.data.data[32..64]);
+                    profit_raw = U256::from_be_slice(&log.inner.data.data[64..96]);
                     debug!("MEMPOOL: ArbExecuted amountOut={}, profit={}", amount_out, profit_raw);
                 }
                 break;
@@ -981,11 +938,11 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
         } else {
             opportunity.token1_decimals
         };
-        let profit_usd = profit_raw.low_u128() as f64 / 10_f64.powi(quote_decimals as i32);
-        let gas_used = receipt.gas_used.unwrap_or(U256::from(400_000u64));
-        let effective_gas_price = receipt.effective_gas_price.unwrap_or(max_fee);
+        let profit_usd = profit_raw.to::<u128>() as f64 / 10_f64.powi(quote_decimals as i32);
+        let gas_used = receipt.gas_used as u128;
+        let effective_gas_price = receipt.effective_gas_price;
         let gas_cost_wei = gas_used * effective_gas_price;
-        let gas_used_native = gas_cost_wei.low_u128() as f64 / 1e18;
+        let gas_used_native = gas_cost_wei as f64 / 1e18;
         let gas_cost_usd = gas_used_native * self.config.native_token_price_usd;
         let net_profit_usd = profit_usd - gas_cost_usd;
 
@@ -1037,18 +994,18 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
     /// - min_priority: competitive floor (configurable, default 1000 gwei on Polygon)
     /// - final = min(profit_cap, max(match_trigger, min_priority))
     ///
-    /// Returns (priority_fee, max_fee) both in wei.
+    /// Returns (priority_fee, max_fee) both in wei as u128.
     fn calculate_mempool_gas(
         &self,
-        trigger_gas_price: U256,
-        trigger_max_priority_fee: Option<U256>,
+        trigger_gas_price: u128,
+        trigger_max_priority_fee: Option<u128>,
         est_profit_usd: f64,
-        base_fee: U256,
-    ) -> (U256, U256) {
-        let gwei = U256::from(1_000_000_000u64);
-        let min_priority_gwei = self.config.mempool_min_priority_gwei;
+        base_fee: u128,
+    ) -> (u128, u128) {
+        let gwei: u128 = 1_000_000_000;
+        let min_priority_gwei = self.config.mempool_min_priority_gwei as u128;
         let gas_profit_cap = self.config.mempool_gas_profit_cap;
-        let gas_limit = self.config.mempool_gas_limit;
+        let gas_limit = self.config.mempool_gas_limit as u128;
 
         // 1. Match trigger: trigger's priority fee * 1.05
         let trigger_priority = trigger_max_priority_fee.unwrap_or_else(|| {
@@ -1060,7 +1017,7 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
             }
         });
         // * 1.05 = * 105 / 100
-        let match_trigger = trigger_priority * U256::from(105u64) / U256::from(100u64);
+        let match_trigger = trigger_priority * 105 / 100;
 
         // 2. Profit cap: max gas spend = est_profit * gas_profit_cap / native_token_price / gas_limit
         // Convert: profit_usd * cap → max_gas_cost_usd → max_gas_cost_native → max_gas_per_unit
@@ -1069,7 +1026,7 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
         let max_gas_budget_matic = max_gas_budget_usd / native_price;
         let max_gas_budget_wei = (max_gas_budget_matic * 1e18) as u128;
         let profit_cap = if gas_limit > 0 {
-            U256::from(max_gas_budget_wei) / U256::from(gas_limit)
+            max_gas_budget_wei / gas_limit
         } else {
             gwei * min_priority_gwei
         };
@@ -1086,12 +1043,12 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
 
         debug!(
             "MEMPOOL GAS: trigger_priority={:.0}gwei match={:.0}gwei cap={:.0}gwei floor={:.0}gwei → final={:.0}gwei maxfee={:.0}gwei",
-            trigger_priority.as_u128() as f64 / 1e9,
-            match_trigger.as_u128() as f64 / 1e9,
-            profit_cap.as_u128() as f64 / 1e9,
-            floor.as_u128() as f64 / 1e9,
-            priority_fee.as_u128() as f64 / 1e9,
-            max_fee.as_u128() as f64 / 1e9,
+            trigger_priority as f64 / 1e9,
+            match_trigger as f64 / 1e9,
+            profit_cap as f64 / 1e9,
+            floor as f64 / 1e9,
+            priority_fee as f64 / 1e9,
+            max_fee as f64 / 1e9,
         );
 
         (priority_fee, max_fee)
@@ -1252,7 +1209,7 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
         token_out: Address,
         amount_in: U256,
         min_amount_out: U256,
-    ) -> Result<(TxHash, U256, u64)> {
+    ) -> Result<(B256, U256, u64)> {
         if dex.is_v3() {
             return self.swap_v3(dex, token_in, token_out, amount_in, min_amount_out).await;
         }
@@ -1268,17 +1225,16 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
         token_out: Address,
         amount_in: U256,
         min_amount_out: U256,
-    ) -> Result<(TxHash, U256, u64)> {
+    ) -> Result<(B256, U256, u64)> {
         let router_address = self.get_router_address(dex);
 
-        // Create signer client
-        let client = SignerMiddleware::new(
-            self.provider.clone(),
-            self.wallet.clone().with_chain_id(self.config.chain_id),
-        );
-        let client = Arc::new(client);
+        // Create signing provider
+        let wallet = EthereumWallet::from(self.wallet.clone());
+        let signer_provider = ProviderBuilder::new()
+            .wallet(wallet)
+            .connect_http(self.config.rpc_url.parse().unwrap());
 
-        let router = IUniswapV2Router02::new(router_address, client.clone());
+        let router = IUniswapV2Router02::new(router_address, &signer_provider);
 
         // Build swap path
         let path = vec![token_in, token_out];
@@ -1299,7 +1255,7 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
         debug!("  Min out: {}, Deadline: {}", min_amount_out, deadline);
 
         // Execute swap
-        let tx = router.swap_exact_tokens_for_tokens(
+        let call = router.swapExactTokensForTokens(
             amount_in,
             min_amount_out,
             path,
@@ -1307,25 +1263,23 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
             U256::from(deadline),
         );
 
-        let pending_tx = tx.send().await.map_err(|e| anyhow!("Send failed: {}", e))?;
-        let tx_hash = pending_tx.tx_hash();
+        let pending = call.send().await.map_err(|e| anyhow!("Send failed: {}", e))?;
+        let tx_hash = *pending.tx_hash();
 
         info!("V2 swap tx submitted: {:?}", tx_hash);
 
         // Wait for confirmation
-        let receipt = pending_tx
+        let receipt = pending
+            .get_receipt()
             .await
-            .map_err(|e| anyhow!("Confirmation failed: {}", e))?
-            .ok_or_else(|| anyhow!("No receipt returned"))?;
+            .map_err(|e| anyhow!("Confirmation failed: {}", e))?;
 
-        if receipt.status != Some(U64::from(1)) {
+        if !receipt.status() {
             return Err(anyhow!("V2 transaction reverted"));
         }
 
         // Extract block number for tax logging
-        let block_number = receipt.block_number
-            .map(|bn| bn.as_u64())
-            .unwrap_or(0);
+        let block_number = receipt.block_number.unwrap_or(0);
 
         // Parse actual amountOut from ERC20 Transfer events in receipt
         let amount_out = self
@@ -1350,15 +1304,14 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
         token_out: Address,
         amount_in: U256,
         min_amount_out: U256,
-    ) -> Result<(TxHash, U256, u64)> {
+    ) -> Result<(B256, U256, u64)> {
         let router_address = self.get_router_address(dex);
 
-        // Create signer client
-        let client = SignerMiddleware::new(
-            self.provider.clone(),
-            self.wallet.clone().with_chain_id(self.config.chain_id),
-        );
-        let client = Arc::new(client);
+        // Create signing provider
+        let wallet = EthereumWallet::from(self.wallet.clone());
+        let signer_provider = ProviderBuilder::new()
+            .wallet(wallet)
+            .connect_http(self.config.rpc_url.parse().unwrap());
 
         // Set deadline (current time + 5 minutes)
         let deadline = SystemTime::now()
@@ -1380,30 +1333,30 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
             );
             debug!("  Min out: {}, Deadline: {}", min_amount_out, deadline);
 
-            let router = IAlgebraSwapRouter::new(router_address, client.clone());
-            let params = i_algebra_swap_router::ExactInputSingleParams {
-                token_in,
-                token_out,
+            let router = IAlgebraSwapRouter::new(router_address, &signer_provider);
+            let params = IAlgebraSwapRouter::ExactInputSingleParams {
+                tokenIn: token_in,
+                tokenOut: token_out,
                 recipient: wallet_address,
                 deadline: U256::from(deadline),
-                amount_in,
-                amount_out_minimum: min_amount_out,
-                limit_sqrt_price: U256::zero(), // 0 = no limit
+                amountIn: amount_in,
+                amountOutMinimum: min_amount_out,
+                limitSqrtPrice: alloy::primitives::Uint::<160, 3>::ZERO,
             };
-            let tx = router.exact_input_single(params);
-            let pending_tx = tx.send().await.map_err(|e| anyhow!("Algebra V3 send failed: {}", e))?;
-            let tx_hash = pending_tx.tx_hash();
+            let call = router.exactInputSingle(params);
+            let pending = call.send().await.map_err(|e| anyhow!("Algebra V3 send failed: {}", e))?;
+            let tx_hash = *pending.tx_hash();
             info!("V3 swap tx submitted: {:?} ({:?})", tx_hash, dex);
 
-            let receipt = pending_tx
+            let receipt = pending
+                .get_receipt()
                 .await
-                .map_err(|e| anyhow!("V3 confirmation failed: {}", e))?
-                .ok_or_else(|| anyhow!("No receipt returned"))?;
+                .map_err(|e| anyhow!("V3 confirmation failed: {}", e))?;
 
-            if receipt.status != Some(U64::from(1)) {
+            if !receipt.status() {
                 return Err(anyhow!("V3 transaction reverted"));
             }
-            let block_number = receipt.block_number.map(|bn| bn.as_u64()).unwrap_or(0);
+            let block_number = receipt.block_number.unwrap_or(0);
             let amount_out = self
                 .parse_amount_out_from_receipt(&receipt, token_out, wallet_address)
                 .unwrap_or_else(|| { warn!("V3: falling back to min_amount_out"); min_amount_out });
@@ -1418,31 +1371,31 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
             );
             debug!("  Min out: {}, Deadline: {}", min_amount_out, deadline);
 
-            let router = ISwapRouter::new(router_address, client.clone());
-            let params = i_swap_router::ExactInputSingleParams {
-                token_in,
-                token_out,
-                fee,
+            let router = ISwapRouter::new(router_address, &signer_provider);
+            let params = ISwapRouter::ExactInputSingleParams {
+                tokenIn: token_in,
+                tokenOut: token_out,
+                fee: fee_to_u24(fee),
                 recipient: wallet_address,
                 deadline: U256::from(deadline),
-                amount_in,
-                amount_out_minimum: min_amount_out,
-                sqrt_price_limit_x96: U256::zero(), // 0 = no limit
+                amountIn: amount_in,
+                amountOutMinimum: min_amount_out,
+                sqrtPriceLimitX96: alloy::primitives::Uint::<160, 3>::ZERO,
             };
-            let tx = router.exact_input_single(params);
-            let pending_tx = tx.send().await.map_err(|e| anyhow!("V3 send failed: {}", e))?;
-            let tx_hash = pending_tx.tx_hash();
+            let call = router.exactInputSingle(params);
+            let pending = call.send().await.map_err(|e| anyhow!("V3 send failed: {}", e))?;
+            let tx_hash = *pending.tx_hash();
             info!("V3 swap tx submitted: {:?} ({:?})", tx_hash, dex);
 
-            let receipt = pending_tx
+            let receipt = pending
+                .get_receipt()
                 .await
-                .map_err(|e| anyhow!("V3 confirmation failed: {}", e))?
-                .ok_or_else(|| anyhow!("No receipt returned"))?;
+                .map_err(|e| anyhow!("V3 confirmation failed: {}", e))?;
 
-            if receipt.status != Some(U64::from(1)) {
+            if !receipt.status() {
                 return Err(anyhow!("V3 transaction reverted"));
             }
-            let block_number = receipt.block_number.map(|bn| bn.as_u64()).unwrap_or(0);
+            let block_number = receipt.block_number.unwrap_or(0);
             let amount_out = self
                 .parse_amount_out_from_receipt(&receipt, token_out, wallet_address)
                 .unwrap_or_else(|| { warn!("V3: falling back to min_amount_out"); min_amount_out });
@@ -1460,14 +1413,13 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
     ) -> Result<()> {
         let router_address = self.get_router_address(dex);
 
-        // Create signer client
-        let client = SignerMiddleware::new(
-            self.provider.clone(),
-            self.wallet.clone().with_chain_id(self.config.chain_id),
-        );
-        let client = Arc::new(client);
+        // Create signing provider
+        let wallet = EthereumWallet::from(self.wallet.clone());
+        let signer_provider = ProviderBuilder::new()
+            .wallet(wallet)
+            .connect_http(self.config.rpc_url.parse().unwrap());
 
-        let token_contract = IERC20::new(token, client.clone());
+        let token_contract = IERC20::new(token, &signer_provider);
         let wallet_address = self.wallet.address();
 
         // Check current allowance
@@ -1484,12 +1436,12 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
         // Approve max uint256 for future trades
         info!("Approving {} for {:?} router", token, dex);
         let max_approval = U256::MAX;
-        let tx = token_contract.approve(router_address, max_approval);
-        let pending_tx = tx.send().await?;
+        let call = token_contract.approve(router_address, max_approval);
+        let pending = call.send().await.map_err(|e| anyhow!("Approval send failed: {}", e))?;
 
-        let receipt = pending_tx.await?.ok_or_else(|| anyhow!("No approval receipt"))?;
+        let receipt = pending.get_receipt().await.map_err(|e| anyhow!("Approval confirmation failed: {}", e))?;
 
-        if receipt.status != Some(U64::from(1)) {
+        if !receipt.status() {
             return Err(anyhow!("Approval transaction reverted"));
         }
 
@@ -1543,7 +1495,7 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
         out_decimals: u8,
     ) -> U256 {
         // Step 1: Convert raw input to human-readable
-        let amount_in_human = amount_in.low_u128() as f64 / 10_f64.powi(in_decimals as i32);
+        let amount_in_human = amount_in.to::<u128>() as f64 / 10_f64.powi(in_decimals as i32);
 
         // Step 2: Calculate expected output in human-readable units
         let expected_out_human = amount_in_human * price;
@@ -1561,7 +1513,7 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
                 "calculate_min_out: invalid result {:.2} (in={}, price={:.6}, dec={}->{})",
                 min_out_raw, amount_in, price, in_decimals, out_decimals
             );
-            return U256::zero();
+            return U256::ZERO;
         }
 
         debug!(
@@ -1596,65 +1548,65 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
             let quoter_address = self.config.quickswap_v3_quoter
                 .ok_or_else(|| anyhow!("QuickSwap V3 Quoter not configured (QUICKSWAP_V3_QUOTER)"))?;
             let quoter = IAlgebraQuoter::new(quoter_address, self.provider.clone());
-            let (amount_out, _fee) = quoter
-                .quote_exact_input_single(
+            let result = quoter
+                .quoteExactInputSingle(
                     token_in,
                     token_out,
                     amount_in,
-                    U256::zero(), // limitSqrtPrice = 0 (no limit)
+                    alloy::primitives::Uint::<160, 3>::ZERO, // limitSqrtPrice = 0 (no limit)
                 )
                 .call()
                 .await
                 .map_err(|e| anyhow!("Algebra Quoter simulation failed: {} — pool may lack liquidity", e))?;
-            amount_out
+            result.amountOut
         } else if dex.is_sushi_v3() {
             // SushiSwap V3: use QuoterV2 (struct param, tuple return)
             let quoter_address = self.config.sushiswap_v3_quoter
                 .ok_or_else(|| anyhow!("SushiSwap V3 Quoter not configured (SUSHISWAP_V3_QUOTER)"))?;
             let quoter = IQuoterV2::new(quoter_address, self.provider.clone());
-            let params = QuoteExactInputSingleParams {
-                token_in,
-                token_out,
-                amount_in,
-                fee: fee.into(),
-                sqrt_price_limit_x96: U256::zero(),
+            let params = IQuoterV2::QuoteExactInputSingleParams {
+                tokenIn: token_in,
+                tokenOut: token_out,
+                amountIn: amount_in,
+                fee: fee_to_u24(fee),
+                sqrtPriceLimitX96: alloy::primitives::Uint::<160, 3>::ZERO,
             };
-            let (amount_out, _, _, _) = quoter
-                .quote_exact_input_single(params)
+            let result = quoter
+                .quoteExactInputSingle(params)
                 .call()
                 .await
                 .map_err(|e| anyhow!("SushiV3 QuoterV2 simulation failed: {} — pool may lack liquidity", e))?;
-            amount_out
+            result.amountOut
         } else if self.config.uniswap_v3_quoter_is_v2 {
             // Uniswap V3 with QuoterV2 (Base): struct params, tuple return
             let quoter_address = self.config.uniswap_v3_quoter
                 .ok_or_else(|| anyhow!("V3 Quoter address not configured (UNISWAP_V3_QUOTER)"))?;
             let quoter = IQuoterV2::new(quoter_address, self.provider.clone());
-            let params = QuoteExactInputSingleParams {
-                token_in,
-                token_out,
-                amount_in,
-                fee: fee.into(),
-                sqrt_price_limit_x96: U256::zero(),
+            let params = IQuoterV2::QuoteExactInputSingleParams {
+                tokenIn: token_in,
+                tokenOut: token_out,
+                amountIn: amount_in,
+                fee: fee_to_u24(fee),
+                sqrtPriceLimitX96: alloy::primitives::Uint::<160, 3>::ZERO,
             };
-            let (amount_out, _, _, _) = quoter
-                .quote_exact_input_single(params)
+            let result = quoter
+                .quoteExactInputSingle(params)
                 .call()
                 .await
                 .map_err(|e| anyhow!("V3 QuoterV2 simulation failed: {} — pool may lack liquidity", e))?;
-            amount_out
+            result.amountOut
         } else {
             // Uniswap V3: use QuoterV1 (flat params, single return) — Polygon
             let quoter_address = self.config.uniswap_v3_quoter
                 .ok_or_else(|| anyhow!("V3 Quoter address not configured (UNISWAP_V3_QUOTER)"))?;
             let quoter = IQuoter::new(quoter_address, self.provider.clone());
             quoter
-                .quote_exact_input_single(
+                .quoteExactInputSingle(
                     token_in,
                     token_out,
-                    fee,
+                    fee_to_u24(fee),
                     amount_in,
-                    U256::zero(), // sqrtPriceLimitX96 = 0 (no limit)
+                    alloy::primitives::Uint::<160, 3>::ZERO, // sqrtPriceLimitX96 = 0 (no limit)
                 )
                 .call()
                 .await
@@ -1687,34 +1639,34 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
     ///   topic0 = 0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef
     fn parse_amount_out_from_receipt(
         &self,
-        receipt: &TransactionReceipt,
+        receipt: &alloy::rpc::types::TransactionReceipt,
         token_out: Address,
         recipient: Address,
     ) -> Option<U256> {
         // ERC20 Transfer event topic
-        let transfer_topic: H256 = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+        let transfer_topic: B256 = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
             .parse()
             .unwrap();
 
-        let recipient_topic = H256::from(recipient);
+        let recipient_topic: B256 = recipient.into_word();
 
         // Find Transfer events for the output token to our wallet
-        for log in &receipt.logs {
+        for log in receipt.inner.logs() {
             // Must be from the output token contract
-            if log.address != token_out {
+            if log.inner.address != token_out {
                 continue;
             }
             // Must have Transfer event signature
-            if log.topics.is_empty() || log.topics[0] != transfer_topic {
+            if log.inner.data.topics().is_empty() || log.inner.data.topics()[0] != transfer_topic {
                 continue;
             }
             // topic[2] = `to` address (indexed)
-            if log.topics.len() < 3 || log.topics[2] != recipient_topic {
+            if log.inner.data.topics().len() < 3 || log.inner.data.topics()[2] != recipient_topic {
                 continue;
             }
             // data = uint256 value
-            if log.data.len() >= 32 {
-                let amount = U256::from_big_endian(&log.data[..32]);
+            if log.inner.data.data.len() >= 32 {
+                let amount = U256::from_be_slice(&log.inner.data.data[..32]);
                 debug!("Parsed amountOut from Transfer event: {}", amount);
                 return Some(amount);
             }
@@ -1726,7 +1678,7 @@ impl<M: Middleware + 'static> TradeExecutor<M> {
 
     /// Convert Wei to USD based on token pair
     fn wei_to_usd(&self, wei: U256, pair_symbol: &str) -> f64 {
-        let wei_f = wei.low_u128() as f64;
+        let wei_f = wei.to::<u128>() as f64;
 
         if pair_symbol.starts_with("WETH") {
             (wei_f / 1e18) * 3300.0

@@ -20,52 +20,15 @@
 //!
 //! Author: AI-Generated
 //! Created: 2026-01-28
-//! Modified: 2026-01-29 - Drop 1% fee tier, add parallel sync
+//! Modified: 2026-02-01 — Migrated from ethers-rs to alloy
 
+use crate::contracts::{AlgebraPool, IERC20, UniswapV3Factory, UniswapV3Pool};
 use crate::types::{BotConfig, DexType, TradingPair, V3PoolState};
+use alloy::primitives::{Address, U256};
+use alloy::providers::Provider;
 use anyhow::{Context, Result};
-use ethers::prelude::*;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
-
-// Uniswap V3 Factory ABI
-abigen!(
-    UniswapV3Factory,
-    r#"[
-        function getPool(address tokenA, address tokenB, uint24 fee) external view returns (address pool)
-    ]"#
-);
-
-// Uniswap V3 Pool ABI (slot0 returns current price/tick/liquidity)
-abigen!(
-    UniswapV3Pool,
-    r#"[
-        function slot0() external view returns (uint160 sqrtPriceX96, int24 tick, uint16 observationIndex, uint16 observationCardinality, uint16 observationCardinalityNext, uint8 feeProtocol, bool unlocked)
-        function liquidity() external view returns (uint128)
-        function fee() external view returns (uint24)
-        function token0() external view returns (address)
-        function token1() external view returns (address)
-    ]"#
-);
-
-// Algebra V3 Pool ABI (QuickSwap V3 — globalState instead of slot0, dynamic fee)
-abigen!(
-    AlgebraPool,
-    r#"[
-        function globalState() external view returns (uint160 price, int24 tick, uint16 fee, uint16 timepointIndex, uint8 communityFeeToken0, uint8 communityFeeToken1, bool unlocked)
-        function liquidity() external view returns (uint128)
-        function token0() external view returns (address)
-        function token1() external view returns (address)
-    ]"#
-);
-
-// ERC20 for decimals
-abigen!(
-    ERC20Metadata,
-    r#"[
-        function decimals() external view returns (uint8)
-    ]"#
-);
 
 /// Uniswap V3 fee tiers to check for each pair
 pub const V3_FEE_TIERS: [(u32, DexType); 4] = [
@@ -82,6 +45,11 @@ pub const SUSHI_V3_FEE_TIERS: [(u32, DexType); 3] = [
     (3000, DexType::SushiV3_030),  // 0.30% - standard tier
 ];
 
+/// Helper: convert u32 fee tier to alloy uint24 type for contract calls
+fn fee_to_u24(fee: u32) -> alloy::primitives::Uint<24, 1> {
+    alloy::primitives::Uint::from(fee as u16)
+}
+
 /// Syncs V3 pool state from blockchain
 pub struct V3PoolSyncer<P> {
     provider: Arc<P>,
@@ -90,7 +58,7 @@ pub struct V3PoolSyncer<P> {
     decimals_cache: std::collections::HashMap<Address, u8>,
 }
 
-impl<P: Middleware + 'static> V3PoolSyncer<P> {
+impl<P: Provider + 'static> V3PoolSyncer<P> {
     /// Create a new V3PoolSyncer
     pub fn new(provider: Arc<P>, config: BotConfig) -> Self {
         Self {
@@ -177,7 +145,7 @@ impl<P: Middleware + 'static> V3PoolSyncer<P> {
 
         // Get block number once (shared across all pool syncs)
         let current_block = match self.provider.get_block_number().await {
-            Ok(bn) => bn.as_u64(),
+            Ok(bn) => bn,
             Err(e) => {
                 warn!("Failed to get block number for parallel sync: {}", e);
                 return Vec::new();
@@ -185,7 +153,7 @@ impl<P: Middleware + 'static> V3PoolSyncer<P> {
         };
 
         let futs: Vec<_> = known_pools.iter().map(|pool| {
-            let provider = Arc::clone(&self.provider);
+            let provider = self.provider.clone();
             let pool_state = pool.clone();
 
             async move {
@@ -193,7 +161,7 @@ impl<P: Middleware + 'static> V3PoolSyncer<P> {
                     // Algebra pool: use globalState() instead of slot0()
                     // globalState returns (price, tick, fee, ...) — fee is dynamic
                     let contract = AlgebraPool::new(pool_state.address, provider);
-                    let gs_call = contract.global_state();
+                    let gs_call = contract.globalState();
                     let liq_call = contract.liquidity();
                     let (gs_res, liq_res) = tokio::join!(
                         gs_call.call(),
@@ -201,11 +169,11 @@ impl<P: Middleware + 'static> V3PoolSyncer<P> {
                     );
 
                     match (gs_res, liq_res) {
-                        (Ok((sqrt_price, tick, fee, _, _, _, _)), Ok(liq)) => {
+                        (Ok(gs), Ok(liq)) => {
                             Some(V3PoolState {
-                                sqrt_price_x96: sqrt_price, // uint160 decoded as U256, no truncation
-                                tick: tick as i32,
-                                fee: fee as u32, // dynamic fee from globalState
+                                sqrt_price_x96: U256::from(gs.price),
+                                tick: i32::try_from(gs.tick).unwrap_or(0),
+                                fee: gs.fee as u32, // dynamic fee from globalState
                                 liquidity: liq,
                                 last_updated: current_block,
                                 ..pool_state
@@ -222,7 +190,7 @@ impl<P: Middleware + 'static> V3PoolSyncer<P> {
                 } else {
                     // Uniswap/SushiSwap V3: use slot0()
                     let contract = UniswapV3Pool::new(pool_state.address, provider);
-                    let slot0_call = contract.slot_0();
+                    let slot0_call = contract.slot0();
                     let liq_call = contract.liquidity();
                     let (slot0_res, liq_res) = tokio::join!(
                         slot0_call.call(),
@@ -230,10 +198,10 @@ impl<P: Middleware + 'static> V3PoolSyncer<P> {
                     );
 
                     match (slot0_res, liq_res) {
-                        (Ok((sqrt_price, tick, _, _, _, _, _)), Ok(liq)) => {
+                        (Ok(slot0), Ok(liq)) => {
                             Some(V3PoolState {
-                                sqrt_price_x96: sqrt_price, // uint160 decoded as U256, no truncation
-                                tick: tick as i32,
+                                sqrt_price_x96: U256::from(slot0.sqrtPriceX96),
+                                tick: i32::try_from(slot0.tick).unwrap_or(0),
                                 liquidity: liq,
                                 last_updated: current_block,
                                 ..pool_state
@@ -271,28 +239,33 @@ impl<P: Middleware + 'static> V3PoolSyncer<P> {
         dex_type: DexType,
     ) -> Result<Option<V3PoolState>> {
         // Get pool address from factory
-        let factory = UniswapV3Factory::new(factory_address, Arc::clone(&self.provider));
+        let factory = UniswapV3Factory::new(factory_address, self.provider.clone());
 
-        let pool_address = factory
-            .get_pool(pair.token0, pair.token1, fee_tier)
+        let result = factory
+            .getPool(pair.token0, pair.token1, fee_to_u24(fee_tier))
             .call()
             .await
             .context("Failed to get V3 pool address")?;
 
+        let pool_address = result;
+
         // Check if pool exists
-        if pool_address == Address::zero() {
+        if pool_address == Address::ZERO {
             return Ok(None);
         }
 
         // Get pool state
-        let pool = UniswapV3Pool::new(pool_address, Arc::clone(&self.provider));
+        let pool = UniswapV3Pool::new(pool_address, self.provider.clone());
 
         // Get slot0 (contains sqrtPriceX96 and tick)
-        let (sqrt_price_x96, tick, _, _, _, _, _) = pool
-            .slot_0()
+        let slot0 = pool
+            .slot0()
             .call()
             .await
             .context("Failed to get slot0")?;
+
+        let sqrt_price_x96 = U256::from(slot0.sqrtPriceX96);
+        let tick = i32::try_from(slot0.tick).unwrap_or(0);
 
         // Get current liquidity
         let liquidity = pool
@@ -315,8 +288,8 @@ impl<P: Middleware + 'static> V3PoolSyncer<P> {
 
         // CRITICAL: Get the ACTUAL token0/token1 from the pool contract
         // V3 pools sort tokens by address, which may differ from config order
-        let actual_token0 = pool.token_0().call().await.context("Failed to get token0")?;
-        let actual_token1 = pool.token_1().call().await.context("Failed to get token1")?;
+        let actual_token0 = pool.token0().call().await.context("Failed to get token0")?;
+        let actual_token1 = pool.token1().call().await.context("Failed to get token1")?;
 
         // Get decimals for the ACTUAL pool tokens
         let token0_decimals = self.get_decimals(actual_token0).await?;
@@ -327,8 +300,7 @@ impl<P: Middleware + 'static> V3PoolSyncer<P> {
             .provider
             .get_block_number()
             .await
-            .context("Failed to get block number")?
-            .as_u64();
+            .context("Failed to get block number")?;
 
         // Create pair with actual pool ordering (preserves symbol from config)
         let actual_pair = TradingPair {
@@ -341,8 +313,8 @@ impl<P: Middleware + 'static> V3PoolSyncer<P> {
             address: pool_address,
             dex: dex_type,
             pair: actual_pair,
-            sqrt_price_x96: sqrt_price_x96, // uint160 decoded as U256, no truncation
-            tick: tick as i32,
+            sqrt_price_x96,
+            tick,
             fee: fee_tier,
             liquidity,
             token0_decimals,
@@ -357,7 +329,7 @@ impl<P: Middleware + 'static> V3PoolSyncer<P> {
             return Ok(decimals);
         }
 
-        let token_contract = ERC20Metadata::new(token, Arc::clone(&self.provider));
+        let token_contract = IERC20::new(token, self.provider.clone());
         let decimals = token_contract
             .decimals()
             .call()
@@ -442,29 +414,29 @@ impl<P: Middleware + 'static> V3PoolSyncer<P> {
     ) -> Result<V3PoolState> {
         let (sqrt_price_x96, tick, fee, liquidity, token0, token1) = if dex_type.is_quickswap_v3() {
             // Algebra pool: globalState() returns (price, tick, fee, ...)
-            let pool = AlgebraPool::new(pool_address, Arc::clone(&self.provider));
-            let (sqrt_price, tick, fee, _, _, _, _) = pool
-                .global_state()
+            let pool = AlgebraPool::new(pool_address, self.provider.clone());
+            let gs = pool
+                .globalState()
                 .call()
                 .await
                 .context("Failed to get Algebra globalState")?;
             let liquidity = pool.liquidity().call().await?;
-            let token0 = pool.token_0().call().await?;
-            let token1 = pool.token_1().call().await?;
-            (sqrt_price, tick, fee as u32, liquidity, token0, token1)
+            let token0 = pool.token0().call().await?;
+            let token1 = pool.token1().call().await?;
+            (U256::from(gs.price), i32::try_from(gs.tick).unwrap_or(0), gs.fee as u32, liquidity, token0, token1)
         } else {
             // Uniswap/SushiSwap V3 pool: slot0()
-            let pool = UniswapV3Pool::new(pool_address, Arc::clone(&self.provider));
-            let (sqrt_price, tick, _, _, _, _, _) = pool
-                .slot_0()
+            let pool = UniswapV3Pool::new(pool_address, self.provider.clone());
+            let slot0 = pool
+                .slot0()
                 .call()
                 .await
                 .context("Failed to get slot0")?;
             let liquidity = pool.liquidity().call().await?;
-            let fee = pool.fee().call().await?;
-            let token0 = pool.token_0().call().await?;
-            let token1 = pool.token_1().call().await?;
-            (sqrt_price, tick, fee, liquidity, token0, token1)
+            let fee_val = pool.fee().call().await?;
+            let token0 = pool.token0().call().await?;
+            let token1 = pool.token1().call().await?;
+            (U256::from(slot0.sqrtPriceX96), i32::try_from(slot0.tick).unwrap_or(0), fee_val.to::<u32>(), liquidity, token0, token1)
         };
 
         // Get decimals
@@ -475,15 +447,14 @@ impl<P: Middleware + 'static> V3PoolSyncer<P> {
         let current_block = self
             .provider
             .get_block_number()
-            .await?
-            .as_u64();
+            .await?;
 
         Ok(V3PoolState {
             address: pool_address,
             dex: dex_type,
             pair: TradingPair::new(token0, token1, "UNKNOWN".to_string()),
-            sqrt_price_x96: sqrt_price_x96, // uint160 decoded as U256, no truncation
-            tick: tick as i32,
+            sqrt_price_x96,
+            tick,
             fee,
             liquidity,
             token0_decimals,

@@ -14,7 +14,7 @@
 use crate::types::{DexType, PoolState, TradingPair, V3PoolState};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use ethers::types::{Address, U256};
+use alloy::primitives::{Address, U256};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
@@ -61,17 +61,17 @@ impl SerializablePoolState {
         };
 
         let pair = TradingPair {
-            token0: self.token0.parse().unwrap_or(Address::zero()),
-            token1: self.token1.parse().unwrap_or(Address::zero()),
+            token0: self.token0.parse().unwrap_or(Address::ZERO),
+            token1: self.token1.parse().unwrap_or(Address::ZERO),
             symbol: self.pair_symbol.clone(),
         };
 
         Ok(PoolState {
             dex,
             pair,
-            address: self.address.parse().unwrap_or(Address::zero()),
-            reserve0: U256::from_dec_str(&self.reserve0).unwrap_or(U256::zero()),
-            reserve1: U256::from_dec_str(&self.reserve1).unwrap_or(U256::zero()),
+            address: self.address.parse().unwrap_or(Address::ZERO),
+            reserve0: self.reserve0.parse::<U256>().unwrap_or(U256::ZERO),
+            reserve1: self.reserve1.parse::<U256>().unwrap_or(U256::ZERO),
             last_updated: self.last_updated,
             token0_decimals: 18, // Legacy shared state — decimals not stored
             token1_decimals: 18,
@@ -129,16 +129,16 @@ impl SerializableV3PoolState {
         };
 
         let pair = TradingPair {
-            token0: self.token0.parse().unwrap_or(Address::zero()),
-            token1: self.token1.parse().unwrap_or(Address::zero()),
+            token0: self.token0.parse().unwrap_or(Address::ZERO),
+            token1: self.token1.parse().unwrap_or(Address::ZERO),
             symbol: self.pair_symbol.clone(),
         };
 
         Ok(V3PoolState {
             dex,
             pair,
-            address: self.address.parse().unwrap_or(Address::zero()),
-            sqrt_price_x96: U256::from_dec_str(&self.sqrt_price_x96).unwrap_or(U256::zero()),
+            address: self.address.parse().unwrap_or(Address::ZERO),
+            sqrt_price_x96: self.sqrt_price_x96.parse::<U256>().unwrap_or(U256::ZERO),
             tick: self.tick,
             fee: self.fee,
             liquidity: self.liquidity.parse().unwrap_or(0),
@@ -310,15 +310,15 @@ mod tests {
         state.block_number = 12345;
 
         let pair = TradingPair {
-            token0: Address::zero(),
-            token1: Address::zero(),
+            token0: Address::ZERO,
+            token1: Address::ZERO,
             symbol: "WETH/USDC".to_string(),
         };
 
         let pool = PoolState {
             dex: DexType::Uniswap,
             pair,
-            address: Address::zero(),
+            address: Address::ZERO,
             reserve0: U256::from(1000000),
             reserve1: U256::from(2000000),
             last_updated: 12345,

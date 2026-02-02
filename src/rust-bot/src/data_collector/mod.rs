@@ -23,7 +23,8 @@ use crate::filters::WhitelistFilter;
 use crate::pool::{V3PoolSyncer, V3_FEE_TIERS};
 use crate::types::BotConfig;
 use anyhow::Result;
-use ethers::prelude::*;
+use alloy::primitives::Address;
+use alloy::providers::Provider;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -36,14 +37,13 @@ pub const DEFAULT_STATE_PATH: &str = "/home/botuser/bots/dexarb/data/pool_state.
 ///
 /// This continuously syncs pool state and writes to a shared JSON file.
 /// V3-only mode: syncs only whitelisted V3 pools.
-pub async fn run_data_collector<M>(
-    provider: Arc<M>,
+pub async fn run_data_collector<P>(
+    provider: Arc<P>,
     config: BotConfig,
     state_path: PathBuf,
 ) -> Result<()>
 where
-    M: Middleware + 'static,
-    M::Error: 'static,
+    P: Provider + 'static,
 {
     info!("Starting Data Collector (V3-only, whitelist mode)");
     info!("  Chain ID: {}", config.chain_id);
@@ -158,7 +158,6 @@ where
         let block_number = provider
             .get_block_number()
             .await
-            .map(|b| b.as_u64())
             .unwrap_or(shared_state.block_number);
         shared_state.block_number = block_number;
 

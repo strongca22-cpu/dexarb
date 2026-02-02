@@ -10,31 +10,15 @@
 //!
 //! Author: AI-Generated
 //! Created: 2026-01-30
-//! Modified: 2026-01-30 - Initial implementation for V2↔V3 cross-protocol arb
+//! Modified: 2026-02-01 — Migrated from ethers-rs to alloy
 
+use crate::contracts::{IERC20, IUniswapV2Pair};
 use crate::types::{DexType, PoolState, TradingPair};
+use alloy::primitives::{Address, U256};
+use alloy::providers::Provider;
 use anyhow::{Context, Result};
-use ethers::prelude::*;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
-
-// V2 pool contract ABIs (same as Uniswap V2 — all V2 forks share this interface)
-abigen!(
-    IV2Pair,
-    r#"[
-        function getReserves() external view returns (uint112 reserve0, uint112 reserve1, uint32 blockTimestampLast)
-        function token0() external view returns (address)
-        function token1() external view returns (address)
-    ]"#
-);
-
-// ERC20 decimals query
-abigen!(
-    IERC20Decimals,
-    r#"[
-        function decimals() external view returns (uint8)
-    ]"#
-);
 
 /// V2 pool syncer — fetches reserves for known V2 pool addresses.
 /// Designed for the live bot's V2↔V3 cross-protocol arbitrage flow.
@@ -42,7 +26,7 @@ pub struct V2PoolSyncer<P> {
     provider: Arc<P>,
 }
 
-impl<P: Middleware + 'static> V2PoolSyncer<P> {
+impl<P: Provider + 'static> V2PoolSyncer<P> {
     pub fn new(provider: Arc<P>) -> Self {
         Self { provider }
     }
@@ -55,30 +39,29 @@ impl<P: Middleware + 'static> V2PoolSyncer<P> {
         pool_address: Address,
         dex_type: DexType,
     ) -> Result<PoolState> {
-        let pool = IV2Pair::new(pool_address, Arc::clone(&self.provider));
+        let pool = IUniswapV2Pair::new(pool_address, self.provider.clone());
 
         // Fetch token addresses from pool contract
-        let token0 = pool.token_0().call().await
+        let token0 = pool.token0().call().await
             .context("V2 sync: failed to get token0")?;
-        let token1 = pool.token_1().call().await
+        let token1 = pool.token1().call().await
             .context("V2 sync: failed to get token1")?;
 
         // Fetch token decimals (critical for V2↔V3 price comparison)
-        let token0_contract = IERC20Decimals::new(token0, Arc::clone(&self.provider));
-        let token1_contract = IERC20Decimals::new(token1, Arc::clone(&self.provider));
+        let token0_contract = IERC20::new(token0, self.provider.clone());
+        let token1_contract = IERC20::new(token1, self.provider.clone());
         let token0_decimals = token0_contract.decimals().call().await
             .context("V2 sync: failed to get token0 decimals")?;
         let token1_decimals = token1_contract.decimals().call().await
             .context("V2 sync: failed to get token1 decimals")?;
 
         // Fetch reserves
-        let (reserve0, reserve1, _timestamp) = pool.get_reserves().call().await
+        let reserves = pool.getReserves().call().await
             .context("V2 sync: failed to get reserves")?;
 
         // Get current block
         let current_block = self.provider.get_block_number().await
-            .context("V2 sync: failed to get block number")?
-            .as_u64();
+            .context("V2 sync: failed to get block number")?;
 
         let pair = TradingPair {
             token0,
@@ -89,15 +72,15 @@ impl<P: Middleware + 'static> V2PoolSyncer<P> {
         debug!(
             "V2 pool synced: {:?} on {:?} — token0={:?}({}dec) token1={:?}({}dec) reserves=({}, {}) block={}",
             pool_address, dex_type, token0, token0_decimals, token1, token1_decimals,
-            reserve0, reserve1, current_block
+            reserves.reserve0, reserves.reserve1, current_block
         );
 
         Ok(PoolState {
             address: pool_address,
             dex: dex_type,
             pair,
-            reserve0: U256::from(reserve0),
-            reserve1: U256::from(reserve1),
+            reserve0: U256::from(reserves.reserve0),
+            reserve1: U256::from(reserves.reserve1),
             last_updated: current_block,
             token0_decimals,
             token1_decimals,
@@ -117,7 +100,7 @@ impl<P: Middleware + 'static> V2PoolSyncer<P> {
         use futures::future::join_all;
 
         let tasks: Vec<_> = known_pools.iter().map(|pool| {
-            let provider = Arc::clone(&self.provider);
+            let provider = self.provider.clone();
             let pool_address = pool.address;
             let dex = pool.dex;
             let pair = pool.pair.clone();
@@ -125,19 +108,19 @@ impl<P: Middleware + 'static> V2PoolSyncer<P> {
             let token1_decimals = pool.token1_decimals;
 
             async move {
-                let contract = IV2Pair::new(pool_address, provider.clone());
-                let reserves = contract.get_reserves().call().await;
+                let contract = IUniswapV2Pair::new(pool_address, provider.clone());
+                let reserves = contract.getReserves().call().await;
                 let block = provider.get_block_number().await;
 
                 match (reserves, block) {
-                    (Ok((r0, r1, _ts)), Ok(bn)) => {
+                    (Ok(res), Ok(bn)) => {
                         Some(PoolState {
                             address: pool_address,
                             dex,
                             pair,
-                            reserve0: U256::from(r0),
-                            reserve1: U256::from(r1),
-                            last_updated: bn.as_u64(),
+                            reserve0: U256::from(res.reserve0),
+                            reserve1: U256::from(res.reserve1),
+                            last_updated: bn,
                             token0_decimals,
                             token1_decimals,
                         })
@@ -178,9 +161,9 @@ mod tests {
         // Simulate USDC(6dec)/WETH(18dec) V2 pool
         // 100 USDC = 100_000_000 raw, 0.042 WETH = 42_000_000_000_000_000 raw
         let pool = PoolState {
-            address: Address::zero(),
+            address: Address::ZERO,
             dex: DexType::QuickSwapV2,
-            pair: TradingPair::new(Address::zero(), Address::zero(), "TEST".to_string()),
+            pair: TradingPair::new(Address::ZERO, Address::ZERO, "TEST".to_string()),
             reserve0: U256::from(100_000_000u64),        // 100 USDC (6 dec)
             reserve1: U256::from(42_000_000_000_000_000u64), // 0.042 WETH (18 dec)
             last_updated: 100,
@@ -198,9 +181,9 @@ mod tests {
     fn test_v2_pool_state_price_adjusted_stablecoin() {
         // USDT(6dec)/USDC(6dec) — should be ~1.0
         let pool = PoolState {
-            address: Address::zero(),
+            address: Address::ZERO,
             dex: DexType::QuickSwapV2,
-            pair: TradingPair::new(Address::zero(), Address::zero(), "TEST".to_string()),
+            pair: TradingPair::new(Address::ZERO, Address::ZERO, "TEST".to_string()),
             reserve0: U256::from(500_000_000_000u64),    // 500K USDT (6 dec)
             reserve1: U256::from(501_000_000_000u64),    // 501K USDC (6 dec)
             last_updated: 100,
@@ -217,10 +200,10 @@ mod tests {
     #[test]
     fn test_v2_pool_state_zero_reserves() {
         let pool = PoolState {
-            address: Address::zero(),
+            address: Address::ZERO,
             dex: DexType::QuickSwapV2,
-            pair: TradingPair::new(Address::zero(), Address::zero(), "TEST".to_string()),
-            reserve0: U256::zero(),
+            pair: TradingPair::new(Address::ZERO, Address::ZERO, "TEST".to_string()),
+            reserve0: U256::ZERO,
             reserve1: U256::from(1000u64),
             last_updated: 100,
             token0_decimals: 6,

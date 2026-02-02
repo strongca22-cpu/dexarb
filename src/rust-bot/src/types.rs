@@ -1,7 +1,7 @@
 // Core data structures for Phase 1
 // Expand these based on the implementation plan
 
-use ethers::types::{Address, U256};
+use alloy::primitives::{Address, U256};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -169,8 +169,8 @@ impl PoolState {
     /// WARNING: This is the raw reserve ratio. For cross-protocol comparison
     /// with V3 prices, use `price_adjusted()` instead.
     pub fn price(&self) -> f64 {
-        let reserve0_f = self.reserve0.low_u128() as f64;
-        let reserve1_f = self.reserve1.low_u128() as f64;
+        let reserve0_f = self.reserve0.to::<u128>() as f64;
+        let reserve1_f = self.reserve1.to::<u128>() as f64;
 
         if reserve0_f == 0.0 {
             return 0.0;
@@ -191,8 +191,8 @@ impl PoolState {
     ///   * 10^(6-18) = * 10^(-12)
     ///   = 0.00042 WETH per USDC ✓ (matches V3 tick-based price)
     pub fn price_adjusted(&self) -> f64 {
-        let reserve0_f = self.reserve0.low_u128() as f64;
-        let reserve1_f = self.reserve1.low_u128() as f64;
+        let reserve0_f = self.reserve0.to::<u128>() as f64;
+        let reserve1_f = self.reserve1.to::<u128>() as f64;
 
         if reserve0_f == 0.0 {
             return 0.0;
@@ -216,7 +216,7 @@ impl PoolState {
         };
 
         if reserve_in.is_zero() || reserve_out.is_zero() {
-            return U256::zero();
+            return U256::ZERO;
         }
 
         // x * y = k formula with 0.3% fee

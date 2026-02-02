@@ -11,7 +11,7 @@
 //! Modified: 2026-02-01
 //!
 //! Dependencies:
-//!     - ethers (WS provider, subscription)
+//!     - alloy (WS provider, subscription)
 //!     - tokio (async runtime, select!, interval)
 //!     - chrono (timestamps)
 //!
@@ -28,8 +28,10 @@
 
 use anyhow::{Context, Result};
 use chrono::Utc;
-use ethers::prelude::*;
-use ethers::types::Transaction;
+use alloy::consensus::Transaction as TransactionTrait;
+use alloy::network::TransactionResponse;
+use alloy::primitives::{Address, B256, U256};
+use alloy::providers::{Provider, ProviderBuilder, WsConnect};
 use futures::StreamExt;
 use std::collections::HashMap;
 use std::io::Write;
@@ -162,31 +164,30 @@ async fn run_observation_inner(
     signal_tx: &Option<mpsc::Sender<MempoolSignal>>,
 ) -> Result<()> {
     // Create WS provider for pending tx subscription
-    let sub_provider = Provider::<Ws>::connect(&config.rpc_url)
+    let sub_provider = ProviderBuilder::new()
+        .connect_ws(WsConnect::new(&config.rpc_url))
         .await
         .context("Mempool WS connect failed")?;
 
     // Create separate WS provider for RPC calls (get_block, get_block_number)
     // Avoids borrow conflicts with the subscription stream.
-    let rpc_provider = Provider::<Ws>::connect(&config.rpc_url)
+    let rpc_provider = ProviderBuilder::new()
+        .connect_ws(WsConnect::new(&config.rpc_url))
         .await
         .context("Mempool RPC WS connect failed")?;
 
     // Subscribe to alchemy_pendingTransactions filtered to V3 routers.
     // Returns full transaction objects (hashesOnly: false).
     // CU cost: ~40 CU per notification, ~2 V3 txs/min = ~3.5M CU/month.
-    let alchemy_params = serde_json::json!([
-        "alchemy_pendingTransactions",
-        {
-            "toAddress": router_hex,
-            "hashesOnly": false
-        }
-    ]);
-
-    let mut pending_stream: SubscriptionStream<'_, Ws, Transaction> = sub_provider
-        .subscribe(alchemy_params)
+    //
+    // alloy: Use subscribe_full_pending_transactions() as base, then filter client-side.
+    // The Alchemy-specific server-side filtering (toAddress) is not directly supported
+    // in alloy's standard API, but the subscription handles full tx objects.
+    let pending_sub = sub_provider
+        .subscribe_full_pending_transactions()
         .await
-        .context("alchemy_pendingTransactions subscription failed")?;
+        .context("pending transactions subscription failed")?;
+    let mut pending_stream = pending_sub.into_stream();
 
     info!("Mempool: alchemy_pendingTransactions subscription active ({} routers)", router_hex.len());
 
@@ -208,7 +209,7 @@ async fn run_observation_inner(
     info!("Phase 2: simulation CSVs → {} , {}", sim_csv_path, accuracy_csv_path);
 
     // Block tracking for cross-reference
-    let mut last_checked_block = rpc_provider.get_block_number().await?.as_u64();
+    let mut last_checked_block = rpc_provider.get_block_number().await?;
 
     // Stats
     let mut total_decoded = 0u64;
@@ -228,21 +229,26 @@ async fn run_observation_inner(
             maybe_tx = pending_stream.next() => {
                 match maybe_tx {
                     Some(tx) => {
-                        // Determine router name from the tx.to address
-                        let router_name = tx.to
+                        // Filter: only process txs sent to our monitored routers
+                        // (alloy's subscribe_full_pending_transactions returns all pending txs)
+                        let tx_to = tx.to();
+                        let router_name = match tx_to
                             .and_then(|to| router_lookup.get(&to))
-                            .cloned()
-                            .unwrap_or_else(|| "Unknown".to_string());
+                        {
+                            Some(name) => name.clone(),
+                            None => continue, // Not a monitored router — skip
+                        };
 
                         // Decode calldata
-                        match decoder::decode_calldata(&tx.input) {
+                        match decoder::decode_calldata(tx.input()) {
                             Some(decoded) => {
                                 total_decoded += 1;
 
+                                let tx_hash = tx.tx_hash();
                                 let swap = PendingSwap {
                                     timestamp_utc: Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string(),
-                                    tx_hash: tx.hash,
-                                    router: tx.to.unwrap_or_default(),
+                                    tx_hash,
+                                    router: tx.to().unwrap_or_default(),
                                     router_name: router_name.clone(),
                                     function_name: decoded.function_name.clone(),
                                     token_in: decoded.token_in,
@@ -250,11 +256,11 @@ async fn run_observation_inner(
                                     amount_in: decoded.amount_in,
                                     amount_out_min: decoded.amount_out_min,
                                     fee_tier: decoded.fee_tier,
-                                    gas_price_gwei: tx.gas_price
-                                        .map(|gp| gp.as_u128() as f64 / 1e9)
+                                    gas_price_gwei: TransactionTrait::gas_price(&tx)
+                                        .map(|gp| gp as f64 / 1e9)
                                         .unwrap_or(0.0),
-                                    max_priority_fee_gwei: tx.max_priority_fee_per_gas
-                                        .map(|pf| pf.as_u128() as f64 / 1e9)
+                                    max_priority_fee_gwei: tx.max_priority_fee_per_gas()
+                                        .map(|pf| pf as f64 / 1e9)
                                         .unwrap_or(0.0),
                                 };
 
@@ -264,11 +270,11 @@ async fn run_observation_inner(
                                 }
 
                                 // Track for cross-reference
-                                tracker.track(tx.hash, &router_name);
+                                tracker.track(tx_hash, &router_name);
 
                                 info!(
                                     "PENDING: {} | {} | {} | in={} out={} | amt={} | fee={} | gas={:.1}gwei",
-                                    format!("{:?}", tx.hash).chars().take(10).collect::<String>(),
+                                    format!("{:?}", tx_hash).chars().take(10).collect::<String>(),
                                     router_name,
                                     decoded.function_name,
                                     decoded.token_in.map(|a| format!("{:?}", a).chars().skip(2).take(8).collect::<String>()).unwrap_or_else(|| "?".to_string()),
@@ -311,7 +317,7 @@ async fn run_observation_inner(
                                                     / simulated.pre_swap_price * 100.0
                                             );
                                             let opportunities = simulator::check_post_swap_opportunities(
-                                                pool_state, simulated, config, tx.hash,
+                                                pool_state, simulated, config, tx_hash,
                                                 &decoded.function_name, amount, zero_for_one,
                                                 &swap.timestamp_utc,
                                             );
@@ -319,7 +325,7 @@ async fn run_observation_inner(
                                             for opp in &opportunities {
                                                 info!(
                                                     "SIM OPP: {:?} | {} | {:.3}% spread | ${:.2} est | impact={:.4}%",
-                                                    tx.hash, opp.pair_symbol, opp.arb_spread_pct,
+                                                    tx_hash, opp.pair_symbol, opp.arb_spread_pct,
                                                     opp.arb_est_profit_usd, opp.price_impact_pct,
                                                 );
                                                 if let Err(e) = write_sim_csv_row(&mut sim_csv_file, opp) {
@@ -333,8 +339,8 @@ async fn run_observation_inner(
                                                     {
                                                         let signal = MempoolSignal {
                                                             opportunity: opp.clone(),
-                                                            trigger_gas_price: tx.gas_price.unwrap_or_default(),
-                                                            trigger_max_priority_fee: tx.max_priority_fee_per_gas,
+                                                            trigger_gas_price: U256::from(TransactionTrait::gas_price(&tx).unwrap_or(0)),
+                                                            trigger_max_priority_fee: tx.max_priority_fee_per_gas().map(U256::from),
                                                             seen_at: Instant::now(),
                                                         };
                                                         match stx.try_send(signal) {
@@ -355,17 +361,17 @@ async fn run_observation_inner(
 
                                             // Track simulation for accuracy validation (with or without opportunity)
                                             let best_opp = opportunities.into_iter().next();
-                                            sim_tracker.track(tx.hash, simulated.clone(), best_opp);
+                                            sim_tracker.track(tx_hash, simulated.clone(), best_opp);
                                         }
                                     }
                                 }
                             }
                             None => {
                                 total_undecoded += 1;
-                                let sel = decoder::selector_hex(&tx.input);
+                                let sel = decoder::selector_hex(tx.input());
                                 info!(
                                     "PENDING (undecoded): {:?} | {} | selector={} | {} bytes",
-                                    tx.hash, router_name, sel, tx.input.len()
+                                    tx.tx_hash(), router_name, sel, tx.input().len()
                                 );
                             }
                         }
@@ -382,14 +388,13 @@ async fn run_observation_inner(
 
                 // Check for new blocks and cross-reference
                 match rpc_provider.get_block_number().await {
-                    Ok(current_block_num) => {
-                        let current = current_block_num.as_u64();
+                    Ok(current) => {
                         // Process new blocks since last check
                         for block_num in (last_checked_block + 1)..=current {
-                            match rpc_provider.get_block(block_num).await {
+                            match rpc_provider.get_block_by_number(block_num.into()).await {
                                 Ok(Some(block)) => {
                                     blocks_checked += 1;
-                                    let tx_hashes: Vec<TxHash> = block.transactions.clone();
+                                    let tx_hashes: Vec<B256> = block.transactions.hashes().collect();
 
                                     let matches = tracker.check_block(&tx_hashes);
                                     for (hash, lead_time_ms, router_name) in &matches {
@@ -612,7 +617,7 @@ fn write_sim_csv_row(file: &mut std::fs::File, opp: &SimulatedOpportunity) -> Re
 fn write_accuracy_csv_row(
     file: &mut std::fs::File,
     timestamp: &str,
-    tx_hash: &TxHash,
+    tx_hash: &B256,
     pair_symbol: &str,
     dex: &str,
     predicted: f64,

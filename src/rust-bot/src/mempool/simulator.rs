@@ -10,7 +10,7 @@
 //! Modified: 2026-02-01
 //!
 //! Dependencies:
-//!     - ethers (U256 arithmetic, Address)
+//!     - alloy (U256 arithmetic, Address)
 //!
 //! Notes:
 //!     - V2: constant product (x * y = k) with 0.30% fee
@@ -23,7 +23,7 @@
 //!     - Uniswap V3 SqrtPriceMath.sol: getNextSqrtPriceFromInput
 //!     - Uniswap V3 SwapMath.sol: computeSwapStep
 
-use ethers::types::{Address, TxHash, U256};
+use alloy::primitives::{Address, TxHash, U256};
 use tracing::{debug, warn};
 
 use crate::pool::PoolStateManager;
@@ -255,8 +255,8 @@ fn v2_price_adjusted(reserve0: U256, reserve1: U256, dec0: u8, dec1: u8) -> f64 
     if reserve0.is_zero() {
         return 0.0;
     }
-    let r0 = reserve0.low_u128() as f64;
-    let r1 = reserve1.low_u128() as f64;
+    let r0 = reserve0.to::<u128>() as f64;
+    let r1 = reserve1.to::<u128>() as f64;
     let decimal_adj = 10_f64.powi(dec0 as i32 - dec1 as i32);
     (r1 / r0) * decimal_adj
 }
@@ -374,14 +374,14 @@ fn get_next_sqrt_price_from_amount0(
 
     let liquidity_u256 = U256::from(liquidity);
     // numerator1 = liquidity << 96 (safe: u128 << 96 fits in U256)
-    let numerator1 = liquidity_u256 << 96;
+    let numerator1: U256 = liquidity_u256 << 96;
 
     // Try precise formula first: ceil(numerator1 * sqrtPX96 / denominator)
     if let Some(product) = amount.checked_mul(sqrt_price_x96) {
         if let Some(denominator) = numerator1.checked_add(product) {
             if !denominator.is_zero() {
                 if let Some(full_num) = numerator1.checked_mul(sqrt_price_x96) {
-                    let result = (full_num + denominator - U256::one()) / denominator;
+                    let result = (full_num + denominator - U256::from(1)) / denominator;
                     if !result.is_zero() {
                         return Some(result);
                     }
@@ -397,7 +397,7 @@ fn get_next_sqrt_price_from_amount0(
     if denominator.is_zero() {
         return None;
     }
-    let result = (numerator1 + denominator - U256::one()) / denominator;
+    let result = (numerator1 + denominator - U256::from(1)) / denominator;
     if result.is_zero() {
         return None;
     }
@@ -443,11 +443,11 @@ fn tick_from_sqrt_price_x96(sqrt_price_x96: U256) -> i32 {
     // Convert sqrtPriceX96 to f64
     let sqrt_price_f = if sqrt_price_x96 > U256::from(u128::MAX) {
         // Very large sqrtPrice: shift right and compensate
-        let shifted = sqrt_price_x96 >> 64;
-        let shifted_f = shifted.low_u128() as f64;
+        let shifted: U256 = sqrt_price_x96 >> 64;
+        let shifted_f = shifted.to::<u128>() as f64;
         shifted_f / (q96_f / 2.0_f64.powi(64))
     } else {
-        sqrt_price_x96.low_u128() as f64 / q96_f
+        sqrt_price_x96.to::<u128>() as f64 / q96_f
     };
 
     if sqrt_price_f <= 0.0 {
@@ -673,7 +673,7 @@ mod tests {
 
     /// Q96 as U256 for test convenience
     fn q96_u256() -> U256 {
-        U256::one() << 96
+        U256::from(1) << 96
     }
 
     #[test]
@@ -711,10 +711,10 @@ mod tests {
         let sqrt_price = q96_u256() * U256::from(50u64);
         let liquidity: u128 = 1_000_000_000_000_000_000;
 
-        let r0 = get_next_sqrt_price_from_amount0(sqrt_price, liquidity, U256::zero());
+        let r0 = get_next_sqrt_price_from_amount0(sqrt_price, liquidity, U256::ZERO);
         assert_eq!(r0, Some(sqrt_price));
 
-        let r1 = get_next_sqrt_price_from_amount1(sqrt_price, liquidity, U256::zero());
+        let r1 = get_next_sqrt_price_from_amount1(sqrt_price, liquidity, U256::ZERO);
         assert_eq!(r1, Some(sqrt_price));
     }
 
@@ -745,9 +745,9 @@ mod tests {
     fn test_v2_simulation_basic() {
         // Pool: 1000 WETH / 2,400,000 USDC (price ~2400 USDC/WETH)
         let pool = PoolState {
-            address: Address::zero(),
+            address: Address::ZERO,
             dex: DexType::QuickSwapV2,
-            pair: TradingPair::new(Address::zero(), Address::zero(), "WETH/USDC".to_string()),
+            pair: TradingPair::new(Address::ZERO, Address::ZERO, "WETH/USDC".to_string()),
             reserve0: U256::from(1000u64) * U256::exp10(18), // 1000 WETH (18 dec)
             reserve1: U256::from(2_400_000u64) * U256::exp10(6), // 2.4M USDC (6 dec)
             last_updated: 100,
@@ -781,9 +781,9 @@ mod tests {
     fn test_v2_simulation_price_impact() {
         // Small pool to see measurable impact
         let pool = PoolState {
-            address: Address::zero(),
+            address: Address::ZERO,
             dex: DexType::QuickSwapV2,
-            pair: TradingPair::new(Address::zero(), Address::zero(), "WETH/USDC".to_string()),
+            pair: TradingPair::new(Address::ZERO, Address::ZERO, "WETH/USDC".to_string()),
             reserve0: U256::from(100u64) * U256::exp10(18), // 100 WETH
             reserve1: U256::from(240_000u64) * U256::exp10(6), // 240K USDC
             last_updated: 100,

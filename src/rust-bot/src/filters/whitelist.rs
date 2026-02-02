@@ -10,7 +10,7 @@
 //! Created: 2026-01-29
 
 use anyhow::{Context, Result};
-use ethers::types::Address;
+use alloy::primitives::Address;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use tracing::{debug, info, warn};
