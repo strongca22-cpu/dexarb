@@ -109,25 +109,159 @@ The AMM simulator (V2 constant product + V3 sqrtPriceX96 math) is highly accurat
 
 ## PnL Projections (Hetzner Model)
 
-Based on observed data: **~18 opportunities/hr, $0.40 avg estimated profit, $500 trade size.**
+### Measured Baseline
 
-| Scenario | Capture Rate | $/hr | $/day | $/month | Assumption |
-|----------|-------------|------|-------|---------|------------|
-| **Conservative** | 10% | $0.72 | $17 | **$520** | Own node, basic hybrid pipeline, 32 pools |
-| **Moderate** | 20% | $1.44 | $35 | **$1,040** | Hybrid pipeline + validator peering |
-| **Optimistic** | 30% | $2.16 | $52 | **$1,560** | Above + micro-latency optimizations |
+All figures from 24-hour sample (2026-02-01), 32 active pools, Alchemy RPC, $500 flat trade size.
 
-**With 200+ pool expansion (3-5x opportunity multiplier):**
+| Metric | Measured Value | Source |
+|--------|---------------|--------|
+| Opportunities detected | **438 / day** (~18/hr) | `simulated_opportunities_20260201.csv` |
+| Total addressable profit (at $500) | **$175.37 / day** | Sum of `arb_est_profit_usd` |
+| Average estimated profit | **$0.40** per opportunity | Mean |
+| Median estimated profit | **~$0.25** per opportunity | Median |
+| Best single opportunity | **$4.13** | Max |
+| By pair: WETH/USDC | 393 opps, $0.36 avg | 89.7% of total |
+| By pair: WMATIC/USDC | 45 opps, $0.76 avg | 10.3% of total |
+| Simulation accuracy | **0.07% avg error** (1,246 predictions) | `simulation_accuracy_20260201.csv` |
+| Gas cost per tx | **~$0.02** | Polygon L1 |
+| Execution capture (Alchemy) | **0%** (167 attempts, all reverted pre-gas) | Zero capital loss |
 
-| Scenario | Capture Rate | $/hr | $/day | $/month |
-|----------|-------------|------|-------|---------|
-| Conservative | 10% | $2.16 | $52 | **$1,560** |
-| Moderate | 20% | $4.32 | $104 | **$3,120** |
-| Optimistic | 30% | $6.48 | $156 | **$4,680** |
+**Profit distribution at $500 trade size:**
 
-**Breakeven:** Server costs ~$140/mo. Need >4% capture rate on 32 pools to break even.
+| Bucket | Count | % of Total | Cumulative Profit |
+|--------|:-----:|:----------:|:-----------------:|
+| >= $1.00 | 36 | 8.2% | ~$65 (37%) |
+| $0.50 -- $0.99 | 77 | 17.6% | ~$52 (30%) |
+| $0.10 -- $0.49 | 210 | 47.9% | ~$53 (30%) |
+| < $0.10 | 115 | 26.3% | ~$5 (3%) |
 
-**Caveat:** These projections assume competitors don't adapt. Real capture rates will depend on how many other bots run local nodes on Polygon. The long-tail pool expansion is the more defensible edge — fewer competitors monitor LINK/USDC or AAVE/USDC than WETH/USDC.
+The top 25.8% of opportunities (>= $0.50) account for ~67% of total addressable profit. A capture strategy that wins only higher-profit trades still has outsized impact.
+
+### Dynamic Trade Sizing
+
+The baseline assumes $500 flat trades. In practice, trade size should scale with pool depth:
+
+| Pool Type | Example | Liquidity | Reasonable Size | Approx Avg Profit |
+|-----------|---------|-----------|:--------------:|:-----------------:|
+| Deep (high-volume V3) | WETH/USDC UniV3 0.05% | $100M+ TVL | $2,000 -- $5,000 | $1.20 -- $2.50 |
+| Medium (multi-DEX V3) | WMATIC/USDC QuickSwapV3 | $1M -- $10M TVL | $500 -- $2,000 | $0.76 -- $2.00 |
+| Thin (long-tail) | LINK/USDC, AAVE/USDC | $100K -- $1M TVL | $200 -- $500 | $0.20 -- $0.50 |
+
+Profit scales roughly linearly with trade size until slippage overtakes the spread. For the dominant WETH/USDC pools (billions in liquidity), increasing from $500 to $2,500 approximately triples profit per opportunity with minimal additional slippage.
+
+| Trade Size Scenario | Blended Avg Profit/Opp | Daily Addressable (438 opps) | Multiplier vs Baseline |
+|---------------------|:---------------------:|:---------------------------:|:---------------------:|
+| **$500 flat** (measured) | $0.40 | $175 / day | 1.0x |
+| **$1,500 weighted avg** (conservative dynamic) | $1.00 | $438 / day | 2.5x |
+| **$2,500 weighted avg** (moderate dynamic) | $1.60 | $701 / day | 4.0x |
+
+Dynamic sizing requires A11 implementation. $5K capital covers $2,500 trades without flash loans since trades are atomic (capital recycles per block). Flash loans (A14) remove the capital constraint entirely.
+
+### Capture Rate Reasoning
+
+**Why 0% currently:** Alchemy adds 250ms RPC round-trip. Pipeline total is 3.8s. Competitors with local nodes submit in <50ms.
+
+**What changes with own Bor node + co-located bot:**
+
+| Factor | Impact | Detail |
+|--------|--------|--------|
+| IPC transport | 250ms -> <1ms RPC | Eliminates network round-trip |
+| Unfiltered P2P mempool | Full visibility | Alchemy filters/delays pending txs; own node sees all gossip |
+| Hybrid pipeline (pre-built txs) | ~5-10ms total pipeline | Pre-simulate + pre-sign; submit on block confirmation |
+| Co-location with validators | <10ms block arrival | 50-60% of Polygon validators in Hetzner DE datacenters |
+
+**What limits capture:**
+
+| Factor | Impact |
+|--------|--------|
+| Other searchers also run local nodes | We are not unique; Polygon has moderate MEV competition |
+| No bundle ordering on Polygon | Cannot guarantee tx position; gas auction determines inclusion |
+| WETH/USDC is the most competed pair | 89.7% of current opps come from the most watched pair |
+| Gas auction cost eats small spreads | Competitive gas bidding reduces net margin |
+
+**Estimated capture rates:**
+
+| Pair Type | Estimated Capture | Reasoning |
+|-----------|:-----------------:|-----------|
+| WETH/USDC (competitive) | 5 -- 15% | Most watched pair; many searchers |
+| WMATIC/USDC (moderate) | 15 -- 30% | Less competition; fewer searchers monitor non-ETH pairs |
+| Long-tail (LINK, AAVE, etc.) | 20 -- 40% | Least competition; most searchers don't bother |
+| **Blended (current 32 pools)** | **8 -- 20%** | Dominated by WETH/USDC (89.7% of opps) |
+| **Blended (200+ pools)** | **12 -- 25%** | More long-tail pairs shift mix toward less-competed opps |
+
+### Projection Matrix
+
+All projections use measured 438 opps/day baseline. Gas cost deducted at $0.02/attempt.
+
+**Phase 1 — Current 32 Pools:**
+
+| Scenario | Trade Sizing | Capture Rate | Gross/Day | Gas/Day | **Net/Day** | **Net/Month** | **Net/Year** |
+|----------|:-----------:|:-----------:|:---------:|:------:|:----------:|:------------:|:-----------:|
+| **Bear case** | $500 flat | 8% | $14.03 | $0.70 | **$13.33** | **$400** | **$4,800** |
+| **Conservative** | $500 flat | 12% | $21.04 | $1.05 | **$19.99** | **$600** | **$7,200** |
+| **Moderate** | $1,500 dynamic | 12% | $52.56 | $1.05 | **$51.51** | **$1,545** | **$18,540** |
+| **Optimistic** | $2,500 dynamic | 15% | $105.15 | $1.31 | **$103.84** | **$3,115** | **$37,380** |
+
+*Bear case math: 438 opps x $0.40 avg x 8% = $14.03 gross. Gas: 438 x 8% x $0.02 = $0.70.*
+
+**Phase 2 — Pool Expansion (200+ Pools, 20+ Pairs):**
+
+4x opportunity multiplier (moderate estimate). Long-tail pairs shift capture rate upward but avg profit per opp is lower (more thin-pool opps in the mix).
+
+| Scenario | Opps/Day | Avg Profit | Capture | Gross/Day | Gas/Day | **Net/Day** | **Net/Month** | **Net/Year** |
+|----------|:-------:|:---------:|:-----------:|:---------:|:------:|:----------:|:------------:|:-----------:|
+| **Bear case** | 1,314 (3x) | $0.35 | 10% | $46.00 | $2.63 | **$43.37** | **$1,301** | **$15,612** |
+| **Conservative** | 1,752 (4x) | $0.35 | 15% | $91.98 | $5.26 | **$86.72** | **$2,602** | **$31,224** |
+| **Moderate** | 1,752 (4x) | $0.80 | 15% | $210.24 | $5.26 | **$204.98** | **$6,149** | **$73,788** |
+| **Optimistic** | 2,190 (5x) | $1.20 | 20% | $525.60 | $8.76 | **$516.84** | **$15,505** | **$186,060** |
+
+*Note: avg profit lower in Phase 2 because expanded pool set includes thinner pools with smaller trade sizes.*
+
+### Infrastructure Costs
+
+| Item | Monthly | Annual | Notes |
+|------|:------:|:-----:|-------|
+| Hetzner AX102 server | $140 | $1,680 | 16C/32T, 128GB RAM, 2x 1.92TB NVMe |
+| Gas budget (Polygon) | $3 -- $16 | $36 -- $192 | $0.02/tx, scales with capture rate |
+| Monitoring (optional) | ~$5 | ~$60 | Uptime alerts |
+| **Total** | **~$150** | **~$1,800** | |
+
+Budget alternative: Hetzner AX52 at ~$80/mo (64GB RAM, smaller NVMe). Tighter margin for Bor but lowers breakeven.
+
+### Breakeven Analysis
+
+What capture rate covers $145/month in server costs?
+
+| Trade Sizing | Required Capture Rate | Trades Won/Day | Daily Gross Needed |
+|:-----------:|:--------------------:|:--------------:|:-----------------:|
+| $500 flat ($0.40 avg) | **2.8%** | ~12 | $4.83 |
+| $1,500 dynamic ($1.00 avg) | **1.1%** | ~5 | $4.83 |
+| $2,500 dynamic ($1.60 avg) | **0.7%** | ~3 | $4.83 |
+
+*Math: $145/mo / 30 days = $4.83/day. At $500 flat: $4.83 / (438 x $0.40) = 2.8%.*
+
+167 execution attempts were made in a single day on Alchemy (where latency made capture impossible). Achieving 3-12 captures/day with a ~100x latency improvement and full mempool visibility is a reasonable expectation. The breakeven bar is low.
+
+### Risk Factors
+
+**What could underperform projections:**
+
+| Risk | Likelihood | Impact | Mitigation |
+|------|:----------:|:------:|------------|
+| MEV competition intensifies on Polygon | Medium | Capture rates drop below 5% on WETH/USDC | Long-tail pool expansion |
+| Polygon introduces bundle auction system | Low | Shifts competition to capital-heavy bidding | Flash loans for capital; adapt to API |
+| Bor node sync issues / downtime | Medium | Lost opportunities during outage | Systemd restart; Alchemy fallback; monitoring |
+| Spreads narrow (market efficiency) | Low-Medium | Fewer opportunities, lower profit/opp | Dynamic sizing; pool expansion adds volume |
+| Gas wars erode competitive opps | Medium | Net profit per trade drops | Focus on long-tail pairs with less gas competition |
+
+**What could outperform:**
+- Flash loans (Aave/Balancer) remove the capital ceiling — $50K+ trades on deep pools
+- Triangular arb (USDC->WETH->WMATIC->USDC) opens routes invisible to two-hop detection
+- Parallel submission (A10) + flash loans = fire on every opportunity simultaneously
+- Validator peering or private tx channels (if they emerge on Polygon)
+- Reduced competition if searchers exit Polygon for more profitable chains
+
+**Honest assessment:** The breakeven bar ($145/mo = 2.8% capture at $500 flat) is achievable. The moderate projection ($1,500-$6,000/mo depending on phase) requires capturing 5-15% of opportunities — plausible but unproven. Treat the conservative estimates as the planning basis for the first 3 months.
 
 ---
 
