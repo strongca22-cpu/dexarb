@@ -13,5 +13,5 @@ pub mod multicall_quoter;
 
 pub use cooldown::RouteCooldown;
 pub use detector::OpportunityDetector;
-pub use executor::TradeExecutor;
+pub use executor::{TradeExecutor, SubmitResult, wait_for_atomic_receipt};
 pub use multicall_quoter::{MulticallQuoter, VerifiedOpportunity};

@@ -337,7 +337,7 @@ pub struct ArbitrageOpportunity {
     pub sell_price: f64,
     pub spread_percent: f64,
     pub estimated_profit: f64, // in USD
-    pub trade_size: U256,      // in quote token units (always USDC with 6 decimals)
+    pub trade_size: U256,      // in quote token raw units (dynamic decimals based on quote token)
     pub timestamp: u64,
     /// Pool address where we buy (optional for tax logging)
     pub buy_pool_address: Option<Address>,
@@ -358,6 +358,11 @@ pub struct ArbitrageOpportunity {
     /// Used by executor for on-chain revert threshold (ArbExecutor minProfit).
     /// 0.0 means "use config.min_profit_usd" (backwards compat).
     pub min_profit_usd: f64,
+    /// Pre-computed minimum profit in raw quote token units (dynamic decimals).
+    /// Computed by detector: (scaled_min_profit_usd / quote_usd_price) * 10^quote_decimals.
+    /// Executor reads this directly — no USD→token conversion in hot path.
+    /// U256::ZERO means "not pre-computed" → executor falls back to legacy 1e6 path.
+    pub min_profit_raw: U256,
 }
 
 impl ArbitrageOpportunity {
@@ -391,6 +396,7 @@ impl ArbitrageOpportunity {
             buy_pool_liquidity: None,
             quote_token_is_token0: true,
             min_profit_usd: 0.0,
+            min_profit_raw: U256::ZERO,
         }
     }
 
@@ -548,6 +554,10 @@ pub struct BotConfig {
     // Eliminates hammering of structurally dead spreads. Set to 0 to disable.
     // Default: 10 blocks (~20s on Polygon).
     pub route_cooldown_blocks: u64,
+    // Max consecutive max-cooldown cycles with 0 successes before permanent blacklist.
+    // Eliminates structural false positives (fee combos that can never be profitable).
+    // Default: 3. Set to 0 to disable permanent blacklisting.
+    pub cooldown_max_strikes: u32,
 
     // Private RPC URL for transaction submission (Polygon Fastlane).
     // When set, atomic arb transactions are sent through this endpoint instead
@@ -596,15 +606,41 @@ pub struct BotConfig {
     // Pools with different quote tokens are never compared against each other.
     // Polygon USDT: 0xc2132D05D31c914a87C6611C10748AEb04B58e8F (6 decimals)
     pub quote_token_address_usdt: Option<Address>,
+
+    // Quaternary quote token address (WETH on Polygon).
+    // When set, pools using WETH are eligible for arbitrage.
+    // WETH arbs are isolated: WETH pools only compare against other WETH pools.
+    // WETH has 18 decimals — requires dynamic decimal handling in detector/executor.
+    // Polygon WETH: 0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619
+    pub quote_token_address_weth: Option<Address>,
+
+    // WETH price in USD for USD→WETH conversion (min_profit, trade_size).
+    // Used by quote_token_usd_price() — returns 1.0 for stablecoins, this for WETH.
+    // A 10% WETH price move changes min_profit by ~$0.01 — irrelevant for safety threshold.
+    // Default: 3300.0 (updated periodically, not latency-sensitive).
+    pub weth_price_usd: f64,
 }
 
 impl BotConfig {
-    /// Check if an address is any recognized quote token (primary, native, or USDT).
+    /// Check if an address is any recognized quote token (primary, native, USDT, or WETH).
     /// Used by detector, simulator, and mempool handler to determine swap direction.
     pub fn is_quote_token(&self, addr: &Address) -> bool {
         *addr == self.quote_token_address
             || self.quote_token_address_native.map_or(false, |a| a == *addr)
             || self.quote_token_address_usdt.map_or(false, |a| a == *addr)
+            || self.quote_token_address_weth.map_or(false, |a| a == *addr)
+    }
+
+    /// Returns the USD price of a quote token.
+    /// Stablecoins (USDC.e, native USDC, USDT) → 1.0
+    /// WETH → weth_price_usd (from env, default 3300.0)
+    /// Used for USD→raw-token conversion (trade_size, min_profit_raw).
+    pub fn quote_token_usd_price(&self, addr: &Address) -> f64 {
+        if self.quote_token_address_weth.map_or(false, |a| a == *addr) {
+            self.weth_price_usd
+        } else {
+            1.0
+        }
     }
 }
 

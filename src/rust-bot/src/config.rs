@@ -114,6 +114,18 @@ fn load_config_inner() -> Result<BotConfig> {
         .ok()
         .and_then(|s| Address::from_str(&s).ok());
 
+    // Quaternary quote token (WETH on Polygon — 18 decimals)
+    let quote_token_address_weth = std::env::var("QUOTE_TOKEN_ADDRESS_WETH")
+        .ok()
+        .and_then(|s| Address::from_str(&s).ok());
+
+    // WETH price in USD for USD→WETH conversion (min_profit, trade_size).
+    // Default 3300.0 — a 10% move changes min_profit by ~$0.01, irrelevant for safety threshold.
+    let weth_price_usd: f64 = std::env::var("WETH_PRICE_USD")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(3300.0);
+
     // Native token price — must resolve before chain_name is moved into BotConfig
     let native_token_price_usd: f64 = std::env::var("NATIVE_TOKEN_PRICE_USD")
         .ok()
@@ -211,6 +223,12 @@ fn load_config_inner() -> Result<BotConfig> {
             .and_then(|v| v.parse().ok())
             .unwrap_or(10),
 
+        // Permanent blacklist: max max-cooldown cycles with 0 successes (default 3, 0 = disabled)
+        cooldown_max_strikes: std::env::var("COOLDOWN_MAX_STRIKES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(3),
+
         // Private RPC for tx submission (Polygon Fastlane — optional)
         private_rpc_url: std::env::var("PRIVATE_RPC_URL").ok(),
 
@@ -244,5 +262,7 @@ fn load_config_inner() -> Result<BotConfig> {
         ws_rpc_url: std::env::var("WS_RPC_URL").ok(),
 
         quote_token_address_usdt,
+        quote_token_address_weth,
+        weth_price_usd,
     })
 }

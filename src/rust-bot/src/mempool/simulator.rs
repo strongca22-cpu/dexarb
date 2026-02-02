@@ -70,6 +70,9 @@ impl PairLookup {
         if let Some(usdt) = config.quote_token_address_usdt {
             quote_tokens.insert(format!("{:x}", usdt));
         }
+        if let Some(weth) = config.quote_token_address_weth {
+            quote_tokens.insert(format!("{:x}", weth));
+        }
 
         // V3 pools: extract non-quote token → pair symbol mapping
         for pool in state.get_all_v3_pools() {

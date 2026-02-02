@@ -55,6 +55,28 @@ fn fee_to_u24(fee: u32) -> alloy::primitives::Uint<24, 1> {
     alloy::primitives::Uint::from(fee as u16)
 }
 
+/// Result of a successful atomic tx submission (before receipt).
+/// Used by parallel execution: submit N txs fast, then wait for all receipts.
+#[derive(Debug, Clone)]
+pub struct SubmitResult {
+    /// Hash of the submitted transaction
+    pub tx_hash: B256,
+    /// Nonce used for this transaction
+    pub nonce: u64,
+    /// When submission started (for execution time measurement)
+    pub start_time: Instant,
+    /// Pair symbol for logging and cooldown tracking
+    pub pair_symbol: String,
+    /// Trade size in raw token units
+    pub trade_size: U256,
+    /// Quote token decimals (for profit parsing)
+    pub quote_decimals: u8,
+    /// ArbExecutor contract address (for event parsing)
+    pub arb_address: Address,
+    /// Native token price for gas cost calculation
+    pub native_token_price_usd: f64,
+}
+
 /// Trade executor for DEX arbitrage
 pub struct TradeExecutor<P: Provider> {
     provider: Arc<P>,
@@ -436,15 +458,19 @@ impl<P: Provider + 'static> TradeExecutor<P> {
         let fee_buy = opportunity.buy_dex.atomic_fee();
         let fee_sell = opportunity.sell_dex.atomic_fee();
 
-        // minProfit in token0 raw units (on-chain revert threshold).
-        // Uses per-opportunity scaled min_profit when set (adaptive sizing),
-        // falls back to global config.min_profit_usd (backwards compat).
-        let effective_min_profit = if opportunity.min_profit_usd > 0.0 {
-            opportunity.min_profit_usd
+        // minProfit in raw quote token units (on-chain revert threshold).
+        // Phase D: use pre-computed min_profit_raw (dynamic decimals, no hot-path conversion).
+        // Backwards compat: if not pre-computed (U256::ZERO), fall back to legacy 1e6 path.
+        let min_profit_raw = if opportunity.min_profit_raw > U256::ZERO {
+            opportunity.min_profit_raw
         } else {
-            self.config.min_profit_usd
+            let effective_min_profit = if opportunity.min_profit_usd > 0.0 {
+                opportunity.min_profit_usd
+            } else {
+                self.config.min_profit_usd
+            };
+            U256::from((effective_min_profit * 1e6) as u64)
         };
-        let min_profit_raw = U256::from((effective_min_profit * 1e6) as u64);
 
         info!(
             "  routerBuy={:?} feeBuy={} | routerSell={:?} feeSell={} | amountIn={} | minProfit={}",
@@ -683,6 +709,235 @@ impl<P: Provider + 'static> TradeExecutor<P> {
         })
     }
 
+    /// Submit an atomic arb tx and return immediately (no receipt wait).
+    ///
+    /// Returns SubmitResult on successful send, or TradeResult error on pre-trade rejection.
+    /// Used by parallel submission: submit N txs sequentially (fast, ~5ms each),
+    /// then wait for all receipts in parallel via wait_for_atomic_receipt().
+    ///
+    /// The existing execute() and execute_atomic() methods are unchanged for backwards
+    /// compatibility. Use submit_atomic() + wait_for_atomic_receipt() only when
+    /// MAX_PARALLEL_SUBMISSIONS > 1.
+    pub async fn submit_atomic(
+        &mut self,
+        opportunity: &ArbitrageOpportunity,
+    ) -> Result<SubmitResult, TradeResult> {
+        let start_time = Instant::now();
+        let pair_symbol = &opportunity.pair.symbol;
+        let arb_address = match self.config.arb_executor_address {
+            Some(addr) => addr,
+            None => {
+                return Err(TradeResult {
+                    opportunity: pair_symbol.clone(),
+                    tx_hash: None, block_number: None, success: false,
+                    profit_usd: 0.0, gas_cost_usd: 0.0, gas_used_native: 0.0, net_profit_usd: 0.0,
+                    execution_time_ms: start_time.elapsed().as_millis() as u64,
+                    error: Some("No ARB_EXECUTOR_ADDRESS configured".to_string()),
+                    amount_in: Some(opportunity.trade_size.to_string()), amount_out: None,
+                });
+            }
+        };
+
+        if self.dry_run {
+            return Err(TradeResult {
+                opportunity: pair_symbol.clone(),
+                tx_hash: None, block_number: None, success: false,
+                profit_usd: 0.0, gas_cost_usd: 0.0, gas_used_native: 0.0, net_profit_usd: 0.0,
+                execution_time_ms: start_time.elapsed().as_millis() as u64,
+                error: Some("submit_atomic not available in dry_run mode".to_string()),
+                amount_in: Some(opportunity.trade_size.to_string()), amount_out: None,
+            });
+        }
+
+        let mode = if opportunity.buy_dex.is_v2() || opportunity.sell_dex.is_v2() {
+            "V2↔V3"
+        } else {
+            "V3↔V3"
+        };
+        info!(
+            "⚡ SUBMIT ATOMIC {} : {} | Buy {:?} → Sell {:?} via ArbExecutor {:?}",
+            mode, pair_symbol, opportunity.buy_dex, opportunity.sell_dex, arb_address
+        );
+
+        // Gas pricing (same as execute_atomic)
+        let base_fee: u128 = match self.cached_base_fee {
+            Some(bf) => bf,
+            None => self.provider.get_gas_price().await
+                .map_err(|e| TradeResult {
+                    opportunity: pair_symbol.clone(),
+                    tx_hash: None, block_number: None, success: false,
+                    profit_usd: 0.0, gas_cost_usd: 0.0, gas_used_native: 0.0, net_profit_usd: 0.0,
+                    execution_time_ms: start_time.elapsed().as_millis() as u64,
+                    error: Some(format!("Gas price fetch failed: {}", e)),
+                    amount_in: Some(opportunity.trade_size.to_string()), amount_out: None,
+                })?,
+        };
+        let priority_fee: u128 = 5_000_000_000_000; // 5000 gwei
+        let max_fee: u128 = base_fee + priority_fee;
+
+        // Token ordering
+        let (token0, token1) = if opportunity.quote_token_is_token0 {
+            (opportunity.pair.token0, opportunity.pair.token1)
+        } else {
+            (opportunity.pair.token1, opportunity.pair.token0)
+        };
+        let trade_size = opportunity.trade_size;
+
+        let router_buy = self.get_router_address(opportunity.buy_dex);
+        let router_sell = self.get_router_address(opportunity.sell_dex);
+        let fee_buy = opportunity.buy_dex.atomic_fee();
+        let fee_sell = opportunity.sell_dex.atomic_fee();
+
+        // minProfit
+        let min_profit_raw = if opportunity.min_profit_raw > U256::ZERO {
+            opportunity.min_profit_raw
+        } else {
+            let effective_min_profit = if opportunity.min_profit_usd > 0.0 {
+                opportunity.min_profit_usd
+            } else {
+                self.config.min_profit_usd
+            };
+            U256::from((effective_min_profit * 1e6) as u64)
+        };
+
+        // Nonce
+        if !self.nonce_initialized {
+            let nonce = self.provider.get_transaction_count(self.wallet.address()).await
+                .map_err(|e| TradeResult {
+                    opportunity: pair_symbol.clone(),
+                    tx_hash: None, block_number: None, success: false,
+                    profit_usd: 0.0, gas_cost_usd: 0.0, gas_used_native: 0.0, net_profit_usd: 0.0,
+                    execution_time_ms: start_time.elapsed().as_millis() as u64,
+                    error: Some(format!("Nonce fetch failed: {}", e)),
+                    amount_in: Some(trade_size.to_string()), amount_out: None,
+                })?;
+            self.cached_nonce.store(nonce, Ordering::SeqCst);
+            self.nonce_initialized = true;
+            info!("Nonce initialized: {}", nonce);
+        }
+        let current_nonce = self.cached_nonce.load(Ordering::SeqCst);
+
+        // Build and send transaction
+        let send_result: Result<B256, String> = if let Some(ref url) = self.tx_client_url {
+            info!("📡 PARALLEL SUBMIT via private mempool (nonce={})", current_nonce);
+
+            let call_data = IArbExecutor::executeArbCall {
+                token0, token1,
+                routerBuy: router_buy, routerSell: router_sell,
+                feeBuy: fee_to_u24(fee_buy), feeSell: fee_to_u24(fee_sell),
+                amountIn: trade_size, minProfit: min_profit_raw,
+            }.abi_encode();
+
+            let mut tx = alloy::rpc::types::TransactionRequest::default()
+                .with_to(arb_address)
+                .with_input(call_data)
+                .with_nonce(current_nonce)
+                .with_chain_id(self.config.chain_id)
+                .with_max_fee_per_gas(max_fee)
+                .with_max_priority_fee_per_gas(priority_fee);
+
+            let gas_estimate = self.provider.estimate_gas(tx.clone()).await
+                .map_err(|e| format!("Gas estimate failed: {}", e));
+            let gas_estimate = match gas_estimate {
+                Ok(g) => g,
+                Err(msg) => return Err(self.submit_error(&pair_symbol, &msg, start_time, trade_size)),
+            };
+            tx.set_gas_limit(gas_estimate);
+
+            let wallet = EthereumWallet::from(self.wallet.clone());
+            let signed = tx.build(&wallet).await
+                .map_err(|e| format!("Sign failed: {}", e));
+            let signed = match signed {
+                Ok(s) => s,
+                Err(msg) => return Err(self.submit_error(&pair_symbol, &msg, start_time, trade_size)),
+            };
+            let raw_tx = signed.encoded_2718();
+
+            let http_provider = ProviderBuilder::new().connect_http(url.parse().unwrap());
+            match http_provider.send_raw_transaction(&raw_tx).await {
+                Ok(pending) => {
+                    self.cached_nonce.fetch_add(1, Ordering::SeqCst);
+                    Ok(*pending.tx_hash())
+                }
+                Err(e) => Err(format!("Send failed (private): {}", e))
+            }
+        } else {
+            let wallet = EthereumWallet::from(self.wallet.clone());
+            let signer_provider = ProviderBuilder::new()
+                .wallet(wallet)
+                .connect_http(self.config.rpc_url.parse().unwrap());
+            let contract = IArbExecutor::new(arb_address, &signer_provider);
+            contract.executeArb(
+                token0, token1, router_buy, router_sell,
+                fee_to_u24(fee_buy), fee_to_u24(fee_sell), trade_size, min_profit_raw,
+            )
+            .nonce(current_nonce)
+            .max_fee_per_gas(max_fee)
+            .max_priority_fee_per_gas(priority_fee)
+            .send()
+            .await
+            .map(|builder| {
+                self.cached_nonce.fetch_add(1, Ordering::SeqCst);
+                *builder.tx_hash()
+            })
+            .map_err(|e| format!("Send failed: {}", e))
+        };
+
+        let tx_hash = match send_result {
+            Ok(hash) => hash,
+            Err(err_msg) => {
+                if err_msg.contains("InsufficientProfit") || err_msg.contains("execution reverted") {
+                    info!("Atomic arb reverted at submission (insufficient profit)");
+                } else {
+                    error!("{}", err_msg);
+                }
+                return Err(self.submit_error(&pair_symbol, &err_msg, start_time, trade_size));
+            }
+        };
+
+        info!("⚡ Atomic arb submitted: {:?} (nonce={})", tx_hash, current_nonce);
+
+        let quote_decimals = if opportunity.quote_token_is_token0 {
+            opportunity.token0_decimals
+        } else {
+            opportunity.token1_decimals
+        };
+
+        Ok(SubmitResult {
+            tx_hash,
+            nonce: current_nonce,
+            start_time,
+            pair_symbol: pair_symbol.clone(),
+            trade_size,
+            quote_decimals,
+            arb_address,
+            native_token_price_usd: self.config.native_token_price_usd,
+        })
+    }
+
+    /// Check if executor is in dry run mode (parallel path needs to know).
+    pub fn is_dry_run(&self) -> bool {
+        self.dry_run
+    }
+
+    /// Helper to build a TradeResult error for submit_atomic() failure paths.
+    fn submit_error(&self, pair: &str, msg: &str, start: Instant, trade_size: U256) -> TradeResult {
+        TradeResult {
+            opportunity: pair.to_string(),
+            tx_hash: None, block_number: None, success: false,
+            profit_usd: 0.0, gas_cost_usd: 0.0, gas_used_native: 0.0, net_profit_usd: 0.0,
+            execution_time_ms: start.elapsed().as_millis() as u64,
+            error: Some(msg.to_string()),
+            amount_in: Some(trade_size.to_string()), amount_out: None,
+        }
+    }
+
+    /// Expose the provider Arc for use by wait_for_atomic_receipt().
+    /// Called from main.rs to get a cloneable provider handle for spawning receipt tasks.
+    pub fn provider_arc(&self) -> Arc<P> {
+        self.provider.clone()
+    }
+
     /// Execute an atomic arbitrage from a mempool signal (Phase 3).
     ///
     /// Structurally identical to execute_atomic() with three key differences:
@@ -763,8 +1018,13 @@ impl<P: Provider + 'static> TradeExecutor<P> {
         let fee_buy = opportunity.buy_dex.atomic_fee();
         let fee_sell = opportunity.sell_dex.atomic_fee();
 
-        // Lower minProfit for mempool signals (higher conviction)
-        let min_profit_raw = U256::from((mempool_min_profit_usd * 1e6) as u64);
+        // minProfit: use pre-computed raw value (dynamic decimals) if available,
+        // else fall back to legacy 1e6 path for backwards compat.
+        let min_profit_raw = if opportunity.min_profit_raw > U256::ZERO {
+            opportunity.min_profit_raw
+        } else {
+            U256::from((mempool_min_profit_usd * 1e6) as u64)
+        };
 
         let gas_limit: u64 = self.config.mempool_gas_limit;
 
@@ -1687,5 +1947,138 @@ impl<P: Provider + 'static> TradeExecutor<P> {
         } else {
             wei_f / 1e18
         }
+    }
+}
+
+/// Wait for an atomic arb transaction receipt and parse the result.
+///
+/// Free function (not a method) — takes an Arc<Provider> so it can be spawned
+/// in a JoinSet for parallel receipt waiting. Does NOT do tax logging (caller's
+/// responsibility via the returned TradeResult data).
+///
+/// Used by the parallel submission path (A10): submit_atomic() returns SubmitResult,
+/// then this function is spawned per pending tx to wait for receipts concurrently.
+pub async fn wait_for_atomic_receipt<P: Provider>(
+    provider: Arc<P>,
+    submit: SubmitResult,
+) -> TradeResult {
+    let receipt_deadline = Instant::now() + Duration::from_secs(30);
+    let receipt = loop {
+        match provider.get_transaction_receipt(submit.tx_hash).await {
+            Ok(Some(r)) => break r,
+            Ok(None) => {
+                if Instant::now() > receipt_deadline {
+                    error!("Receipt timeout (30s) for tx {:?} — tx may still confirm later", submit.tx_hash);
+                    return TradeResult {
+                        opportunity: submit.pair_symbol.clone(),
+                        tx_hash: Some(format!("{:?}", submit.tx_hash)),
+                        block_number: None,
+                        success: false,
+                        profit_usd: 0.0,
+                        gas_cost_usd: 0.0,
+                        gas_used_native: 0.0,
+                        net_profit_usd: 0.0,
+                        execution_time_ms: submit.start_time.elapsed().as_millis() as u64,
+                        error: Some("Receipt timeout — tx submitted but unconfirmed".to_string()),
+                        amount_in: Some(submit.trade_size.to_string()),
+                        amount_out: None,
+                    };
+                }
+                tokio::time::sleep(tokio::time::Duration::from_millis(250)).await;
+            }
+            Err(e) => {
+                return TradeResult {
+                    opportunity: submit.pair_symbol.clone(),
+                    tx_hash: Some(format!("{:?}", submit.tx_hash)),
+                    block_number: None,
+                    success: false,
+                    profit_usd: 0.0,
+                    gas_cost_usd: 0.0,
+                    gas_used_native: 0.0,
+                    net_profit_usd: 0.0,
+                    execution_time_ms: submit.start_time.elapsed().as_millis() as u64,
+                    error: Some(format!("Receipt fetch failed: {}", e)),
+                    amount_in: Some(submit.trade_size.to_string()),
+                    amount_out: None,
+                };
+            }
+        }
+    };
+
+    let block_number = receipt.block_number.unwrap_or(0);
+
+    if !receipt.status() {
+        warn!("Parallel atomic tx reverted on-chain: {:?}", submit.tx_hash);
+        return TradeResult {
+            opportunity: submit.pair_symbol.clone(),
+            tx_hash: Some(format!("{:?}", submit.tx_hash)),
+            block_number: Some(block_number),
+            success: false,
+            profit_usd: 0.0,
+            gas_cost_usd: 0.0,
+            gas_used_native: 0.0,
+            net_profit_usd: 0.0,
+            execution_time_ms: submit.start_time.elapsed().as_millis() as u64,
+            error: Some("Atomic tx reverted on-chain".to_string()),
+            amount_in: Some(submit.trade_size.to_string()),
+            amount_out: None,
+        };
+    }
+
+    // Parse profit from ArbExecuted event
+    let mut profit_raw = U256::ZERO;
+    let mut amount_out = submit.trade_size; // fallback
+    let arb_executed_topic: B256 = keccak256(
+        b"ArbExecuted(address,address,uint256,uint256,uint256,address,address)"
+    );
+
+    for log in receipt.inner.logs() {
+        if log.inner.address == submit.arb_address
+            && !log.inner.data.topics().is_empty()
+            && log.inner.data.topics()[0] == arb_executed_topic
+        {
+            if log.inner.data.data.len() >= 96 {
+                amount_out = U256::from_be_slice(&log.inner.data.data[32..64]);
+                profit_raw = U256::from_be_slice(&log.inner.data.data[64..96]);
+                debug!("Parsed ArbExecuted: amountOut={}, profit={}", amount_out, profit_raw);
+            }
+            break;
+        }
+    }
+
+    let profit_usd = profit_raw.to::<u128>() as f64 / 10_f64.powi(submit.quote_decimals as i32);
+    let gas_used = receipt.gas_used as u128;
+    let effective_gas_price = receipt.effective_gas_price;
+    let gas_cost_wei = gas_used * effective_gas_price;
+    let gas_used_native = gas_cost_wei as f64 / 1e18;
+    let gas_cost_usd = gas_used_native * submit.native_token_price_usd;
+    let net_profit_usd = profit_usd - gas_cost_usd;
+    let success = net_profit_usd > 0.0;
+
+    if success {
+        info!(
+            "🎉 PARALLEL PROFIT: {} | ${:.4} (gross: ${:.4}, gas: ${:.4}) | tx: {:?}",
+            submit.pair_symbol, net_profit_usd, profit_usd, gas_cost_usd, submit.tx_hash
+        );
+    } else {
+        warn!(
+            "📉 PARALLEL LOSS: {} | ${:.4} (gross: ${:.4}, gas: ${:.4}) | tx: {:?}",
+            submit.pair_symbol, net_profit_usd, profit_usd, gas_cost_usd, submit.tx_hash
+        );
+    }
+
+    TradeResult {
+        opportunity: submit.pair_symbol,
+        tx_hash: Some(format!("{:?}", submit.tx_hash)),
+        block_number: Some(block_number),
+        success,
+        profit_usd,
+        gas_cost_usd,
+        gas_used_native,
+        net_profit_usd,
+        execution_time_ms: submit.start_time.elapsed().as_millis() as u64,
+        error: None,
+        amount_in: Some(submit.trade_size.to_string()),
+        amount_out: Some(amount_out.to_string()),
     }
 }

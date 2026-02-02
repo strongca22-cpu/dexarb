@@ -70,13 +70,25 @@ TOKEN_ADDRESSES = {
     "DAI":          "0x8f3Cf7ad23Cd3CaDbD9735AFf958023239c6A063",
 }
 
-# Quote tokens all have 6 decimals
-QUOTE_DECIMALS = 6
+# Quote token decimals and USD prices (for USD→raw-token conversion)
+QUOTE_TOKEN_INFO = {
+    "USDC.e":      {"decimals": 6,  "usd_price": 1.0},
+    "USDC native": {"decimals": 6,  "usd_price": 1.0},
+    "USDT":        {"decimals": 6,  "usd_price": 1.0},
+    "WETH":        {"decimals": 18, "usd_price": 3300.0},
+}
 
 # Trade sizes in USD
 TRADE_SIZES_USD = [100, 500, 5000]
 
-# Trade sizes in raw units (6 decimals)
+
+def get_trade_size_raw(usd_size, quote_symbol):
+    """Convert a USD trade size to raw token units for the given quote token."""
+    info = QUOTE_TOKEN_INFO.get(quote_symbol, {"decimals": 6, "usd_price": 1.0})
+    return int(usd_size / info["usd_price"] * (10 ** info["decimals"]))
+
+
+# Legacy constant for backwards compat (6-decimal stablecoin quote tokens)
 TRADE_SIZES_RAW = {
     100:  100_000_000,
     500:  500_000_000,
@@ -280,7 +292,7 @@ def assess_v3_pool(pool):
 
     results = {}
     for usd_size in TRADE_SIZES_USD:
-        amount_in = TRADE_SIZES_RAW[usd_size]
+        amount_in = get_trade_size_raw(usd_size, quote_symbol)
         if is_algebra:
             amount_out = quote_quickswap_v3(quote_addr, base_addr, amount_in)
         else:
@@ -323,7 +335,7 @@ def assess_v2_pool(pool):
 
     results = {}
     for usd_size in TRADE_SIZES_USD:
-        amount_in = TRADE_SIZES_RAW[usd_size]
+        amount_in = get_trade_size_raw(usd_size, quote_symbol)
         amount_out = calc_v2_amount_out(amount_in, reserve_quote, reserve_base)
         results[usd_size] = amount_out if amount_out > 0 else None
 

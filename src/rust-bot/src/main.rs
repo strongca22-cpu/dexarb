@@ -32,7 +32,7 @@
 
 use anyhow::Result;
 use clap::Parser;
-use dexarb_bot::arbitrage::{MulticallQuoter, OpportunityDetector, RouteCooldown, TradeExecutor, VerifiedOpportunity};
+use dexarb_bot::arbitrage::{MulticallQuoter, OpportunityDetector, RouteCooldown, TradeExecutor, VerifiedOpportunity, wait_for_atomic_receipt};
 use dexarb_bot::config::load_config_from_file;
 use dexarb_bot::filters::WhitelistFilter;
 use dexarb_bot::mempool::{CachedOpportunity, HybridCache, MempoolMode, MempoolSignal};
@@ -405,10 +405,10 @@ async fn main() -> Result<()> {
     }
 
     // Route cooldown tracker — suppresses stale/dead spreads with escalating backoff
-    let mut route_cooldown = RouteCooldown::new(config.route_cooldown_blocks);
+    let mut route_cooldown = RouteCooldown::new(config.route_cooldown_blocks, config.cooldown_max_strikes);
     if config.route_cooldown_blocks > 0 {
-        info!("Route cooldown ENABLED: initial {} blocks, escalating 5× per failure (max ~1hr)",
-              config.route_cooldown_blocks);
+        info!("Route cooldown ENABLED: initial {} blocks, escalating 5× per failure (max ~1hr), blacklist after {} max-cooldown strikes",
+              config.route_cooldown_blocks, config.cooldown_max_strikes);
     } else {
         info!("Route cooldown DISABLED (ROUTE_COOLDOWN_BLOCKS=0)");
     }
@@ -501,6 +501,26 @@ async fn main() -> Result<()> {
     let mut total_opportunities: u64 = 0;
     let mut total_scans: u64 = 0;
     let mut last_block: u64 = 0;
+
+    // Session-level performance stats for pipeline validation
+    struct SessionStats {
+        cache_inserts: u64,       // mempool signal → hybrid cache insert
+        cache_hits: u64,          // trigger tx confirmed in block → opportunity ready
+        cache_executions: u64,    // execute() called on a hybrid hit
+        cache_successes: u64,     // hybrid trade with success=true
+        cache_failures: u64,      // hybrid trade with success=false or error
+        cache_expired: u64,       // entries that timed out before trigger confirmed
+        block_opps_detected: u64, // block-reactive opportunities detected
+        block_opps_executed: u64, // block-reactive opportunities that reached execute()
+        block_opps_succeeded: u64, // block-reactive successes
+        session_start: std::time::Instant,
+    }
+    let mut stats = SessionStats {
+        cache_inserts: 0, cache_hits: 0, cache_executions: 0,
+        cache_successes: 0, cache_failures: 0, cache_expired: 0,
+        block_opps_detected: 0, block_opps_executed: 0, block_opps_succeeded: 0,
+        session_start: std::time::Instant::now(),
+    };
 
     // Hybrid pipeline: cache mempool signals, execute when trigger confirms in block.
     // Solves tx ordering problem (arb fires AFTER trigger, not before).
@@ -628,6 +648,7 @@ async fn main() -> Result<()> {
             arb_opportunity: arb_opp,
             cached_at: std::time::Instant::now(),
         });
+        stats.cache_inserts += 1;
 
         continue; // Back to select! loop — don't fall through to block processing
     }
@@ -658,9 +679,25 @@ async fn main() -> Result<()> {
                 route_cooldown.cleanup(current_block);
                 let (v2_count, v3_count, min_block, max_block) = state_manager.combined_stats();
                 let cd_count = route_cooldown.active_count();
+                let bl_count = route_cooldown.blacklist_count();
                 info!(
-                    "Iteration {} (WS) | {} V3 + {} V2 pools | blocks {}-{} | {} opps found / {} scans | {} routes cooled | block {}",
-                    iteration, v3_count, v2_count, min_block, max_block, total_opportunities, total_scans, cd_count, current_block
+                    "Iteration {} (WS) | {} V3 + {} V2 pools | blocks {}-{} | {} opps found / {} scans | {} routes cooled | {} blacklisted | block {}",
+                    iteration, v3_count, v2_count, min_block, max_block, total_opportunities, total_scans, cd_count, bl_count, current_block
+                );
+            }
+
+            // Session-level pipeline stats every 300 blocks (~10 min on Polygon)
+            if iteration % 300 == 0 && iteration > 0 {
+                let elapsed_min = stats.session_start.elapsed().as_secs() / 60;
+                info!(
+                    "SESSION STATS ({}min) | hybrid: {}/{}/{}/{}/{} (insert/hit/exec/success/fail) | \
+                     block: {}/{}/{} (detect/exec/success) | expired: {}",
+                    elapsed_min,
+                    stats.cache_inserts, stats.cache_hits,
+                    stats.cache_executions, stats.cache_successes, stats.cache_failures,
+                    stats.block_opps_detected, stats.block_opps_executed,
+                    stats.block_opps_succeeded,
+                    stats.cache_expired,
                 );
             }
 
@@ -825,6 +862,7 @@ async fn main() -> Result<()> {
 
                 let hits = hybrid_cache.check_block(&block_tx_hashes);
                 for cached in hits {
+                    stats.cache_hits += 1;
                     let age_ms = cached.cached_at.elapsed().as_millis() as u64;
                     let opp = &cached.signal.opportunity;
                     info!(
@@ -833,11 +871,17 @@ async fn main() -> Result<()> {
                     );
 
                     // Execute via atomic path — pool state reflects trigger's effect
+                    stats.cache_executions += 1;
                     let exec_start = std::time::Instant::now();
                     match executor.execute(&cached.arb_opportunity).await {
                         Ok(result) => {
                             let exec_ms = exec_start.elapsed().as_millis() as u64;
                             let result_str = if result.success { "SUCCESS" } else { "FAIL" };
+                            if result.success {
+                                stats.cache_successes += 1;
+                            } else {
+                                stats.cache_failures += 1;
+                            }
                             info!(
                                 "HYBRID {}: {} | ${:.4} net | {}ms exec | {}ms cache_age | tx={}",
                                 result_str, result.opportunity, result.net_profit_usd,
@@ -879,6 +923,7 @@ async fn main() -> Result<()> {
                             }
                         }
                         Err(e) => {
+                            stats.cache_failures += 1;
                             error!("HYBRID EXEC ERROR: {}", e);
                             route_cooldown.record_failure(
                                 &opp.pair_symbol, opp.arb_buy_dex, opp.arb_sell_dex, current_block
@@ -889,6 +934,7 @@ async fn main() -> Result<()> {
 
                 // Cleanup stale entries (30s TTL — ~15 Polygon blocks)
                 let expired = hybrid_cache.cleanup(hybrid_ttl);
+                stats.cache_expired += expired as u64;
                 if expired > 0 {
                     info!(
                         "HYBRID: {} expired | stats: cached={} hits={} expired={} pending={}",
@@ -932,6 +978,7 @@ async fn main() -> Result<()> {
 
             if !opportunities.is_empty() {
                 total_opportunities += opportunities.len() as u64;
+                stats.block_opps_detected += opportunities.len() as u64;
 
                 for opp in &opportunities {
                     info!(
@@ -989,7 +1036,80 @@ async fn main() -> Result<()> {
                     ranked.into_iter().map(|v| (v.original_index, Some(v.quoted_profit_raw))).collect()
                 };
 
-                // Try opportunities in ranked order (best first, fall through on Quoter rejections)
+                // A10: Parallel submission mode — read from env (default 1 = sequential)
+                let max_parallel: usize = std::env::var("MAX_PARALLEL_SUBMISSIONS")
+                    .ok().and_then(|v| v.parse().ok()).unwrap_or(1);
+
+                // ── PARALLEL PATH (A10): submit N, wait for all receipts concurrently ──
+                if max_parallel > 1 && !config.arb_executor_address.is_none() && !executor.is_dry_run() {
+                    let mut pending_submissions = Vec::new();
+                    let submit_limit = max_parallel.min(execution_order.len());
+
+                    // Phase 1: Submit up to N txs sequentially (fast: ~5ms each)
+                    for (rank, (idx, quoted_profit)) in execution_order.iter().take(submit_limit).enumerate() {
+                        let opp = &opportunities[*idx];
+                        info!(
+                            "PARALLEL SUBMIT #{}: {} - Buy {:?} Sell {:?} - ${:.2}{}",
+                            rank + 1, opp.pair.symbol, opp.buy_dex, opp.sell_dex,
+                            opp.estimated_profit,
+                            quoted_profit.map_or(String::new(), |qp| format!(" (qp={})", qp))
+                        );
+                        stats.block_opps_executed += 1;
+
+                        match executor.submit_atomic(opp).await {
+                            Ok(submit_result) => {
+                                info!("PARALLEL #{} submitted: {:?}", rank + 1, submit_result.tx_hash);
+                                pending_submissions.push((submit_result, opp.pair.symbol.clone(), opp.buy_dex, opp.sell_dex));
+                            }
+                            Err(trade_result) => {
+                                let err = trade_result.error.as_deref().unwrap_or("Unknown");
+                                if err.contains("Quoter") || err.contains("Gas estimate") || err.contains("InsufficientProfit") {
+                                    info!("PARALLEL #{} rejected ({}), trying next...", rank + 1, err);
+                                    route_cooldown.record_failure(&opp.pair.symbol, opp.buy_dex, opp.sell_dex, current_block);
+                                    continue;
+                                }
+                                warn!("PARALLEL #{} failed ({}), stopping submissions", rank + 1, err);
+                                route_cooldown.record_failure(&opp.pair.symbol, opp.buy_dex, opp.sell_dex, current_block);
+                                break;
+                            }
+                        }
+                    }
+
+                    // Phase 2: Wait for all receipts in parallel
+                    if !pending_submissions.is_empty() {
+                        info!("PARALLEL: {} txs submitted, waiting for receipts...", pending_submissions.len());
+                        let provider_arc = executor.provider_arc();
+                        let mut join_set = tokio::task::JoinSet::new();
+
+                        for (submit_result, pair_sym, buy_dex, sell_dex) in pending_submissions {
+                            let prov = provider_arc.clone();
+                            join_set.spawn(async move {
+                                let result = wait_for_atomic_receipt(prov, submit_result).await;
+                                (result, pair_sym, buy_dex, sell_dex)
+                            });
+                        }
+
+                        // Collect all results
+                        while let Some(join_result) = join_set.join_next().await {
+                            if let Ok((result, pair_sym, buy_dex, sell_dex)) = join_result {
+                                if result.success {
+                                    stats.block_opps_succeeded += 1;
+                                    route_cooldown.record_success(&pair_sym, buy_dex, sell_dex);
+                                } else {
+                                    route_cooldown.record_failure(&pair_sym, buy_dex, sell_dex, current_block);
+                                }
+                                info!(
+                                    "PARALLEL RECEIPT: {} | {} | net=${:.4} | {}ms",
+                                    pair_sym,
+                                    if result.success { "SUCCESS" } else { "FAIL" },
+                                    result.net_profit_usd,
+                                    result.execution_time_ms
+                                );
+                            }
+                        }
+                    }
+                } else {
+                // ── SEQUENTIAL PATH (default): try one at a time ──
                 for (rank, (idx, quoted_profit)) in execution_order.iter().enumerate() {
                     let opp = &opportunities[*idx];
                     if let Some(qp) = quoted_profit {
@@ -1006,9 +1126,11 @@ async fn main() -> Result<()> {
                         );
                     }
 
+                    stats.block_opps_executed += 1;
                     match executor.execute(opp).await {
                         Ok(result) => {
                             if result.success {
+                                stats.block_opps_succeeded += 1;
                                 info!(
                                     "Trade complete: {} | Net profit: ${:.2} | Time: {}ms",
                                     result.opportunity,
@@ -1095,6 +1217,7 @@ async fn main() -> Result<()> {
                         }
                     }
                 }
+                } // end else (sequential path)
             }
     } // end block scope
     } // end inner block-processing loop
@@ -1168,8 +1291,18 @@ fn build_mempool_arb_opportunity(
             effective_trade_size = effective_trade_size.min(cap);
         }
     }
+    // Dynamic USD→raw-token conversion: divide by quote_usd_price for non-stablecoin quotes.
+    // Uses u128 to prevent overflow: $500 * 1e18 = 5e20 > u64::MAX (1.84e19).
+    let quote_token_addr = if quote_token_is_token0 { token0 } else { token1 };
+    let quote_usd_price = config.quote_token_usd_price(&quote_token_addr);
+    let decimal_multiplier = 10_f64.powi(quote_decimals as i32);
     let trade_size = U256::from(
-        (effective_trade_size * 10_f64.powi(quote_decimals as i32)) as u64
+        (effective_trade_size / quote_usd_price * decimal_multiplier) as u128
+    );
+
+    // Pre-compute min_profit_raw in raw quote token units (same formula as detector).
+    let min_profit_raw = U256::from(
+        (config.mempool_min_profit_usd / quote_usd_price * decimal_multiplier) as u128
     );
 
     let pair = TradingPair::new(token0, token1, opp.pair_symbol.clone());
@@ -1189,6 +1322,7 @@ fn build_mempool_arb_opportunity(
     arb.token0_decimals = t0_dec;
     arb.token1_decimals = t1_dec;
     arb.quote_token_is_token0 = quote_token_is_token0;
+    arb.min_profit_raw = min_profit_raw;
 
     Some(arb)
 }

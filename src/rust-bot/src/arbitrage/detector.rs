@@ -44,6 +44,9 @@ struct UnifiedPool {
     /// Per-pool USD trade size cap (from whitelist or global default).
     /// Adaptive sizing: min(buy_pool, sell_pool) determines effective trade size.
     max_trade_size_usd: f64,
+    /// Decimals of the quote token (6 for USDC/USDT, 18 for WETH).
+    /// Used for USD→raw-token conversion (trade_size, min_profit_raw, liquidity check).
+    quote_decimals: u8,
 }
 
 /// Opportunity detector for cross-DEX arbitrage
@@ -161,6 +164,13 @@ impl OpportunityDetector {
                 continue; // Neither token is a known quote token — skip
             };
 
+            // Quote token decimals: if qt is token0, use token0_decimals; else token1_decimals
+            let q_decimals = if qt == pool.pair.token0 {
+                pool.token0_decimals
+            } else {
+                pool.token1_decimals
+            };
+
             // Per-pool trade size cap (adaptive sizing)
             let pool_max = self.whitelist.max_trade_size_for(&pool.address)
                 .unwrap_or(self.config.max_trade_size_usd);
@@ -176,6 +186,7 @@ impl OpportunityDetector {
                 liquidity: pool.liquidity,
                 quote_token: qt,
                 max_trade_size_usd: pool_max,
+                quote_decimals: q_decimals,
             });
         }
 
@@ -219,6 +230,13 @@ impl OpportunityDetector {
                 continue; // Neither token is a known quote token — skip
             };
 
+            // Quote token decimals: if qt is token0, use token0_decimals; else token1_decimals
+            let q_decimals = if qt == pool.pair.token0 {
+                pool.token0_decimals
+            } else {
+                pool.token1_decimals
+            };
+
             // Per-pool trade size cap (adaptive sizing)
             let pool_max = self.whitelist.max_trade_size_for(&pool.address)
                 .unwrap_or(self.config.max_trade_size_usd);
@@ -234,6 +252,7 @@ impl OpportunityDetector {
                 liquidity,
                 quote_token: qt,
                 max_trade_size_usd: pool_max,
+                quote_decimals: q_decimals,
             });
         }
 
@@ -326,10 +345,17 @@ impl OpportunityDetector {
                     continue;
                 }
 
+                // Dynamic USD→raw-token conversion factor:
+                // quote_usd_price = 1.0 for stablecoins, weth_price_usd for WETH
+                // quote_decimals = 6 for USDC/USDT, 18 for WETH
+                let quote_usd_price = self.config.quote_token_usd_price(&buy_pool.quote_token);
+                let quote_decimals = buy_pool.quote_decimals;
+                let decimal_multiplier = 10_f64.powi(quote_decimals as i32);
+
                 // Liquidity safety check: proportional to effective trade size (not global max).
                 // Ensures both pools can absorb the capped trade size.
                 // V3 liquidity is in sqrt(token0 * token1) units — this is a rough floor.
-                let min_liquidity = (effective_trade_size * 1e6) as u128;
+                let min_liquidity = (effective_trade_size / quote_usd_price * decimal_multiplier) as u128;
                 if buy_pool.liquidity < min_liquidity || sell_pool.liquidity < min_liquidity {
                     debug!(
                         "Skipping {} {:?}<->{:?} - pool liquidity too low for ${:.0} trade: buy_liq={}, sell_liq={}",
@@ -338,6 +364,15 @@ impl OpportunityDetector {
                     );
                     continue;
                 }
+
+                // Pre-compute trade_size and min_profit_raw in raw quote token units.
+                // Uses u128 to prevent overflow: $500 * 1e18 = 5e20 > u64::MAX (1.84e19).
+                let trade_size_raw = U256::from(
+                    (effective_trade_size / quote_usd_price * decimal_multiplier) as u128
+                );
+                let min_profit_raw = U256::from(
+                    (scaled_min_profit / quote_usd_price * decimal_multiplier) as u128
+                );
 
                 info!(
                     "🎯 OPPORTUNITY: {} | Buy {:?} ({:.2}%) @ {:.6} | Sell {:?} ({:.2}%) @ {:.6} | Spread {:.2}% | Net ${:.2} | Size ${:.0}",
@@ -359,7 +394,7 @@ impl OpportunityDetector {
                     sell_price: sell_pool.price,
                     spread_percent: executable_spread * 100.0,
                     estimated_profit: net_profit,
-                    trade_size: U256::from((effective_trade_size * 1e6) as u64),  // USDC has 6 decimals
+                    trade_size: trade_size_raw,
                     timestamp: std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap()
@@ -371,6 +406,7 @@ impl OpportunityDetector {
                     buy_pool_liquidity: Some(buy_pool.liquidity),
                     quote_token_is_token0: quote_is_token0,
                     min_profit_usd: scaled_min_profit,
+                    min_profit_raw,
                 });
             }
         }
@@ -460,6 +496,7 @@ impl OpportunityDetector {
             buy_pool_liquidity: None,
             quote_token_is_token0: true, // V2 pools: default assumption (USDC is token0)
             min_profit_usd: 0.0, // Legacy V2 path: use global min_profit
+            min_profit_raw: U256::ZERO, // Legacy V2 path: executor falls back to 1e6
         })
     }
 
@@ -641,6 +678,7 @@ mod tests {
             arb_executor_address: None,
             skip_multicall_prescreen: false,
             route_cooldown_blocks: 10,
+            cooldown_max_strikes: 3,
             private_rpc_url: None,
             mempool_monitor_mode: "off".to_string(),
             mempool_min_profit_usd: 0.05,
@@ -651,6 +689,8 @@ mod tests {
             quote_token_address_native: None,
             ws_rpc_url: None,
             quote_token_address_usdt: None,
+            quote_token_address_weth: None,
+            weth_price_usd: 3300.0,
         }
     }
 
