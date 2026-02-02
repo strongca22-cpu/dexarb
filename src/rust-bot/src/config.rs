@@ -109,6 +109,11 @@ fn load_config_inner() -> Result<BotConfig> {
         .ok()
         .and_then(|s| Address::from_str(&s).ok());
 
+    // Tertiary quote token (USDT on Polygon — 6 decimals, same as USDC)
+    let quote_token_address_usdt = std::env::var("QUOTE_TOKEN_ADDRESS_USDT")
+        .ok()
+        .and_then(|s| Address::from_str(&s).ok());
+
     // Native token price — must resolve before chain_name is moved into BotConfig
     let native_token_price_usd: f64 = std::env::var("NATIVE_TOKEN_PRICE_USD")
         .ok()
@@ -233,5 +238,11 @@ fn load_config_inner() -> Result<BotConfig> {
 
         native_token_price_usd,
         quote_token_address_native,
+
+        // Separate WS RPC URL for mempool monitor (optional).
+        // When RPC_URL is IPC, mempool monitor needs WS. Falls back to RPC_URL.
+        ws_rpc_url: std::env::var("WS_RPC_URL").ok(),
+
+        quote_token_address_usdt,
     })
 }

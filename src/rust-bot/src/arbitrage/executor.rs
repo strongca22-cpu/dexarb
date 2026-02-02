@@ -436,10 +436,15 @@ impl<P: Provider + 'static> TradeExecutor<P> {
         let fee_buy = opportunity.buy_dex.atomic_fee();
         let fee_sell = opportunity.sell_dex.atomic_fee();
 
-        // minProfit in token0 raw units
-        // Convert min_profit_usd to token0 units (USDC = 6 dec, 1 USDC = 1e6)
-        // For non-stablecoin base tokens this would need a price oracle
-        let min_profit_raw = U256::from((self.config.min_profit_usd * 1e6) as u64);
+        // minProfit in token0 raw units (on-chain revert threshold).
+        // Uses per-opportunity scaled min_profit when set (adaptive sizing),
+        // falls back to global config.min_profit_usd (backwards compat).
+        let effective_min_profit = if opportunity.min_profit_usd > 0.0 {
+            opportunity.min_profit_usd
+        } else {
+            self.config.min_profit_usd
+        };
+        let min_profit_raw = U256::from((effective_min_profit * 1e6) as u64);
 
         info!(
             "  routerBuy={:?} feeBuy={} | routerSell={:?} feeSell={} | amountIn={} | minProfit={}",

@@ -24,4 +24,4 @@ pub mod simulator;
 pub mod types;
 
 pub use monitor::{run_observation, run_execution};
-pub use types::{MempoolMode, MempoolSignal};
+pub use types::{CachedOpportunity, HybridCache, MempoolMode, MempoolSignal};

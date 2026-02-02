@@ -24,7 +24,8 @@
 //!     - Uniswap V3 SwapMath.sol: computeSwapStep
 
 use alloy::primitives::{Address, TxHash, U256};
-use tracing::{debug, warn};
+use std::collections::{HashMap, HashSet};
+use tracing::{debug, info, warn};
 
 use crate::pool::PoolStateManager;
 use crate::types::{BotConfig, DexType, PoolState, V3PoolState};
@@ -40,18 +41,92 @@ const Q96: u128 = 1u128 << 96;
 const V2_FEE_NUMERATOR: u64 = 997;
 const V2_FEE_DENOMINATOR: u64 = 1000;
 
-/// Polygon token addresses — hardcoded for narrow Phase 2 scope
-const WETH_POLYGON: &str = "7ceb23fd6bc0add59e62ac25578270cff1b9f619";
-const WMATIC_POLYGON: &str = "0d500b1d8e8ef31e21c99d1db9a6444d3adf1270";
-const USDC_POLYGON: &str = "3c499c542cef5e3811e1192ce70d8cc03d5c3359";
-const USDC_E_POLYGON: &str = "2791bca1f2de4661ed88a30c99a7a9449aa84174";
+// ── Data-Driven Pair Identification ─────────────────────────────────────────
+
+/// Data-driven pair identification — built from PoolStateManager at startup.
+/// Automatically covers all whitelisted pairs (V3 + V2). When new pairs are
+/// added to the whitelist, they're automatically picked up on next restart.
+pub struct PairLookup {
+    /// Lowercase hex (no 0x prefix) → pair symbol. Only non-quote base tokens.
+    /// e.g., "7ceb23..." → "WETH/USDC", "b33eaa..." → "UNI/USDC"
+    token_to_pair: HashMap<String, String>,
+    /// Lowercase hex quote tokens (USDC.e + native USDC)
+    quote_tokens: HashSet<String>,
+}
+
+impl PairLookup {
+    /// Build pair lookup from current pool state.
+    /// Must be called after pools are synced (PoolStateManager populated).
+    pub fn from_pool_state(state: &PoolStateManager, config: &BotConfig) -> Self {
+        let mut token_to_pair = HashMap::new();
+        let mut quote_tokens = HashSet::new();
+
+        // Collect quote token addresses (lowercase hex, no 0x prefix)
+        let qt_addr = format!("{:x}", config.quote_token_address);
+        quote_tokens.insert(qt_addr);
+        if let Some(native) = config.quote_token_address_native {
+            quote_tokens.insert(format!("{:x}", native));
+        }
+        if let Some(usdt) = config.quote_token_address_usdt {
+            quote_tokens.insert(format!("{:x}", usdt));
+        }
+
+        // V3 pools: extract non-quote token → pair symbol mapping
+        for pool in state.get_all_v3_pools() {
+            let t0 = format!("{:x}", pool.pair.token0);
+            let t1 = format!("{:x}", pool.pair.token1);
+            if quote_tokens.contains(&t0) {
+                token_to_pair.entry(t1).or_insert_with(|| pool.pair.symbol.clone());
+            } else if quote_tokens.contains(&t1) {
+                token_to_pair.entry(t0).or_insert_with(|| pool.pair.symbol.clone());
+            }
+        }
+
+        // V2 pools: same logic
+        for pool in state.get_all_pools() {
+            let t0 = format!("{:x}", pool.pair.token0);
+            let t1 = format!("{:x}", pool.pair.token1);
+            if quote_tokens.contains(&t0) {
+                token_to_pair.entry(t1).or_insert_with(|| pool.pair.symbol.clone());
+            } else if quote_tokens.contains(&t1) {
+                token_to_pair.entry(t0).or_insert_with(|| pool.pair.symbol.clone());
+            }
+        }
+
+        info!(
+            "PairLookup: {} base tokens, {} quote tokens, {} unique pairs",
+            token_to_pair.len(),
+            quote_tokens.len(),
+            token_to_pair.values().collect::<HashSet<_>>().len(),
+        );
+
+        Self { token_to_pair, quote_tokens }
+    }
+
+    /// Identify pair from swap token addresses (lowercase hex, no 0x prefix).
+    /// Returns the pair symbol (e.g., "WETH/USDC") or None if unrecognized.
+    pub fn identify_pair(&self, in_hex: &str, out_hex: &str) -> Option<String> {
+        if self.quote_tokens.contains(in_hex) {
+            self.token_to_pair.get(out_hex).cloned()
+        } else if self.quote_tokens.contains(out_hex) {
+            self.token_to_pair.get(in_hex).cloned()
+        } else {
+            None
+        }
+    }
+
+    /// Number of unique pairs covered.
+    pub fn pair_count(&self) -> usize {
+        self.token_to_pair.values().collect::<HashSet<_>>().len()
+    }
+}
 
 // ── Pool Identification ──────────────────────────────────────────────────────
 
 /// Identify which monitored pair a decoded pending swap affects.
 ///
 /// Returns (DexType, pair_symbol, zero_for_one) if the swap is:
-/// - On a pair we monitor (WETH/USDC or WMATIC/USDC)
+/// - On a pair we monitor (any whitelisted pair via PairLookup)
 /// - An exact-input function (not exact-output)
 /// - Has a decodable amount_in
 ///
@@ -60,6 +135,7 @@ pub fn identify_affected_pool(
     decoded: &DecodedSwap,
     router_name: &str,
     state_manager: &PoolStateManager,
+    pair_lookup: &PairLookup,
 ) -> Option<(DexType, String, bool)> {
     // Must have token_in, token_out, and amount_in
     let token_in = decoded.token_in?;
@@ -75,8 +151,8 @@ pub fn identify_affected_pool(
     let in_hex = format!("{:x}", token_in);
     let out_hex = format!("{:x}", token_out);
 
-    // Identify the pair
-    let pair_symbol = match identify_pair(&in_hex, &out_hex) {
+    // Identify the pair via data-driven lookup (covers all whitelisted pairs)
+    let pair_symbol = match pair_lookup.identify_pair(&in_hex, &out_hex) {
         Some(p) => p,
         None => {
             return None;
@@ -128,25 +204,6 @@ fn is_exact_output(function_name: &str) -> bool {
         || function_name.contains("ForExactTokens")
         || function_name.contains("swapExactETHForTokens")
         || function_name == "multicall(opaque)"
-}
-
-/// Identify pair symbol from token addresses (lowercase hex, no 0x prefix).
-/// Returns None if the pair is not in Phase 2 scope.
-fn identify_pair(in_hex: &str, out_hex: &str) -> Option<String> {
-    let is_in_weth = in_hex == WETH_POLYGON;
-    let is_out_weth = out_hex == WETH_POLYGON;
-    let is_in_wmatic = in_hex == WMATIC_POLYGON;
-    let is_out_wmatic = out_hex == WMATIC_POLYGON;
-    let is_in_quote = in_hex == USDC_POLYGON || in_hex == USDC_E_POLYGON;
-    let is_out_quote = out_hex == USDC_POLYGON || out_hex == USDC_E_POLYGON;
-
-    if (is_in_weth && is_out_quote) || (is_in_quote && is_out_weth) {
-        Some("WETH/USDC".to_string())
-    } else if (is_in_wmatic && is_out_quote) || (is_in_quote && is_out_wmatic) {
-        Some("WMATIC/USDC".to_string())
-    } else {
-        None
-    }
 }
 
 /// Map router name + fee tier to DexType variant.
@@ -840,24 +897,91 @@ mod tests {
     }
 
     #[test]
-    fn test_identify_pair() {
+    fn test_pair_lookup_basic() {
+        // Build a PairLookup with known tokens
+        let mut token_to_pair = HashMap::new();
+        let mut quote_tokens = HashSet::new();
+
+        // Polygon USDC variants
+        quote_tokens.insert("3c499c542cef5e3811e1192ce70d8cc03d5c3359".to_string()); // native USDC
+        quote_tokens.insert("2791bca1f2de4661ed88a30c99a7a9449aa84174".to_string()); // USDC.e
+
+        // Base tokens
+        token_to_pair.insert(
+            "7ceb23fd6bc0add59e62ac25578270cff1b9f619".to_string(),
+            "WETH/USDC".to_string(),
+        );
+        token_to_pair.insert(
+            "0d500b1d8e8ef31e21c99d1db9a6444d3adf1270".to_string(),
+            "WMATIC/USDC".to_string(),
+        );
+        token_to_pair.insert(
+            "b33eaad8d922b1083446dc23f610c2567fb5180f".to_string(),
+            "UNI/USDC".to_string(),
+        );
+
+        let lookup = PairLookup { token_to_pair, quote_tokens };
+
+        // WETH → native USDC
         assert_eq!(
-            identify_pair(WETH_POLYGON, USDC_POLYGON),
+            lookup.identify_pair(
+                "7ceb23fd6bc0add59e62ac25578270cff1b9f619",
+                "3c499c542cef5e3811e1192ce70d8cc03d5c3359"
+            ),
             Some("WETH/USDC".to_string())
         );
+        // native USDC → WETH (reversed direction)
         assert_eq!(
-            identify_pair(USDC_POLYGON, WETH_POLYGON),
+            lookup.identify_pair(
+                "3c499c542cef5e3811e1192ce70d8cc03d5c3359",
+                "7ceb23fd6bc0add59e62ac25578270cff1b9f619"
+            ),
             Some("WETH/USDC".to_string())
         );
+        // WMATIC → USDC.e
         assert_eq!(
-            identify_pair(WMATIC_POLYGON, USDC_E_POLYGON),
+            lookup.identify_pair(
+                "0d500b1d8e8ef31e21c99d1db9a6444d3adf1270",
+                "2791bca1f2de4661ed88a30c99a7a9449aa84174"
+            ),
             Some("WMATIC/USDC".to_string())
         );
-        // Unknown pair
+        // UNI → native USDC
         assert_eq!(
-            identify_pair("deadbeef", USDC_POLYGON),
+            lookup.identify_pair(
+                "b33eaad8d922b1083446dc23f610c2567fb5180f",
+                "3c499c542cef5e3811e1192ce70d8cc03d5c3359"
+            ),
+            Some("UNI/USDC".to_string())
+        );
+        // Unknown token
+        assert_eq!(
+            lookup.identify_pair(
+                "deadbeef00000000000000000000000000000000",
+                "3c499c542cef5e3811e1192ce70d8cc03d5c3359"
+            ),
             None
         );
+        // Neither is a quote token
+        assert_eq!(
+            lookup.identify_pair(
+                "7ceb23fd6bc0add59e62ac25578270cff1b9f619",
+                "0d500b1d8e8ef31e21c99d1db9a6444d3adf1270"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn test_pair_lookup_count() {
+        let mut token_to_pair = HashMap::new();
+        let quote_tokens = HashSet::new();
+        token_to_pair.insert("aaa".to_string(), "WETH/USDC".to_string());
+        token_to_pair.insert("bbb".to_string(), "WMATIC/USDC".to_string());
+        token_to_pair.insert("ccc".to_string(), "WETH/USDC".to_string()); // Duplicate pair
+
+        let lookup = PairLookup { token_to_pair, quote_tokens };
+        assert_eq!(lookup.pair_count(), 2); // 2 unique pairs
     }
 
     #[test]

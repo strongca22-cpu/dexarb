@@ -75,6 +75,11 @@ pub struct WhitelistPool {
     pub added: Option<String>,
     #[serde(default)]
     pub last_verified: Option<String>,
+    /// Per-pool maximum trade size in USD. When set, the detector caps
+    /// trade_size to this amount for any opportunity involving this pool.
+    /// Pools without this field use config.max_trade_size_usd (global default).
+    #[serde(default)]
+    pub max_trade_size_usd: Option<f64>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -151,6 +156,8 @@ pub struct WhitelistFilter {
     blacklisted_pairs: HashSet<String>,
     /// Per-pool minimum liquidity overrides (lowercase hex → u128)
     pool_min_liquidity: std::collections::HashMap<String, u128>,
+    /// Per-pool maximum trade size in USD (lowercase hex → f64)
+    pool_max_trade_size: std::collections::HashMap<String, f64>,
     /// Per-tier minimum liquidity defaults
     tier_min_liquidity: std::collections::HashMap<u32, u128>,
     /// Default minimum liquidity
@@ -220,6 +227,17 @@ impl WhitelistFilter {
             })
             .collect();
 
+        // Per-pool max trade size (USD)
+        let pool_max_trade_size: std::collections::HashMap<String, f64> = raw
+            .whitelist
+            .pools
+            .iter()
+            .filter_map(|p| {
+                p.max_trade_size_usd
+                    .map(|size| (normalize_addr(&p.address), size))
+            })
+            .collect();
+
         // Per-tier min liquidity
         let mut tier_min_liquidity = std::collections::HashMap::new();
         if let Some(ref thresholds) = raw.config.liquidity_thresholds {
@@ -254,6 +272,7 @@ impl WhitelistFilter {
             blacklisted_tiers,
             blacklisted_pairs,
             pool_min_liquidity,
+            pool_max_trade_size,
             tier_min_liquidity,
             default_min_liquidity,
             enforcement,
@@ -316,6 +335,13 @@ impl WhitelistFilter {
         }
 
         self.default_min_liquidity
+    }
+
+    /// Get the maximum trade size (in USD) for a specific pool.
+    /// Returns Some(cap) if pool has a per-pool cap, None to use global default.
+    pub fn max_trade_size_for(&self, address: &Address) -> Option<f64> {
+        let addr = format!("{:?}", address).to_lowercase();
+        self.pool_max_trade_size.get(&addr).copied()
     }
 
     /// Number of active whitelisted pools.
@@ -471,5 +497,65 @@ mod tests {
         let f = test_filter();
         let addr = Address::from_str("0x0000000000000000000000000000000000000001").unwrap();
         assert_eq!(f.min_liquidity_for(&addr, 500), 1_000_000_000);
+    }
+
+    fn test_filter_with_trade_caps() -> WhitelistFilter {
+        let json = r#"{
+            "version": "1.7",
+            "last_updated": "2026-02-02T00:00:00Z",
+            "config": {
+                "default_min_liquidity": 1000000000,
+                "whitelist_enforcement": "strict"
+            },
+            "whitelist": {
+                "pools": [
+                    {
+                        "address": "0x45dda9cb7c25131df268515131f647d726f50608",
+                        "pair": "WETH/USDC",
+                        "dex": "UniswapV3",
+                        "fee_tier": 500,
+                        "status": "active",
+                        "min_liquidity": 5000000000
+                    },
+                    {
+                        "address": "0x74d3c85df4dbd03c7c12f7649faa6457610e7604",
+                        "pair": "UNI/USDC",
+                        "dex": "UniswapV3",
+                        "fee_tier": 3000,
+                        "status": "active",
+                        "min_liquidity": 3000000000,
+                        "max_trade_size_usd": 200.0
+                    }
+                ]
+            },
+            "blacklist": {
+                "pools": [],
+                "fee_tiers": [],
+                "pairs": []
+            }
+        }"#;
+        let raw: PoolWhitelist = serde_json::from_str(json).unwrap();
+        WhitelistFilter::from_config(raw)
+    }
+
+    #[test]
+    fn test_max_trade_size_with_cap() {
+        let f = test_filter_with_trade_caps();
+        let addr = Address::from_str("0x74d3c85df4dbd03c7c12f7649faa6457610e7604").unwrap();
+        assert_eq!(f.max_trade_size_for(&addr), Some(200.0));
+    }
+
+    #[test]
+    fn test_max_trade_size_without_cap() {
+        let f = test_filter_with_trade_caps();
+        let addr = Address::from_str("0x45dda9cb7c25131df268515131f647d726f50608").unwrap();
+        assert_eq!(f.max_trade_size_for(&addr), None);
+    }
+
+    #[test]
+    fn test_max_trade_size_unknown_pool() {
+        let f = test_filter_with_trade_caps();
+        let addr = Address::from_str("0x0000000000000000000000000000000000000099").unwrap();
+        assert_eq!(f.max_trade_size_for(&addr), None);
     }
 }

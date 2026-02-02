@@ -41,6 +41,9 @@ struct UnifiedPool {
     /// Pools with different quote tokens must NOT be compared for arb —
     /// ArbExecutor.sol starts and ends with the same token.
     quote_token: Address,
+    /// Per-pool USD trade size cap (from whitelist or global default).
+    /// Adaptive sizing: min(buy_pool, sell_pool) determines effective trade size.
+    max_trade_size_usd: f64,
 }
 
 /// Opportunity detector for cross-DEX arbitrage
@@ -158,6 +161,10 @@ impl OpportunityDetector {
                 continue; // Neither token is a known quote token — skip
             };
 
+            // Per-pool trade size cap (adaptive sizing)
+            let pool_max = self.whitelist.max_trade_size_for(&pool.address)
+                .unwrap_or(self.config.max_trade_size_usd);
+
             unified_pools.push(UnifiedPool {
                 dex: pool.dex,
                 price,
@@ -168,6 +175,7 @@ impl OpportunityDetector {
                 token1_decimals: pool.token1_decimals,
                 liquidity: pool.liquidity,
                 quote_token: qt,
+                max_trade_size_usd: pool_max,
             });
         }
 
@@ -211,6 +219,10 @@ impl OpportunityDetector {
                 continue; // Neither token is a known quote token — skip
             };
 
+            // Per-pool trade size cap (adaptive sizing)
+            let pool_max = self.whitelist.max_trade_size_for(&pool.address)
+                .unwrap_or(self.config.max_trade_size_usd);
+
             unified_pools.push(UnifiedPool {
                 dex: pool.dex,
                 price,
@@ -221,6 +233,7 @@ impl OpportunityDetector {
                 token1_decimals: pool.token1_decimals,
                 liquidity,
                 quote_token: qt,
+                max_trade_size_usd: pool_max,
             });
         }
 
@@ -293,38 +306,49 @@ impl OpportunityDetector {
                     continue;
                 }
 
-                // Estimate profit
-                let gross = executable_spread * self.config.max_trade_size_usd;
+                // Per-pool adaptive trade sizing: cap to the thinner pool's safe limit
+                let effective_trade_size = buy_pool.max_trade_size_usd
+                    .min(sell_pool.max_trade_size_usd);
+
+                // Estimate profit using effective (per-pool-capped) trade size
+                let gross = executable_spread * effective_trade_size;
                 let slippage_estimate = gross * 0.01;  // 1% slippage estimate (V3 concentrated liquidity has <0.01% at $140-500)
                 let net_profit = gross - self.config.estimated_gas_cost_usd - slippage_estimate;
 
-                if net_profit < self.config.min_profit_usd {
+                // Scale min_profit proportionally to trade size, with floor at 2x gas cost.
+                // $5K trade @ $5 min_profit → $200 trade needs only $0.20 min_profit.
+                // Floor ensures we never accept trades that barely cover gas.
+                let scale_factor = effective_trade_size / self.config.max_trade_size_usd;
+                let scaled_min_profit = (self.config.min_profit_usd * scale_factor)
+                    .max(self.config.estimated_gas_cost_usd * 2.0);
+
+                if net_profit < scaled_min_profit {
                     continue;
                 }
 
-                // Additional liquidity safety check:
-                // Ensure both pools can absorb the trade size
-                // V3 liquidity is in sqrt(token0 * token1) units (not USD)
-                // A rough minimum: trade_size_usd * 1e6 as a very conservative floor
-                let min_liquidity = (self.config.max_trade_size_usd * 1e6) as u128;
+                // Liquidity safety check: proportional to effective trade size (not global max).
+                // Ensures both pools can absorb the capped trade size.
+                // V3 liquidity is in sqrt(token0 * token1) units — this is a rough floor.
+                let min_liquidity = (effective_trade_size * 1e6) as u128;
                 if buy_pool.liquidity < min_liquidity || sell_pool.liquidity < min_liquidity {
                     debug!(
                         "Skipping {} {:?}<->{:?} - pool liquidity too low for ${:.0} trade: buy_liq={}, sell_liq={}",
                         pair_symbol, buy_pool.dex, sell_pool.dex,
-                        self.config.max_trade_size_usd, buy_pool.liquidity, sell_pool.liquidity
+                        effective_trade_size, buy_pool.liquidity, sell_pool.liquidity
                     );
                     continue;
                 }
 
                 info!(
-                    "🎯 V3 OPPORTUNITY: {} | Buy {:?} ({:.2}%) @ {:.6} | Sell {:?} ({:.2}%) @ {:.6} | Spread {:.2}% | Net ${:.2}",
+                    "🎯 OPPORTUNITY: {} | Buy {:?} ({:.2}%) @ {:.6} | Sell {:?} ({:.2}%) @ {:.6} | Spread {:.2}% | Net ${:.2} | Size ${:.0}",
                     pair_symbol,
                     buy_pool.dex, buy_pool.fee_percent,
                     buy_pool.price,
                     sell_pool.dex, sell_pool.fee_percent,
                     sell_pool.price,
                     executable_spread * 100.0,
-                    net_profit
+                    net_profit,
+                    effective_trade_size,
                 );
 
                 results.push(ArbitrageOpportunity {
@@ -335,7 +359,7 @@ impl OpportunityDetector {
                     sell_price: sell_pool.price,
                     spread_percent: executable_spread * 100.0,
                     estimated_profit: net_profit,
-                    trade_size: U256::from((self.config.max_trade_size_usd * 1e6) as u64),  // USDC has 6 decimals
+                    trade_size: U256::from((effective_trade_size * 1e6) as u64),  // USDC has 6 decimals
                     timestamp: std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap()
@@ -346,6 +370,7 @@ impl OpportunityDetector {
                     token1_decimals: buy_pool.token1_decimals,
                     buy_pool_liquidity: Some(buy_pool.liquidity),
                     quote_token_is_token0: quote_is_token0,
+                    min_profit_usd: scaled_min_profit,
                 });
             }
         }
@@ -434,6 +459,7 @@ impl OpportunityDetector {
             token1_decimals: 18,
             buy_pool_liquidity: None,
             quote_token_is_token0: true, // V2 pools: default assumption (USDC is token0)
+            min_profit_usd: 0.0, // Legacy V2 path: use global min_profit
         })
     }
 
@@ -623,6 +649,8 @@ mod tests {
             mempool_gas_profit_cap: 0.50,
             native_token_price_usd: 0.50,
             quote_token_address_native: None,
+            ws_rpc_url: None,
+            quote_token_address_usdt: None,
         }
     }
 

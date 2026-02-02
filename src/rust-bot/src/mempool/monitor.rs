@@ -120,12 +120,20 @@ async fn run_observation_impl(
             .join(", ")
     );
 
+    // Build data-driven pair lookup from all whitelisted pools (V2 + V3).
+    // Replaces hardcoded 2-pair limit — now covers all adaptive/promoted pairs.
+    let pair_lookup = simulator::PairLookup::from_pool_state(&pool_state, &config);
+    info!(
+        "Mempool: PairLookup built — {} unique pairs from pool state",
+        pair_lookup.pair_count()
+    );
+
     // Reconnect loop — if subscriptions drop, reconnect and continue
     let mut reconnects = 0u32;
     const MAX_RECONNECTS: u32 = 50;
 
     loop {
-        match run_observation_inner(&config, &data_dir, &router_hex, &router_lookup, &pool_state, &signal_tx).await {
+        match run_observation_inner(&config, &data_dir, &router_hex, &router_lookup, &pool_state, &signal_tx, &pair_lookup).await {
             Ok(()) => {
                 // Clean exit (shouldn't happen in observe mode)
                 info!("Mempool monitor exited cleanly");
@@ -162,17 +170,20 @@ async fn run_observation_inner(
     router_lookup: &HashMap<Address, String>,
     pool_state: &PoolStateManager,
     signal_tx: &Option<mpsc::Sender<MempoolSignal>>,
+    pair_lookup: &simulator::PairLookup,
 ) -> Result<()> {
-    // Create WS provider for pending tx subscription
+    // Create WS provider for pending tx subscription.
+    // Uses WS_RPC_URL if set (for when RPC_URL is IPC), falls back to RPC_URL.
+    let ws_url = config.ws_rpc_url.as_deref().unwrap_or(&config.rpc_url);
     let sub_provider = ProviderBuilder::new()
-        .connect_ws(WsConnect::new(&config.rpc_url))
+        .connect_ws(WsConnect::new(ws_url))
         .await
         .context("Mempool WS connect failed")?;
 
     // Create separate WS provider for RPC calls (get_block, get_block_number)
     // Avoids borrow conflicts with the subscription stream.
     let rpc_provider = ProviderBuilder::new()
-        .connect_ws(WsConnect::new(&config.rpc_url))
+        .connect_ws(WsConnect::new(ws_url))
         .await
         .context("Mempool RPC WS connect failed")?;
 
@@ -292,7 +303,7 @@ async fn run_observation_inner(
                                 // ── Phase 2: Simulate post-swap state ──
                                 if let Some(amount) = decoded.amount_in {
                                     if let Some((dex, pair_sym, zero_for_one)) =
-                                        simulator::identify_affected_pool(&decoded, &router_name, pool_state)
+                                        simulator::identify_affected_pool(&decoded, &router_name, pool_state, pair_lookup)
                                     {
                                         let sim_result = if dex.is_v3() {
                                             pool_state

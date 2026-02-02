@@ -354,6 +354,10 @@ pub struct ArbitrageOpportunity {
     /// true:  trade goes token0→token1→token0 (USDC is token0)
     /// false: trade goes token1→token0→token1 (USDC is token1)
     pub quote_token_is_token0: bool,
+    /// Per-opportunity minimum profit threshold (scaled to trade size).
+    /// Used by executor for on-chain revert threshold (ArbExecutor minProfit).
+    /// 0.0 means "use config.min_profit_usd" (backwards compat).
+    pub min_profit_usd: f64,
 }
 
 impl ArbitrageOpportunity {
@@ -386,6 +390,7 @@ impl ArbitrageOpportunity {
             token1_decimals: 18,
             buy_pool_liquidity: None,
             quote_token_is_token0: true,
+            min_profit_usd: 0.0,
         }
     }
 
@@ -577,14 +582,29 @@ pub struct BotConfig {
     // Pools with different quote tokens are never compared against each other.
     // Polygon: USDC.e (primary) + native USDC (0x3c499c...) (secondary)
     pub quote_token_address_native: Option<Address>,
+
+    // Separate WebSocket RPC URL for mempool monitor.
+    // When RPC_URL is an IPC path (local Bor node), the mempool monitor still
+    // needs a WS endpoint (Alchemy's alchemy_pendingTransactions requires WS,
+    // local Bor WS at ws://127.0.0.1:8546).
+    // Falls back to rpc_url if not set.
+    pub ws_rpc_url: Option<String>,
+
+    // Tertiary quote token address (USDT on Polygon).
+    // When set, pools using USDT are eligible for arbitrage.
+    // USDT arbs are isolated: USDT pools only compare against other USDT pools.
+    // Pools with different quote tokens are never compared against each other.
+    // Polygon USDT: 0xc2132D05D31c914a87C6611C10748AEb04B58e8F (6 decimals)
+    pub quote_token_address_usdt: Option<Address>,
 }
 
 impl BotConfig {
-    /// Check if an address is any recognized quote token (primary or native variant).
+    /// Check if an address is any recognized quote token (primary, native, or USDT).
     /// Used by detector, simulator, and mempool handler to determine swap direction.
     pub fn is_quote_token(&self, addr: &Address) -> bool {
         *addr == self.quote_token_address
             || self.quote_token_address_native.map_or(false, |a| a == *addr)
+            || self.quote_token_address_usdt.map_or(false, |a| a == *addr)
     }
 }
 

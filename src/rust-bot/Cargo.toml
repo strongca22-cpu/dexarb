@@ -81,3 +81,7 @@ path = "src/bin/data_collector.rs"
 [[bin]]
 name = "tax-export"
 path = "src/bin/tax_export.rs"
+
+[[bin]]
+name = "backfill-events"
+path = "src/bin/backfill_events.rs"

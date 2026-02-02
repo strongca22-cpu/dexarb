@@ -13,10 +13,10 @@
 //!     - alloy (Address, TxHash, U256)
 //!     - chrono (timestamps)
 
-use crate::types::DexType;
+use crate::types::{ArbitrageOpportunity, DexType};
 use alloy::primitives::{Address, TxHash, U256};
 use std::collections::HashMap;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// Mempool monitor operating mode (set via MEMPOOL_MONITOR env var)
 #[derive(Debug, Clone, PartialEq)]
@@ -303,4 +303,75 @@ pub struct MempoolSignal {
     pub trigger_max_priority_fee: Option<U256>,
     /// When the signal was created (for staleness detection)
     pub seen_at: Instant,
+}
+
+// ── Phase 4: Hybrid Pipeline Types ──────────────────────────────────────────
+
+/// Cached mempool opportunity awaiting trigger tx confirmation in a block.
+/// The hybrid pipeline caches these when a mempool signal arrives, then
+/// executes only after the trigger tx is confirmed (correct ordering).
+pub struct CachedOpportunity {
+    pub trigger_tx_hash: TxHash,
+    pub signal: MempoolSignal,
+    pub arb_opportunity: ArbitrageOpportunity,
+    pub cached_at: Instant,
+}
+
+/// Hybrid cache: stores mempool-derived opportunities keyed by trigger tx hash.
+/// On block confirmation, checks if any cached triggers were included.
+/// Solves the tx ordering problem (arb must fire AFTER trigger confirms).
+pub struct HybridCache {
+    entries: HashMap<TxHash, CachedOpportunity>,
+    // Metrics
+    pub total_cached: u64,
+    pub total_hits: u64,
+    pub total_expired: u64,
+}
+
+impl HybridCache {
+    pub fn new() -> Self {
+        Self {
+            entries: HashMap::new(),
+            total_cached: 0,
+            total_hits: 0,
+            total_expired: 0,
+        }
+    }
+
+    /// Cache a mempool opportunity for later execution on block confirmation.
+    pub fn insert(&mut self, entry: CachedOpportunity) {
+        self.total_cached += 1;
+        self.entries.insert(entry.trigger_tx_hash, entry);
+    }
+
+    /// Check confirmed block tx hashes against cached triggers. Returns hits.
+    pub fn check_block(&mut self, block_tx_hashes: &[TxHash]) -> Vec<CachedOpportunity> {
+        let mut hits = Vec::new();
+        for hash in block_tx_hashes {
+            if let Some(entry) = self.entries.remove(hash) {
+                self.total_hits += 1;
+                hits.push(entry);
+            }
+        }
+        hits
+    }
+
+    /// Remove entries older than TTL. Returns count of expired entries.
+    pub fn cleanup(&mut self, ttl: Duration) -> usize {
+        let before = self.entries.len();
+        self.entries.retain(|_, e| e.cached_at.elapsed() < ttl);
+        let expired = before - self.entries.len();
+        self.total_expired += expired as u64;
+        expired
+    }
+
+    /// Number of entries currently cached.
+    pub fn pending_count(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Whether the cache has any entries worth checking.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
 }

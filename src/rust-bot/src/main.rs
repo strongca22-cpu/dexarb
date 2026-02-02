@@ -35,13 +35,14 @@ use clap::Parser;
 use dexarb_bot::arbitrage::{MulticallQuoter, OpportunityDetector, RouteCooldown, TradeExecutor, VerifiedOpportunity};
 use dexarb_bot::config::load_config_from_file;
 use dexarb_bot::filters::WhitelistFilter;
-use dexarb_bot::mempool::{MempoolMode, MempoolSignal};
+use dexarb_bot::mempool::{CachedOpportunity, HybridCache, MempoolMode, MempoolSignal};
 use dexarb_bot::pool::{PoolStateManager, V2PoolSyncer, V3PoolSyncer, SUSHI_V3_FEE_TIERS, V3_FEE_TIERS};
 use dexarb_bot::types::{ArbitrageOpportunity, DexType, PoolState, TradingPair, V3PoolState};
 use std::collections::HashMap;
 use dexarb_bot::price_logger::PriceLogger;
 use alloy::primitives::{Address, B256, U256, keccak256};
 use alloy::providers::{Provider, ProviderBuilder, WsConnect};
+use alloy::transports::ipc::IpcConnect;
 use alloy::rpc::types::{Filter, Header};
 use alloy::signers::local::PrivateKeySigner;
 use futures::StreamExt;
@@ -51,6 +52,18 @@ use tokio::time::{timeout, Duration};
 use tracing::{error, info, warn, Level};
 use tracing_subscriber;
 use chrono;
+
+/// Connect to a PubSub provider — auto-detects IPC (file path) vs WS (wss:// URL).
+/// Both transports return the same `RootProvider<PubSubFrontend>` type (alloy 1.5).
+/// IPC: sub-millisecond latency for local Bor node. WS: remote Alchemy/infra.
+async fn connect_pubsub(url: &str) -> Result<impl Provider> {
+    if url.starts_with("ws://") || url.starts_with("wss://") {
+        Ok(ProviderBuilder::new().connect_ws(WsConnect::new(url)).await?)
+    } else {
+        // Treat as IPC socket path (e.g., /mnt/polygon-data/bor/bor.ipc)
+        Ok(ProviderBuilder::new().connect_ipc(IpcConnect::new(url.to_string())).await?)
+    }
+}
 
 /// DEX Arbitrage Bot — Multi-Chain (Polygon, Base)
 #[derive(Parser)]
@@ -95,10 +108,10 @@ async fn main() -> Result<()> {
     info!("Poll interval: {}ms", config.poll_interval_ms);
 
     // Initialize provider for RPC calls (sync, Quoter, execution).
-    // A separate WS connection for block subscription is created in the reconnect loop below.
-    info!("Connecting to {} via WebSocket (RPC provider)...", config.chain_name);
-    let ws = WsConnect::new(&config.rpc_url);
-    let provider = ProviderBuilder::new().connect_ws(ws).await?;
+    // A separate connection for block subscription is created in the reconnect loop below.
+    let transport_name = if config.rpc_url.starts_with("ws") { "WebSocket" } else { "IPC" };
+    info!("Connecting to {} via {} (RPC provider)...", config.chain_name, transport_name);
+    let provider = connect_pubsub(&config.rpc_url).await?;
     let provider = Arc::new(provider);
 
     // Verify connection
@@ -489,6 +502,11 @@ async fn main() -> Result<()> {
     let mut total_scans: u64 = 0;
     let mut last_block: u64 = 0;
 
+    // Hybrid pipeline: cache mempool signals, execute when trigger confirms in block.
+    // Solves tx ordering problem (arb fires AFTER trigger, not before).
+    let mut hybrid_cache = HybridCache::new();
+    let hybrid_ttl = Duration::from_secs(30); // ~15 Polygon blocks
+
     // Main monitoring loop — WS block subscription (reacts to new blocks in ~100ms)
     // If subscription drops, bot exits (restart via tmux/supervisor).
     let mut iteration = 0u64;
@@ -501,32 +519,32 @@ async fn main() -> Result<()> {
     const MAX_WS_RECONNECTS: u32 = 50; // ~25 min of retries before full exit
 
     'reconnect: loop {
-    // Create a fresh WS connection for block subscription each reconnect cycle.
+    // Create a fresh PubSub connection for block subscription each reconnect cycle.
     // Scoped to this loop iteration so borrow checker is satisfied when we `break`.
-    let sub_provider = match ProviderBuilder::new().connect_ws(WsConnect::new(&config.rpc_url)).await {
+    let sub_provider = match connect_pubsub(&config.rpc_url).await {
         Ok(p) => p,
         Err(e) => {
             ws_reconnects += 1;
             if ws_reconnects > MAX_WS_RECONNECTS {
-                error!("WS connect failed after {} attempts: {} — exiting", ws_reconnects, e);
+                error!("{} connect failed after {} attempts: {} — exiting", transport_name, ws_reconnects, e);
                 break 'reconnect;
             }
-            warn!("WS connect failed (attempt {}): {} — retrying in 5s...", ws_reconnects, e);
+            warn!("{} connect failed (attempt {}): {} — retrying in 5s...", transport_name, ws_reconnects, e);
             tokio::time::sleep(Duration::from_secs(5)).await;
             continue 'reconnect;
         }
     };
 
-    info!("Subscribing to new blocks via WebSocket (dedicated connection)...");
+    info!("Subscribing to new blocks via {} (dedicated connection)...", transport_name);
     let block_sub = match sub_provider.subscribe_blocks().await {
         Ok(sub) => sub,
         Err(e) => {
             ws_reconnects += 1;
             if ws_reconnects > MAX_WS_RECONNECTS {
-                error!("WS subscribe failed after {} attempts: {} — exiting", ws_reconnects, e);
+                error!("{} subscribe failed after {} attempts: {} — exiting", transport_name, ws_reconnects, e);
                 break 'reconnect;
             }
-            warn!("WS subscribe failed (attempt {}): {} — retrying in 5s...", ws_reconnects, e);
+            warn!("{} subscribe failed (attempt {}): {} — retrying in 5s...", transport_name, ws_reconnects, e);
             tokio::time::sleep(Duration::from_secs(5)).await;
             continue 'reconnect;
         }
@@ -576,7 +594,10 @@ async fn main() -> Result<()> {
         }
     };
 
-    // Handle mempool signal (Phase 3)
+    // Handle mempool signal — HYBRID: cache for execution on block confirmation.
+    // Instead of executing immediately (tx ordering problem: arb fires before trigger
+    // confirms), we build the ArbitrageOpportunity and cache it keyed by trigger tx hash.
+    // When the trigger tx appears in a confirmed block, pool state is updated and we execute.
     if let LoopEvent::Mempool(signal) = event {
         let lead_ms = signal.seen_at.elapsed().as_millis() as u64;
         if lead_ms > 10_000 {
@@ -585,13 +606,9 @@ async fn main() -> Result<()> {
         }
 
         let opp = &signal.opportunity;
-        info!(
-            "MEMPOOL EXEC: processing signal | {} | ${:.2} | {:.3}% | lead={}ms",
-            opp.pair_symbol, opp.arb_est_profit_usd, opp.arb_spread_pct, lead_ms
-        );
 
-        // Convert SimulatedOpportunity → ArbitrageOpportunity
-        let arb_opp = match build_mempool_arb_opportunity(&signal, &state_manager, &config) {
+        // Convert SimulatedOpportunity → ArbitrageOpportunity (pre-build for fast execution on hit)
+        let arb_opp = match build_mempool_arb_opportunity(&signal, &state_manager, &config, &whitelist) {
             Some(o) => o,
             None => {
                 warn!("MEMPOOL SKIP: pool data resolution failed for {}", opp.pair_symbol);
@@ -599,65 +616,18 @@ async fn main() -> Result<()> {
             }
         };
 
-        // Execute via mempool-specific path (skip estimateGas, dynamic gas)
-        let exec_start = std::time::Instant::now();
-        match executor.execute_from_mempool(
-            &arb_opp,
-            signal.trigger_gas_price,
-            signal.trigger_max_priority_fee,
-            config.mempool_min_profit_usd,
-        ).await {
-            Ok(result) => {
-                let exec_ms = exec_start.elapsed().as_millis() as u64;
-                let result_str = if result.success { "SUCCESS" } else { "FAIL" };
-                info!(
-                    "MEMPOOL {}: {} | ${:.4} net | {}ms exec | {}ms lead | tx={}",
-                    result_str, result.opportunity, result.net_profit_usd,
-                    exec_ms, lead_ms,
-                    result.tx_hash.as_deref().unwrap_or("none"),
-                );
+        info!(
+            "HYBRID CACHE: {} | ${:.2} | {:.3}% | trigger={:?} | cache_size={}",
+            opp.pair_symbol, opp.arb_est_profit_usd, opp.arb_spread_pct,
+            opp.tx_hash, hybrid_cache.pending_count() + 1
+        );
 
-                // Route cooldown on failure
-                if !result.success {
-                    route_cooldown.record_failure(
-                        &opp.pair_symbol, opp.arb_buy_dex, opp.arb_sell_dex, last_block
-                    );
-                } else {
-                    route_cooldown.record_success(
-                        &opp.pair_symbol, opp.arb_buy_dex, opp.arb_sell_dex
-                    );
-                }
-
-                // Log to mempool execution CSV
-                if let Some(ref mut csv) = mempool_exec_csv {
-                    use std::io::Write;
-                    let ts = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
-                    let _ = writeln!(csv,
-                        "{},{},{},{:?},{:?},{:.4},{:.2},{},{:.4},{:.4},{:.4},{},{},mempool",
-                        ts,
-                        result.tx_hash.as_deref().unwrap_or(""),
-                        opp.pair_symbol,
-                        opp.arb_buy_dex,
-                        opp.arb_sell_dex,
-                        opp.arb_spread_pct,
-                        opp.arb_est_profit_usd,
-                        result_str,
-                        result.profit_usd,
-                        result.gas_cost_usd,
-                        result.net_profit_usd,
-                        exec_ms,
-                        lead_ms,
-                    );
-                    let _ = csv.flush();
-                }
-            }
-            Err(e) => {
-                error!("MEMPOOL EXEC ERROR: {}", e);
-                route_cooldown.record_failure(
-                    &opp.pair_symbol, opp.arb_buy_dex, opp.arb_sell_dex, last_block
-                );
-            }
-        }
+        hybrid_cache.insert(CachedOpportunity {
+            trigger_tx_hash: opp.tx_hash,
+            signal,
+            arb_opportunity: arb_opp,
+            cached_at: std::time::Instant::now(),
+        });
 
         continue; // Back to select! loop — don't fall through to block processing
     }
@@ -707,6 +677,10 @@ async fn main() -> Result<()> {
             }
 
             // --- Pool state sync ---
+            // Collect unique tx hashes from event logs for hybrid cache cross-reference.
+            // Zero-cost extraction — these logs are already fetched for pool sync.
+            let mut block_tx_hashes: Vec<B256> = Vec::new();
+
             // A3: Event-driven sync uses single eth_getLogs call (~50ms, 75 CU)
             // Poll fallback uses per-pool RPC calls (~400ms, ~1100 CU).
             // Toggle: EVENT_SYNC=true in .env to enable event-driven mode.
@@ -793,6 +767,11 @@ async fn main() -> Result<()> {
                             logger.log_prices(current_block, &current_pools);
                         }
 
+                        // Note: event log tx hashes are a SUBSET of all block txs.
+                        // Trigger tx may swap through a non-whitelisted pool, so its
+                        // hash won't appear in our Swap/Sync event logs.
+                        // Full block fetch happens in the hybrid check section below.
+
                         true
                     }
                     Err(e) => {
@@ -826,6 +805,110 @@ async fn main() -> Result<()> {
                     for pool in &v2_pools {
                         state_manager.update_pool(pool.clone());
                     }
+                }
+            }
+
+            // ── HYBRID PIPELINE: Check if any cached mempool triggers confirmed ──
+            // Pool state is now updated with this block's events, so the trigger's
+            // price impact is reflected. Execute cached opportunities whose trigger
+            // tx hash appears in this block's event logs.
+            if !hybrid_cache.is_empty() {
+                // Fetch full block tx hashes — trigger tx may swap through any pool,
+                // not just our whitelisted set. One extra RPC call per block when
+                // cache is active (~50ms on Alchemy, <1ms on IPC).
+                if let Ok(Some(full_block)) = provider
+                    .get_block_by_number(current_block.into())
+                    .await
+                {
+                    block_tx_hashes = full_block.transactions.hashes().collect();
+                }
+
+                let hits = hybrid_cache.check_block(&block_tx_hashes);
+                for cached in hits {
+                    let age_ms = cached.cached_at.elapsed().as_millis() as u64;
+                    let opp = &cached.signal.opportunity;
+                    info!(
+                        "HYBRID HIT: {} | trigger {:?} confirmed in block {} | age={}ms | executing...",
+                        opp.pair_symbol, cached.trigger_tx_hash, current_block, age_ms
+                    );
+
+                    // Execute via atomic path — pool state reflects trigger's effect
+                    let exec_start = std::time::Instant::now();
+                    match executor.execute(&cached.arb_opportunity).await {
+                        Ok(result) => {
+                            let exec_ms = exec_start.elapsed().as_millis() as u64;
+                            let result_str = if result.success { "SUCCESS" } else { "FAIL" };
+                            info!(
+                                "HYBRID {}: {} | ${:.4} net | {}ms exec | {}ms cache_age | tx={}",
+                                result_str, result.opportunity, result.net_profit_usd,
+                                exec_ms, age_ms,
+                                result.tx_hash.as_deref().unwrap_or("none"),
+                            );
+
+                            if !result.success {
+                                route_cooldown.record_failure(
+                                    &opp.pair_symbol, opp.arb_buy_dex, opp.arb_sell_dex, current_block
+                                );
+                            } else {
+                                route_cooldown.record_success(
+                                    &opp.pair_symbol, opp.arb_buy_dex, opp.arb_sell_dex
+                                );
+                            }
+
+                            // Log to mempool execution CSV
+                            if let Some(ref mut csv) = mempool_exec_csv {
+                                use std::io::Write;
+                                let ts = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
+                                let _ = writeln!(csv,
+                                    "{},{},{},{:?},{:?},{:.4},{:.2},{},{:.4},{:.4},{:.4},{},{},hybrid",
+                                    ts,
+                                    result.tx_hash.as_deref().unwrap_or(""),
+                                    opp.pair_symbol,
+                                    opp.arb_buy_dex,
+                                    opp.arb_sell_dex,
+                                    opp.arb_spread_pct,
+                                    opp.arb_est_profit_usd,
+                                    result_str,
+                                    result.profit_usd,
+                                    result.gas_cost_usd,
+                                    result.net_profit_usd,
+                                    exec_ms,
+                                    age_ms,
+                                );
+                                let _ = csv.flush();
+                            }
+                        }
+                        Err(e) => {
+                            error!("HYBRID EXEC ERROR: {}", e);
+                            route_cooldown.record_failure(
+                                &opp.pair_symbol, opp.arb_buy_dex, opp.arb_sell_dex, current_block
+                            );
+                        }
+                    }
+                }
+
+                // Cleanup stale entries (30s TTL — ~15 Polygon blocks)
+                let expired = hybrid_cache.cleanup(hybrid_ttl);
+                if expired > 0 {
+                    info!(
+                        "HYBRID: {} expired | stats: cached={} hits={} expired={} pending={}",
+                        expired, hybrid_cache.total_cached, hybrid_cache.total_hits,
+                        hybrid_cache.total_expired, hybrid_cache.pending_count()
+                    );
+                }
+
+                // Periodic stats logging
+                if current_block % 100 == 0 && hybrid_cache.total_cached > 0 {
+                    let hit_rate = if hybrid_cache.total_cached > 0 {
+                        (hybrid_cache.total_hits as f64 / hybrid_cache.total_cached as f64) * 100.0
+                    } else {
+                        0.0
+                    };
+                    info!(
+                        "HYBRID STATS: cached={} hits={} ({:.1}%) expired={} pending={}",
+                        hybrid_cache.total_cached, hybrid_cache.total_hits, hit_rate,
+                        hybrid_cache.total_expired, hybrid_cache.pending_count()
+                    );
                 }
             }
 
@@ -1030,6 +1113,7 @@ fn build_mempool_arb_opportunity(
     signal: &MempoolSignal,
     state_manager: &PoolStateManager,
     config: &dexarb_bot::types::BotConfig,
+    whitelist: &WhitelistFilter,
 ) -> Option<ArbitrageOpportunity> {
     let opp = &signal.opportunity;
 
@@ -1070,10 +1154,22 @@ fn build_mempool_arb_opportunity(
     // Supports both USDC.e (primary) and native USDC (secondary) on Polygon.
     let quote_token_is_token0 = config.is_quote_token(&token0);
 
-    // Trade size: max_trade_size_usd in USDC raw units (6 decimals)
+    // Trade size: per-pool-capped trade size in USDC raw units (6 decimals).
+    // Apply per-pool max_trade_size_usd caps from whitelist (adaptive sizing).
     let quote_decimals = if quote_token_is_token0 { t0_dec } else { t1_dec };
+    let mut effective_trade_size = config.max_trade_size_usd;
+    if let Some(addr) = buy_pool_addr {
+        if let Some(cap) = whitelist.max_trade_size_for(&addr) {
+            effective_trade_size = effective_trade_size.min(cap);
+        }
+    }
+    if let Some(addr) = sell_pool_addr {
+        if let Some(cap) = whitelist.max_trade_size_for(&addr) {
+            effective_trade_size = effective_trade_size.min(cap);
+        }
+    }
     let trade_size = U256::from(
-        (config.max_trade_size_usd * 10_f64.powi(quote_decimals as i32)) as u64
+        (effective_trade_size * 10_f64.powi(quote_decimals as i32)) as u64
     );
 
     let pair = TradingPair::new(token0, token1, opp.pair_symbol.clone());
