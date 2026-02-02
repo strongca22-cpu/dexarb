@@ -483,7 +483,7 @@
         "last_verified": "2026-02-02"
       },
       {
-        "address": "0xbb98b3d2b18aefd24a3d14cb59eac8fb04949688",
+        "address": "0xbb98b3d2b18aef63a3178023a920971cf5f29be4",
         "pair": "WETH/USDT",
         "dex": "UniswapV3",
         "fee_tier": 500,
@@ -509,7 +509,7 @@
         "usdt_pair": true
       },
       {
-        "address": "0xf6422b997c7f54d1c6a6e103bcb1499eea0a7f68",
+        "address": "0xf6422b997c7f54d1c6a6e103bcb1499eea0a7046",
         "pair": "WETH/USDT",
         "dex": "QuickSwapV2",
         "fee_tier": 3000,
@@ -522,7 +522,7 @@
         "usdt_pair": true
       },
       {
-        "address": "0xc2755915c3b1ce5aa4cf37dc5782817e43cf57da",
+        "address": "0xc2755915a85c6f6c1c0f3a86ac8c058f11caa9c9",
         "pair": "WETH/USDT",
         "dex": "SushiSwapV2",
         "fee_tier": 3000,
@@ -548,7 +548,7 @@
         "usdt_pair": true
       },
       {
-        "address": "0x781067ef296e5c6a83fdee0795879d8b03a3bb09",
+        "address": "0x781067ef296e5c4a4203f81c593274824b7c185d",
         "pair": "WMATIC/USDT",
         "dex": "UniswapV3",
         "fee_tier": 3000,
@@ -561,7 +561,7 @@
         "usdt_pair": true
       },
       {
-        "address": "0x604229c960e5cacf2aaf8852a468b7e3e85e3f26",
+        "address": "0x604229c960e5cacf2aaeac8be68ac07ba9df81c3",
         "pair": "WMATIC/USDT",
         "dex": "QuickSwapV2",
         "fee_tier": 3000,
@@ -587,7 +587,7 @@
         "usdt_pair": true
       },
       {
-        "address": "0x88aaeed1340c35e4e234e99ea56cca5a0c0f1b7f",
+        "address": "0x88aaeed1fcfca2eda30749afa9ad45a75c80e292",
         "pair": "DAI/USDT",
         "dex": "UniswapV3",
         "fee_tier": 3000,
