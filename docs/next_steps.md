@@ -1,21 +1,23 @@
 # Next Steps - DEX Arbitrage Bot
 
-## Status: PIVOT TO NODE MIGRATION — Hetzner Bor Node + alloy + Micro-Latency
+## Status: ALLOY MIGRATION COMPLETE — Ready for Hetzner Node + Deployment
 
-**Date:** 2026-02-01 (updated)
+**Date:** 2026-02-02 (updated)
 **Polygon:** 32 active pools (25 V3 + 7 V2), atomic via `ArbExecutorV3` (`0x7761...`), WS block sub, private RPC (1RPC)
 **Base:** 5 active V3 pools (whitelist v1.1), ArbExecutor deployed (`0x9054...`), EVENT_SYNC=true, dry-run (no mempool)
-**Build:** 73/73 Rust tests, clean release build. A4 mempool module (2,500+ LOC, 14 tests).
+**Build:** alloy 1.5.2 — 73/73 Rust tests, 0 warnings, clean release build. Zero ethers-rs dependencies.
 **Whitelist:** v1.6 — 32 active (23 original + 9 native USDC) + 22 blacklisted. Dual-USDC support deployed.
-**Mode:** 3 tmux sessions (livebot_polygon, botstatus, botwatch). Base offline pending A4 port.
+**Mode:** Bot offline (alloy validated 2hr live session, stopped for VPS resource conservation).
 **A4 Phase 3:** DEPLOYED + ANALYZED. 3 on-chain txs submitted. All reverted — **transaction ordering problem** confirmed (our tx lands before trigger in same block, spread doesn't exist yet).
+**A7 alloy migration:** DONE. Full ethers-rs → alloy 1.5 port on `feature/alloy-migration` branch. 2hr live validation passed. Alchemy mempool subscription fixed.
 **Key finding:** Polygon has no Flashbots-equivalent. Mempool backrunning without validator-level access is structurally limited. Code/latency is fine (263ms same-block delivery). Market structure (no ordered bundles) is the barrier.
 **Strategic pivot:** Own Bor node on Hetzner dedicated server → eliminate 250ms RPC latency → hybrid mempool-informed block-reactive strategy → long-tail pool expansion → micro-latency optimizations.
-**Next:** Order Hetzner, set up Bor node, migrate ethers-rs → alloy, expand pool coverage to 200+, collect long-tail data.
+**Next:** Order Hetzner, set up Bor node, add IPC transport (Phase 7), expand pool coverage to 200+, deploy streamlined alloy build.
 
-### Bugs Fixed This Session (uncommitted)
+### Bugs Fixed (committed)
 1. **PoolStateManager key collision** — `DashMap<(DexType, String)>` → `DashMap<Address>`. Native USDC pools were overwriting USDC.e pools. Fixed: 25 V3 pools now active (was 19).
 2. **chain_id=0 in mempool tx signing** — `execute_from_mempool()` skips `fill_transaction()` but forgot to set chain_id on EIP-1559 tx. Added `inner.chain_id = Some(self.config.chain_id.into())` in both RPC paths.
+3. **Alchemy mempool subscription (alloy)** — `subscribe_full_pending_transactions()` returns hashes only on Alchemy. Fixed: use raw `subscribe(("alchemy_pendingTransactions", params))` with `hashesOnly: false`.
 
 ---
 
@@ -107,7 +109,7 @@ Total: ~200-250ms from block to attempt.
 
 ## Architecture
 
-Monolithic bot: WS `subscribe_blocks()` → sync V3+V2 pools → price log → detect → atomic execute
+Monolithic bot (alloy 1.5): WS `subscribe_blocks()` → Header → sync V3+V2 pools → price log → detect → atomic execute
 
 **Current execution pipeline (after A0-A3):**
 ```
@@ -185,10 +187,11 @@ Total: ~700ms from block to revert
 | **A4 Phase 2 (simulator)** | **02-01** | **AMM state simulator: V2 constant product + V3 sqrtPrice math. 871 LOC, 11 tests. 0.04% median prediction error, 12 cross-DEX opps in 45min.** |
 | **Pool expansion scan** | **02-01** | **197 factory queries. 9 whitelist-quality native USDC pools found (all USDC.e dead). AAVE/USDC added. Whitelist v1.5. Catalog: `docs/pool_expansion_catalog.md`.** |
 | **A4 Phase 3 (execution)** | **02-01** | **Mempool execution pipeline: mpsc channel, tokio::select!, execute_from_mempool(), dynamic gas, skip estimateGas. A5 merged. Dual pipeline (block + mempool). LIVE.** |
+| **A7 alloy migration** | **02-02** | **Full ethers-rs → alloy 1.5 port. 27 files, 45 compilation fixes, 33 test fixes. 2hr live validation (4200 blocks, 167 opps). Alchemy mempool sub fixed. 73/73 tests, 0 warnings, zero ethers deps.** |
 
 ---
 
-## Immediate Next Steps — Hetzner Node Migration + alloy Port
+## Immediate Next Steps — Hetzner Node Migration (alloy Port DONE)
 
 ### Strategic Context
 
@@ -210,12 +213,15 @@ A4 Phase 3 mempool execution is live but structurally limited on Polygon:
 - Optimize P2P peering: add Polygon validator nodes as static/trusted peers
 - See: Separate Claude chat prompt for Hetzner setup walkthrough
 
-**Phase B: alloy Migration (during Bor sync dead time)**
-- Full ethers-rs → alloy migration on feature branch
-- 8 phases: types → U256 API → ABI → contracts → providers → tx building → IPC → validation
-- **Detailed plan:** `docs/alloy_port_plan.md`
-- Key wins: IPC transport to local node, `sol!` compile-time ABI, fewer allocations
-- Micro-latency savings: ~1-2ms (10-15% of hot path when network latency is <1ms)
+**Phase B: alloy Migration** — **DONE (2026-02-02)**
+- Full ethers-rs → alloy 1.5 migration on `feature/alloy-migration` branch
+- Phases 1-6 complete (types, U256, ABI, contracts, providers, tx building)
+- Phase 7 (IPC transport) deferred until Hetzner Bor node is running
+- Phase 8 (validation) partially done — 2hr live validation passed
+- **Detailed plan + status:** `docs/alloy_port_plan.md`
+- **Session summary:** `docs/session_summaries/2026-02-02_alloy_migration_completion.md`
+- Key wins achieved: `sol!` compile-time ABI, fewer allocations, modern maintained library
+- Remaining: IPC transport for local Bor node (~1ms vs 250ms RPC)
 
 **Phase C: Long-Tail Pool Expansion + Hybrid Pipeline**
 - Build pool discovery script (query factory contracts for all Polygon pools)
@@ -271,13 +277,13 @@ Block N confirmed (via IPC, <1ms)
 | **4** | Multi-path tx submission | Variable | After peering |
 | **4** | Local nonce tracking (no query) | 0.3-0.5ms | Already done (A2) |
 
-### Monitoring Checklist (current VPS — keep running)
+### Monitoring Checklist (VPS — alloy build validated)
 
-The current ethers-rs bot continues running on the Vultr VPS during migration:
+The alloy bot has been validated in a 2hr live session (2026-02-02). Bot is currently stopped.
 1. Review `data/polygon/mempool/mempool_executions_*.csv` periodically
 2. Gas spend is negligible (~$0.00/revert for reverts, ~$0.0002/on-chain revert)
-3. Bot serves as data collection baseline for comparison with Hetzner
-4. Do NOT shut down until Hetzner bot is validated end-to-end
+3. Restart alloy bot when ready for extended data collection: `tmux new-session -d -s livebot_polygon "cd ~/bots/dexarb/src/rust-bot && ./target/release/dexarb-bot --chain polygon 2>&1 | tee ~/bots/dexarb/data/polygon/logs/livebot_alloy_$(date +%Y%m%d_%H%M%S).log"`
+4. Next deploy target: Hetzner dedicated server with Bor node + IPC transport
 
 ---
 
@@ -339,7 +345,7 @@ The 99.1% revert rate is structural. A3 is the diagnostic: if speed alone is the
 - **Config:** `MEMPOOL_MIN_PRIORITY_GWEI=1000`, `MEMPOOL_GAS_PROFIT_CAP=0.50` in `.env.polygon`.
 - **Risk:** On-chain reverts cost ~$0.01. Break-even if >5% of mempool signals succeed.
 
-### Tier 2: Hetzner Node + alloy Migration — NEXT
+### Tier 2: Hetzner Node + alloy Migration — A7 DONE, A6 NEXT
 
 **A6: Hetzner Dedicated Server + Bor Node**
 - **What:** Own Polygon full node on dedicated hardware, co-located with the bot
@@ -348,12 +354,14 @@ The 99.1% revert rate is structural. A3 is the diagnostic: if speed alone is the
 - **Setup guide:** Separate Claude chat session (prompt saved)
 - **Key config:** Enable txpool API, IPC endpoint, optimize P2P peering with validators
 
-**A7: ethers-rs → alloy Migration**
-- **What:** Full migration from ethers-rs 2.0 to alloy (successor library)
+**A7: ethers-rs → alloy Migration** — **DONE (2026-02-02)**
+- **What:** Full migration from ethers-rs 2.0 to alloy 1.5 (successor library)
 - **Why:** IPC transport support, 1-2ms hot-path savings, maintained library, sol! macro
-- **Scope:** ~20 files, 14 abigen! → sol! conversions, all provider/signer patterns
-- **Plan:** `docs/alloy_port_plan.md` (8 phases, phase-by-phase build+test)
-- **Timing:** During Bor sync dead time on Hetzner
+- **Scope:** 27 files changed (+2830/-2427), 45 compilation fixes, 33 test fixes
+- **Validation:** 2hr live session (4200 blocks, 167 opps, stable WS, zero reconnects)
+- **Plan:** `docs/alloy_port_plan.md` (Phases 1-6 done, Phase 7 IPC deferred, Phase 8 partial)
+- **Branch:** `feature/alloy-migration` — ready to merge to main
+- **Remaining:** Phase 7 (IPC transport) — add when Hetzner Bor node is running
 
 **A8: Hybrid Mempool-Informed Block-Reactive Pipeline**
 - **What:** Use mempool signals to pre-build txs, execute on block confirmation
@@ -407,7 +415,7 @@ The 99.1% revert rate is structural. A3 is the diagnostic: if speed alone is the
 |----------|-----|----------|
 | **Lower MIN_PROFIT** | Smaller spreads are even more contested. | No |
 | **Better private RPC** | No MEV auction exists on Polygon. FastLane dead. | No |
-| **ethers-rs tuning alone** | 1-2ms savings irrelevant at 250ms RPC latency. | YES — matters on local node |
+| **ethers-rs tuning alone** | Migrated to alloy 1.5 (A7 DONE). IPC pending Hetzner. | DONE — IPC next |
 | **More pairs on Alchemy** | Rate-limited at 30M CU/month. | YES — no limits on own node |
 | **Co-location near exchange** | DEX arb isn't centralized exchange HFT. Co-locate near validators instead. | YES — Hetzner Frankfurt |
 
@@ -417,7 +425,7 @@ The 99.1% revert rate is structural. A3 is the diagnostic: if speed alone is the
 |----------|----------------|--------|
 | **Own Bor node** | 250ms → <1ms block/mempool | PLANNED (A6) |
 | **Validator peering** | 50-200ms faster block arrival | PLANNED (A6 config) |
-| **alloy + IPC** | 1-2ms compute savings (now 10-15% of total) | PLANNED (A7) |
+| **alloy + IPC** | 1-2ms compute savings (now 10-15% of total) | **A7 DONE** — IPC pending Bor node |
 | **Hybrid pipeline** | Pre-built txs, 5-10ms total execution | PLANNED (A8) |
 | **200+ pool coverage** | Access long-tail uncaptured opportunities | PLANNED (A9) |
 | **Micro-latency stack** | CPU pinning, huge pages, arena alloc | AFTER migration |
@@ -604,8 +612,9 @@ tmux new-session -d -s dexarb-base "cd ~/bots/dexarb/src/rust-bot && ./target/re
 | `docs/session_summaries/2026-02-01_pool_expansion_scan.md` | Pool expansion: factory scan, native USDC discovery, whitelist v1.5 |
 | `docs/session_summaries/2026-02-01_a4_phase3_execution.md` | A4 Phase 3: mempool execution pipeline, dynamic gas, deploy |
 | `docs/pool_expansion_catalog.md` | Full pool expansion catalog: tiers, addresses, implementation roadmap |
-| `docs/alloy_port_plan.md` | **NEW** — ethers-rs → alloy migration plan: 8 phases, file-by-file mapping, type conversion tables |
+| `docs/alloy_port_plan.md` | ethers-rs → alloy migration plan: 8 phases, file-by-file mapping, type conversion tables |
+| `docs/session_summaries/2026-02-02_alloy_migration_completion.md` | **NEW** — alloy migration: 45 compile fixes, 33 test fixes, 2hr live validation, API reference table |
 
 ---
 
-*Last updated: 2026-02-01 (strategic pivot to Hetzner node) — A4 Phase 3 analyzed: 3 on-chain txs, all reverted due to Polygon tx ordering (no Flashbots equivalent). Key collision fix (DashMap Address-keyed) + chain_id fix deployed. 32 pools active (25 V3 + 7 V2). Next: Hetzner dedicated server + Bor node + alloy migration + long-tail pool expansion. See `docs/alloy_port_plan.md` for migration details.*
+*Last updated: 2026-02-02 (alloy migration complete) — A7 ethers-rs → alloy 1.5 migration DONE: 27 files, 45 compile fixes, 33 test fixes, 73/73 tests, 0 warnings, zero ethers-rs deps. 2hr live validation passed (4200 blocks, 167 opps, stable WS). Alchemy mempool subscription fixed (raw subscribe with alchemy_pendingTransactions). Branch: `feature/alloy-migration`. Next: merge to main, order Hetzner, set up Bor node, add IPC transport (Phase 7), expand to 200+ pools.*
