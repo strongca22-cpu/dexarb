@@ -1273,9 +1273,11 @@ fn build_mempool_arb_opportunity(
         state_manager.get_pool(opp.arb_sell_dex, &opp.pair_symbol).map(|p| p.address)
     };
 
-    // Determine quote_token_is_token0 by comparing pool's token0 with known quote tokens.
-    // Supports both USDC.e (primary) and native USDC (secondary) on Polygon.
-    let quote_token_is_token0 = config.is_quote_token(&token0);
+    // Determine quote_token_is_token0 via priority-based selection.
+    // Supports all 5 quote tokens: USDC.e, nUSDC, USDT, WETH, WMATIC.
+    // When both tokens are quote tokens (e.g., WMATIC/USDC.e), picks the higher-priority one.
+    let quote_token_is_token0 = config.preferred_quote_token(&token0, &token1)
+        .map_or(false, |qt| qt == token0);
 
     // Trade size: per-pool-capped trade size in USDC raw units (6 decimals).
     // Apply per-pool max_trade_size_usd caps from whitelist (adaptive sizing).

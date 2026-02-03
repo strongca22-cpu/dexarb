@@ -619,25 +619,73 @@ pub struct BotConfig {
     // A 10% WETH price move changes min_profit by ~$0.01 — irrelevant for safety threshold.
     // Default: 3300.0 (updated periodically, not latency-sensitive).
     pub weth_price_usd: f64,
+
+    // Quinary quote token address (WMATIC on Polygon).
+    // When set, pools using WMATIC are eligible for arbitrage.
+    // WMATIC arbs are isolated: WMATIC pools only compare against other WMATIC pools.
+    // WMATIC has 18 decimals (same as WETH).
+    // Polygon WMATIC: 0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270
+    // IMPORTANT: WMATIC is also a base token in WMATIC/USDC, WMATIC/WETH pairs.
+    // The preferred_quote_token() method ensures WMATIC is only selected as quote
+    // when the other token is NOT a higher-priority quote (stablecoins > WETH > WMATIC).
+    pub quote_token_address_wmatic: Option<Address>,
 }
 
 impl BotConfig {
-    /// Check if an address is any recognized quote token (primary, native, USDT, or WETH).
+    /// Check if an address is any recognized quote token (primary, native, USDT, WETH, or WMATIC).
     /// Used by detector, simulator, and mempool handler to determine swap direction.
     pub fn is_quote_token(&self, addr: &Address) -> bool {
         *addr == self.quote_token_address
             || self.quote_token_address_native.map_or(false, |a| a == *addr)
             || self.quote_token_address_usdt.map_or(false, |a| a == *addr)
             || self.quote_token_address_weth.map_or(false, |a| a == *addr)
+            || self.quote_token_address_wmatic.map_or(false, |a| a == *addr)
+    }
+
+    /// Returns the priority of a quote token (higher = preferred as quote).
+    /// When both tokens in a pool are recognized quote tokens (e.g., WMATIC/USDC.e),
+    /// the one with higher priority is selected as the quote.
+    /// This prevents WMATIC from being picked as quote in WMATIC/USDC or WMATIC/WETH pools.
+    fn quote_priority(&self, addr: &Address) -> u8 {
+        if *addr == self.quote_token_address { 5 }                                              // USDC.e
+        else if self.quote_token_address_native.map_or(false, |a| a == *addr) { 4 }             // nUSDC
+        else if self.quote_token_address_usdt.map_or(false, |a| a == *addr) { 3 }               // USDT
+        else if self.quote_token_address_weth.map_or(false, |a| a == *addr) { 2 }               // WETH
+        else if self.quote_token_address_wmatic.map_or(false, |a| a == *addr) { 1 }             // WMATIC
+        else { 0 }
+    }
+
+    /// Select the preferred quote token from two pool tokens.
+    /// Returns None if neither token is a recognized quote token.
+    /// When both tokens are quote tokens, returns the one with higher priority:
+    ///   USDC.e (5) > nUSDC (4) > USDT (3) > WETH (2) > WMATIC (1)
+    pub fn preferred_quote_token(&self, a: &Address, b: &Address) -> Option<Address> {
+        let a_qt = self.is_quote_token(a);
+        let b_qt = self.is_quote_token(b);
+        match (a_qt, b_qt) {
+            (true, true) => {
+                if self.quote_priority(a) >= self.quote_priority(b) {
+                    Some(*a)
+                } else {
+                    Some(*b)
+                }
+            }
+            (true, false) => Some(*a),
+            (false, true) => Some(*b),
+            (false, false) => None,
+        }
     }
 
     /// Returns the USD price of a quote token.
     /// Stablecoins (USDC.e, native USDC, USDT) → 1.0
     /// WETH → weth_price_usd (from env, default 3300.0)
+    /// WMATIC → native_token_price_usd (from env, default 0.50)
     /// Used for USD→raw-token conversion (trade_size, min_profit_raw).
     pub fn quote_token_usd_price(&self, addr: &Address) -> f64 {
         if self.quote_token_address_weth.map_or(false, |a| a == *addr) {
             self.weth_price_usd
+        } else if self.quote_token_address_wmatic.map_or(false, |a| a == *addr) {
+            self.native_token_price_usd
         } else {
             1.0
         }

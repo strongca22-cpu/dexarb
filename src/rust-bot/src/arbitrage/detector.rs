@@ -153,15 +153,14 @@ impl OpportunityDetector {
                 continue;
             }
 
-            // Determine which quote token this pool uses (USDC.e or native USDC).
+            // Determine which quote token this pool uses.
             // V3 pools sort token0 < token1 by address. The quote token is whichever
             // of token0/token1 matches a recognized quote token address.
-            let qt = if self.config.is_quote_token(&pool.pair.token0) {
-                pool.pair.token0
-            } else if self.config.is_quote_token(&pool.pair.token1) {
-                pool.pair.token1
-            } else {
-                continue; // Neither token is a known quote token — skip
+            // When both tokens are quote tokens (e.g., WMATIC/USDC), preferred_quote_token
+            // picks the higher-priority one (stablecoins > WETH > WMATIC).
+            let qt = match self.config.preferred_quote_token(&pool.pair.token0, &pool.pair.token1) {
+                Some(qt) => qt,
+                None => continue, // Neither token is a known quote token — skip
             };
 
             // Quote token decimals: if qt is token0, use token0_decimals; else token1_decimals
@@ -221,13 +220,10 @@ impl OpportunityDetector {
                 pool.reserve1.to::<u128>(),
             );
 
-            // Determine quote token for this V2 pool
-            let qt = if self.config.is_quote_token(&pool.pair.token0) {
-                pool.pair.token0
-            } else if self.config.is_quote_token(&pool.pair.token1) {
-                pool.pair.token1
-            } else {
-                continue; // Neither token is a known quote token — skip
+            // Determine quote token for this V2 pool (priority-based when both match)
+            let qt = match self.config.preferred_quote_token(&pool.pair.token0, &pool.pair.token1) {
+                Some(qt) => qt,
+                None => continue, // Neither token is a known quote token — skip
             };
 
             // Quote token decimals: if qt is token0, use token0_decimals; else token1_decimals
@@ -691,6 +687,7 @@ mod tests {
             quote_token_address_usdt: None,
             quote_token_address_weth: None,
             weth_price_usd: 3300.0,
+            quote_token_address_wmatic: None,
         }
     }
 

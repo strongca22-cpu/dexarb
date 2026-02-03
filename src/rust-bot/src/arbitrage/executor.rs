@@ -50,9 +50,13 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tracing::{debug, error, info, warn};
 
-/// Helper: convert u32 fee tier to alloy U24 (same as in v3_syncer.rs)
+/// Helper: convert u32 fee tier to alloy U24.
+/// Uses from_limbs() because Uint<24, 1> doesn't impl From<u32>.
+/// All valid fee values fit in 24 bits: V3 tiers (100-10000),
+/// Algebra sentinel (0), V2 sentinel (16777215 = 0xFFFFFF).
 fn fee_to_u24(fee: u32) -> alloy::primitives::Uint<24, 1> {
-    alloy::primitives::Uint::from(fee as u16)
+    debug_assert!(fee <= 0xFFFFFF, "fee {} exceeds U24 max (16777215)", fee);
+    alloy::primitives::Uint::from_limbs([fee as u64])
 }
 
 /// Result of a successful atomic tx submission (before receipt).

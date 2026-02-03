@@ -126,6 +126,11 @@ fn load_config_inner() -> Result<BotConfig> {
         .and_then(|v| v.parse().ok())
         .unwrap_or(3300.0);
 
+    // Quinary quote token (WMATIC on Polygon — 18 decimals, same as WETH)
+    let quote_token_address_wmatic = std::env::var("QUOTE_TOKEN_ADDRESS_WMATIC")
+        .ok()
+        .and_then(|s| Address::from_str(&s).ok());
+
     // Native token price — must resolve before chain_name is moved into BotConfig
     let native_token_price_usd: f64 = std::env::var("NATIVE_TOKEN_PRICE_USD")
         .ok()
@@ -264,5 +269,6 @@ fn load_config_inner() -> Result<BotConfig> {
         quote_token_address_usdt,
         quote_token_address_weth,
         weth_price_usd,
+        quote_token_address_wmatic,
     })
 }

@@ -45,9 +45,11 @@ pub const SUSHI_V3_FEE_TIERS: [(u32, DexType); 3] = [
     (3000, DexType::SushiV3_030),  // 0.30% - standard tier
 ];
 
-/// Helper: convert u32 fee tier to alloy uint24 type for contract calls
+/// Helper: convert u32 fee tier to alloy uint24 type for contract calls.
+/// Uses from_limbs() because Uint<24, 1> doesn't impl From<u32>.
 fn fee_to_u24(fee: u32) -> alloy::primitives::Uint<24, 1> {
-    alloy::primitives::Uint::from(fee as u16)
+    debug_assert!(fee <= 0xFFFFFF, "fee {} exceeds U24 max (16777215)", fee);
+    alloy::primitives::Uint::from_limbs([fee as u64])
 }
 
 /// Syncs V3 pool state from blockchain
