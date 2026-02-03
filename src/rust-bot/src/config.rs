@@ -143,6 +143,17 @@ fn load_config_inner() -> Result<BotConfig> {
             }
         });
 
+    // Priority fee — must resolve before chain_name is moved into BotConfig
+    let priority_fee_gwei: u64 = std::env::var("PRIORITY_FEE_GWEI")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or_else(|| {
+            match chain_name.as_str() {
+                "base" => 1,       // Base L2: FCFS sequencer, no MEV auction
+                _ => 5000,         // Polygon: MEV-competitive priority
+            }
+        });
+
     Ok(BotConfig {
         rpc_url: std::env::var("RPC_URL")?,
         chain_id: std::env::var("CHAIN_ID")?.parse()?,
@@ -260,6 +271,7 @@ fn load_config_inner() -> Result<BotConfig> {
             .unwrap_or(0.50),
 
         native_token_price_usd,
+        priority_fee_gwei,
         quote_token_address_native,
 
         // Separate WS RPC URL for mempool monitor (optional).

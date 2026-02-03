@@ -587,6 +587,12 @@ pub struct BotConfig {
     // Set via NATIVE_TOKEN_PRICE_USD env var.
     pub native_token_price_usd: f64,
 
+    // Priority fee for tx submission in gwei. Chain-specific:
+    //   Polygon: 5000 gwei (MEV-competitive, ~$0.002/tx at MATIC $0.10)
+    //   Base: 1 gwei (FCFS sequencer, no MEV auction)
+    // Set via PRIORITY_FEE_GWEI env var. Default: 5000 (Polygon backwards compat).
+    pub priority_fee_gwei: u64,
+
     // Secondary quote token address (native USDC on Polygon).
     // When set, pools using either USDC variant are eligible for arbitrage.
     // Pools with different quote tokens are never compared against each other.

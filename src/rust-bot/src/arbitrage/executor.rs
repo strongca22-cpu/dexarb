@@ -28,6 +28,8 @@
 //! Modified: 2026-01-30 (Atomic execution via ArbExecutor.sol contract)
 //! Modified: 2026-01-30 (QuickSwap V3 / Algebra router + quoter support)
 //! Modified: 2026-02-01 (Migrated from ethers-rs to alloy)
+//! Modified: 2026-02-03 (Fix: add .with_from() to estimateGas calls — OnlyOwner revert;
+//!           Fix: ws_to_http_url conversion for public path connect_http — builder error)
 
 use crate::contracts::{
     IArbExecutor, IAlgebraQuoter, IAlgebraSwapRouter, IERC20, IQuoter, IQuoterV2,
@@ -49,6 +51,19 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tracing::{debug, error, info, warn};
+
+/// Helper: convert WS URL to HTTP URL for tx submission.
+/// Alchemy and other providers serve both WS and HTTP on the same path.
+/// connect_http() requires http(s):// scheme, not ws(s)://.
+fn ws_to_http_url(url: &str) -> String {
+    if url.starts_with("wss://") {
+        url.replacen("wss://", "https://", 1)
+    } else if url.starts_with("ws://") {
+        url.replacen("ws://", "http://", 1)
+    } else {
+        url.to_string()
+    }
+}
 
 /// Helper: convert u32 fee tier to alloy U24.
 /// Uses from_limbs() because Uint<24, 1> doesn't impl From<u32>.
@@ -442,7 +457,7 @@ impl<P: Provider + 'static> TradeExecutor<P> {
                 self.provider.get_gas_price().await?
             }
         };
-        let priority_fee: u128 = 5_000_000_000_000; // 5000 gwei
+        let priority_fee: u128 = (self.config.priority_fee_gwei as u128) * 1_000_000_000;
         let max_fee: u128 = base_fee + priority_fee;
 
         // ArbExecutor.sol token0 = "base token" (start & end) = USDC (quote token)
@@ -504,6 +519,7 @@ impl<P: Provider + 'static> TradeExecutor<P> {
             }.abi_encode();
 
             let mut tx = alloy::rpc::types::TransactionRequest::default()
+                .with_from(self.wallet.address())
                 .with_to(arb_address)
                 .with_input(call_data)
                 .with_nonce(current_nonce)
@@ -533,10 +549,12 @@ impl<P: Provider + 'static> TradeExecutor<P> {
             }
         } else {
             // Public path: use signing provider with contract call builder.
+            // Convert WS URL to HTTP — connect_http requires http(s):// scheme.
+            let http_url = ws_to_http_url(&self.config.rpc_url);
             let wallet = EthereumWallet::from(self.wallet.clone());
             let signer_provider = ProviderBuilder::new()
                 .wallet(wallet)
-                .connect_http(self.config.rpc_url.parse().unwrap());
+                .connect_http(http_url.parse().unwrap());
             let contract = IArbExecutor::new(arb_address, &signer_provider);
             contract.executeArb(
                 token0, token1, router_buy, router_sell,
@@ -776,7 +794,7 @@ impl<P: Provider + 'static> TradeExecutor<P> {
                     amount_in: Some(opportunity.trade_size.to_string()), amount_out: None,
                 })?,
         };
-        let priority_fee: u128 = 5_000_000_000_000; // 5000 gwei
+        let priority_fee: u128 = (self.config.priority_fee_gwei as u128) * 1_000_000_000;
         let max_fee: u128 = base_fee + priority_fee;
 
         // Token ordering
@@ -833,6 +851,7 @@ impl<P: Provider + 'static> TradeExecutor<P> {
             }.abi_encode();
 
             let mut tx = alloy::rpc::types::TransactionRequest::default()
+                .with_from(self.wallet.address())
                 .with_to(arb_address)
                 .with_input(call_data)
                 .with_nonce(current_nonce)
@@ -866,10 +885,12 @@ impl<P: Provider + 'static> TradeExecutor<P> {
                 Err(e) => Err(format!("Send failed (private): {}", e))
             }
         } else {
+            // Public path: convert WS URL to HTTP for connect_http.
+            let http_url = ws_to_http_url(&self.config.rpc_url);
             let wallet = EthereumWallet::from(self.wallet.clone());
             let signer_provider = ProviderBuilder::new()
                 .wallet(wallet)
-                .connect_http(self.config.rpc_url.parse().unwrap());
+                .connect_http(http_url.parse().unwrap());
             let contract = IArbExecutor::new(arb_address, &signer_provider);
             contract.executeArb(
                 token0, token1, router_buy, router_sell,
@@ -1063,6 +1084,7 @@ impl<P: Provider + 'static> TradeExecutor<P> {
                   priority_fee as f64 / 1e9, current_nonce, gas_limit / 1000);
 
             let mut tx = alloy::rpc::types::TransactionRequest::default()
+                .with_from(self.wallet.address())
                 .with_to(arb_address)
                 .with_input(call_data.clone())
                 .with_nonce(current_nonce)
@@ -1091,6 +1113,7 @@ impl<P: Provider + 'static> TradeExecutor<P> {
                   priority_fee as f64 / 1e9, current_nonce);
 
             let mut tx = alloy::rpc::types::TransactionRequest::default()
+                .with_from(self.wallet.address())
                 .with_to(arb_address)
                 .with_input(call_data)
                 .with_nonce(current_nonce)
