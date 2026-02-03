@@ -8,6 +8,7 @@
 # Modified: 2026-01-31 - Multi-chain naming (livebot.polygon), prominent status indicator
 # Modified: 2026-02-01 - Multi-chain report: separate Polygon (LIVE) + Base (DRY-RUN) sections
 # Modified: 2026-02-01 - A4 Phase 3: mempool execution stats (signals, executions, successes)
+# Modified: 2026-02-03 - Base now LIVE (funded $150 USDC), detect live/dry-run from .env.base
 #
 # Usage:
 #   # One-shot:
@@ -83,7 +84,7 @@ build_proc_detail() {
 collect_log_stats() {
     local log_dir="$1"
     local LOG_FILE
-    LOG_FILE="$(ls -t "$log_dir"/livebot*.log 2>/dev/null | head -1 || echo "")"
+    LOG_FILE="$(ls -t "$log_dir"/live*.log 2>/dev/null | head -1 || echo "")"
 
     if [ -z "$LOG_FILE" ] || [ ! -f "$LOG_FILE" ]; then
         _LOG_LINES=0
@@ -148,7 +149,14 @@ build_report() {
     local base_pid base_proc base_status
     base_pid=$(find_chain_pid "base")
     base_proc=$(build_proc_detail "$base_pid")
-    [ -n "$base_pid" ] && base_status="DRY-RUN" || base_status="DOWN"
+    if [ -n "$base_pid" ]; then
+        # Detect live vs dry-run from .env.base
+        local base_live
+        base_live=$(grep '^LIVE_MODE=true' "$BOT_DIR/src/rust-bot/.env.base" 2>/dev/null || echo "")
+        [ -n "$base_live" ] && base_status="LIVE" || base_status="DRY-RUN"
+    else
+        base_status="DOWN"
+    fi
 
     collect_log_stats "$BASE_LOG_DIR"
     local base_log_lines="$_LOG_LINES"
@@ -178,7 +186,7 @@ Attempts:  $pol_attempts  Completed: $pol_completed  HALTs: $pol_halts
 Mempool:   $pol_mp_signals signals | $pol_mp_success ok | $pol_mp_fail fail
 Latest:    $pol_latest
 \`\`\`
-**dryrun.base** [$base_status] — paper trading, unfunded
+**livebot.base** [$base_status]
 \`\`\`
 Process:   $base_proc
 Wallet:    $base_usdc USDC | $base_eth ETH (gas only)
@@ -199,7 +207,7 @@ fi
 
 if [ "${1:-}" = "--loop" ]; then
     echo "Starting status loop (every 30 min, aligned to :00/:30)..."
-    echo "Reporting: Polygon (LIVE) + Base (DRY-RUN)"
+    echo "Reporting: Polygon + Base (status auto-detected from config)"
     while true; do
         report=$(build_report)
         http_code=$(send_discord "$report")

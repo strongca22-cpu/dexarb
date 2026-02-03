@@ -1,7 +1,7 @@
 {
-  "version": "1.1",
-  "last_updated": "2026-01-31T09:20:00Z",
-  "changelog": "v1.1: Enhanced verification (verify_whitelist_enhanced.py --chain base). Promoted SushiV3 0.30% from observation to active (score=90, 4.7% impact@$5k). Fixed JSON to match Rust struct schema (ObservationPool.concern, BlacklistPool.date_added, BlacklistTier.applies_to). 5 active, 1 observation, 2 blacklisted. All WETH/USDC.",
+  "version": "2.0",
+  "last_updated": "2026-02-03T03:00:00Z",
+  "changelog": "v2.0: Phase 1 pool expansion. Added DAI/USDC pair (2 active cross-DEX at 0.01%, 4 observation). WETH quote token configured in .env.base. WETH-quoted pools (DAI/WETH, AERO/WETH, cbETH/WETH, DEGEN/WETH) staged in observation — pending WETH wallet funding. 7 active, 15 observation, 2 blacklisted.",
   "config": {
     "default_min_liquidity": 1000000000000,
     "whitelist_enforcement": "strict",
@@ -68,11 +68,33 @@
         "notes": "SushiSwap V3 0.30% cross-DEX. Score=90, 4.7% impact@$5k. Promoted from observation v1.1.",
         "added": "2026-01-31",
         "last_verified": "2026-01-31"
+      },
+      {
+        "address": "0xC18F50d6A832f12F6DcAaeEe8D0c87A65B96787E",
+        "pair": "DAI/USDC",
+        "dex": "UniswapV3",
+        "fee_tier": 100,
+        "status": "active",
+        "min_liquidity": 5000000000000,
+        "notes": "Deep 0.01% tier (45.28T liq). Primary cross-DEX anchor for DAI/USDC arb.",
+        "added": "2026-02-03",
+        "last_verified": "2026-02-03"
+      },
+      {
+        "address": "0x3BD740dc10864f35001AAB7771C56a85C48c901B",
+        "pair": "DAI/USDC",
+        "dex": "SushiswapV3",
+        "fee_tier": 100,
+        "status": "active",
+        "min_liquidity": 1000000000000,
+        "notes": "SushiV3 0.01% cross-DEX counterpart (5.23T liq). Core DAI/USDC cross-DEX arb pair.",
+        "added": "2026-02-03",
+        "last_verified": "2026-02-03"
       }
     ]
   },
   "observation": {
-    "comment": "Pools under observation — good liquidity but banned fee tier prevents arb profitability.",
+    "comment": "Pools under observation. Grouped by: (1) banned fee tier, (2) thin DAI/USDC, (3) WETH-quoted pending funding.",
     "pools": [
       {
         "address": "0x0b1C2DCbBfA744ebD3fC17fF1A96A1E1Eb4B2d69",
@@ -81,6 +103,132 @@
         "status": "observation",
         "concern": "1% fee tier banned — 2% RT cost kills arb despite excellent depth (score=100, 1.8% impact@$5k). Promote only if fee tier ban lifted.",
         "added": "2026-01-31"
+      },
+      {
+        "address": "0x19a8B1542B807Cd6a76fcbb5fF5F53c6169F36d7",
+        "pair": "DAI/USDC",
+        "dex": "UniswapV3",
+        "fee_tier": 500,
+        "status": "observation",
+        "concern": "Thin liquidity (264.9B). Promote if liquidity grows above 1T or if depth assessment shows adequate for $100 trades.",
+        "added": "2026-02-03"
+      },
+      {
+        "address": "0x7b0167b54294f8Fe6b14AAF70cc934D0D4f3F8db",
+        "pair": "DAI/USDC",
+        "dex": "SushiswapV3",
+        "fee_tier": 500,
+        "status": "observation",
+        "concern": "Thin liquidity (90.0B). Cross-DEX potential at 0.05% tier if liquidity grows.",
+        "added": "2026-02-03"
+      },
+      {
+        "address": "0xE63174BC0EE37B76D28956B680AF6BA4c508F48A",
+        "pair": "DAI/USDC",
+        "dex": "UniswapV3",
+        "fee_tier": 3000,
+        "status": "observation",
+        "concern": "Thin liquidity (196.3B). Monitor for growth.",
+        "added": "2026-02-03"
+      },
+      {
+        "address": "0xf336D4b2CAE611133Bb72bA6f68F73d12B160a48",
+        "pair": "DAI/USDC",
+        "dex": "SushiswapV3",
+        "fee_tier": 3000,
+        "status": "observation",
+        "concern": "Thin liquidity (269.8B). Cross-DEX at 0.30% if liquidity grows.",
+        "added": "2026-02-03"
+      },
+      {
+        "address": "0x751864805acCC54ce46E09fB7F6c46c907Ac8590",
+        "pair": "DAI/WETH",
+        "dex": "UniswapV3",
+        "fee_tier": 100,
+        "status": "observation",
+        "concern": "PENDING WETH FUNDING. Deep (3.755T liq). Promote to active when WETH-quoted pairs are activated.",
+        "added": "2026-02-03"
+      },
+      {
+        "address": "0x93e8542E6CA0eFFfb9D57a270b76712b968A38f5",
+        "pair": "DAI/WETH",
+        "dex": "UniswapV3",
+        "fee_tier": 500,
+        "status": "observation",
+        "concern": "PENDING WETH FUNDING. Deep (158.3T liq). Promote to active when WETH-quoted pairs are activated.",
+        "added": "2026-02-03"
+      },
+      {
+        "address": "0xDcf81663E68f076EF9763442DE134Fd0699de4ef",
+        "pair": "DAI/WETH",
+        "dex": "UniswapV3",
+        "fee_tier": 3000,
+        "status": "observation",
+        "concern": "PENDING WETH FUNDING. Deep (69.55T liq). Promote to active when WETH-quoted pairs are activated.",
+        "added": "2026-02-03"
+      },
+      {
+        "address": "0xcBe12d2C0d16F1868EBf68040c28DE86aE28e61b",
+        "pair": "DAI/WETH",
+        "dex": "SushiswapV3",
+        "fee_tier": 100,
+        "status": "observation",
+        "concern": "PENDING WETH FUNDING. Moderate (562.9B liq). Cross-DEX counterpart to UniV3 0.01%.",
+        "added": "2026-02-03"
+      },
+      {
+        "address": "0x77BC7BFb2a37a3bC583117E05fAb2Ae4526e7102",
+        "pair": "DAI/WETH",
+        "dex": "SushiswapV3",
+        "fee_tier": 500,
+        "status": "observation",
+        "concern": "PENDING WETH FUNDING. Moderate (69.09B liq). Cross-DEX counterpart to UniV3 0.05%.",
+        "added": "2026-02-03"
+      },
+      {
+        "address": "0x4D734eAF2102407825f45571D51FC7C4DaE86fF8",
+        "pair": "DAI/WETH",
+        "dex": "SushiswapV3",
+        "fee_tier": 3000,
+        "status": "observation",
+        "concern": "PENDING WETH FUNDING. Deep (35.4T liq). Cross-DEX counterpart to UniV3 0.30%.",
+        "added": "2026-02-03"
+      },
+      {
+        "address": "0x3d5D143381916280ff91407FeBEB52f2b60f33Cf",
+        "pair": "AERO/WETH",
+        "dex": "UniswapV3",
+        "fee_tier": 3000,
+        "status": "observation",
+        "concern": "PENDING WETH FUNDING. Deep (70.37T liq). Cross-DEX with SushiV3 0.30%.",
+        "added": "2026-02-03"
+      },
+      {
+        "address": "0xF39Bb887261cAed35790c8CBe7Da6b38DA1aAE70",
+        "pair": "AERO/WETH",
+        "dex": "SushiswapV3",
+        "fee_tier": 3000,
+        "status": "observation",
+        "concern": "PENDING WETH FUNDING. Good (5.752T liq). Cross-DEX counterpart to UniV3 0.30%.",
+        "added": "2026-02-03"
+      },
+      {
+        "address": "0x10648BA41B8565907Cfa1496765fA4D95390aa0d",
+        "pair": "cbETH/WETH",
+        "dex": "UniswapV3",
+        "fee_tier": 500,
+        "status": "observation",
+        "concern": "PENDING WETH FUNDING. Massive (4,930T liq). Cross-DEX with SushiV3 0.05%.",
+        "added": "2026-02-03"
+      },
+      {
+        "address": "0xb81B9Aef36c76d740850C31C45697c83468DCB54",
+        "pair": "cbETH/WETH",
+        "dex": "SushiswapV3",
+        "fee_tier": 500,
+        "status": "observation",
+        "concern": "PENDING WETH FUNDING. Deep (1,587T liq). Cross-DEX counterpart to UniV3 0.05%.",
+        "added": "2026-02-03"
       }
     ]
   },
